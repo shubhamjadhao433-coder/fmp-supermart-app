@@ -1,0 +1,6 @@
+{
+  "name": "FMP Supermart - Karanja Lad Grocery Delivery",
+  "description": "Complete production-ready grocery delivery platform for Karanja Lad, Maharashtra featuring Customer App, Admin Dashboard, and Delivery Boy App with real-time tracking, OTP verification, and inventory control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
