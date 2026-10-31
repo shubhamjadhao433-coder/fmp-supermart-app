@@ -8,8 +8,7 @@ export interface DBClient {
   query: (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount: number }>;
 }
 
-let activeDb: DBClient | null = null;
-let memDb: any = null;
+const g = globalThis as any;
 
 function isRealPostgresUrl(url?: string): boolean {
   if (!url) return false;
@@ -23,24 +22,25 @@ function isRealPostgresUrl(url?: string): boolean {
 }
 
 function getMemDb(): DBClient {
-  if (!memDb) {
-    memDb = newDb();
+  if (!g.__fmp_mem_db || !g.__fmp_active_db) {
+    const mem = newDb();
     
     // Register custom functions
-    memDb.public.registerFunction({
+    mem.public.registerFunction({
       name: 'now',
       implementation: () => new Date(),
     });
     
     // Get adapter that mimics pg Pool interface
-    const adapter = memDb.adapters.createPg();
-    activeDb = new adapter.Pool();
+    const adapter = mem.adapters.createPg();
+    g.__fmp_active_db = new adapter.Pool();
+    g.__fmp_mem_db = mem;
   }
-  return activeDb!;
+  return g.__fmp_active_db;
 }
 
 export async function getDb(): Promise<DBClient> {
-  if (activeDb) return activeDb;
+  if (g.__fmp_active_db) return g.__fmp_active_db;
 
   const dbUrl = process.env.DATABASE_URL;
   if (isRealPostgresUrl(dbUrl)) {
@@ -53,18 +53,17 @@ export async function getDb(): Promise<DBClient> {
       pool.on('error', (err: any) => console.error('Unexpected PG client error', err));
       // Test connectivity immediately
       await pool.query('SELECT 1');
-      activeDb = pool;
-      return activeDb;
+      g.__fmp_active_db = pool;
+      return g.__fmp_active_db;
     } catch (err: any) {
       console.warn(`External PostgreSQL connection failed (${err.message}). Falling back to in-memory PostgreSQL engine.`);
-      activeDb = getMemDb();
-      return activeDb;
+      return getMemDb();
     }
   }
 
-  activeDb = getMemDb();
-  return activeDb;
+  return getMemDb();
 }
+
 
 // Transaction runner that works across standard pg and pg-mem
 export async function withTransaction<T>(callback: (client: DBClient) => Promise<T>): Promise<T> {
@@ -98,16 +97,14 @@ export async function withTransaction<T>(callback: (client: DBClient) => Promise
   }
 }
 
-let isDbInitialized = false;
-
 export async function initDatabase() {
-  if (isDbInitialized) return;
+  if (g.__fmp_db_initialized) return;
   const db = await getDb();
 
   const tableCheck = await db.query("SELECT 1 FROM information_schema.tables WHERE table_name = 'users'");
   if (tableCheck.rows.length > 0) {
     await ensureSpecialCredentials(db);
-    isDbInitialized = true;
+    g.__fmp_db_initialized = true;
     return;
   }
 
@@ -363,7 +360,7 @@ export async function initDatabase() {
 
   // Seed default data if users table is empty
   await seedInitialData(db);
-  isDbInitialized = true;
+  g.__fmp_db_initialized = true;
 }
 
 async function ensureSpecialCredentials(db: DBClient) {

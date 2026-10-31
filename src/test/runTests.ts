@@ -997,6 +997,99 @@ async function main() {
       assert.ok(newLoginData.token, 'Customer successfully logs in with new password');
     });
 
+    // 27. END-TO-END REGISTRATION -> LOGIN -> COD CHECKOUT FLOW (Verify no "User account not found or deactivated" error)
+    await test('End-to-End: Customer Registration -> Login -> COD Order Placement', async () => {
+      const e2ePhone = `983${Math.floor(1000000 + Math.random() * 9000000)}`;
+      const e2ePassword = 'SecurePass@2026!';
+
+      // Step 1: Register customer
+      const regRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: e2ePhone,
+          name: 'Anand Patil',
+          email: 'anand.patil@example.com',
+          password: e2ePassword,
+          address: 'Station Road, Karanja Lad',
+          landmark: 'Karanja Lad',
+          pincode: '444105'
+        })
+      });
+      assert.strictEqual(regRes.status, 201, 'Registration must return 201 Created');
+      const regData = await regRes.json();
+      assert.ok(regData.token, 'Registration must return valid JWT session token');
+      assert.strictEqual(regData.user.role, 'customer', 'Registered user must have customer role');
+      const registeredUserId = regData.user.id;
+
+      // Verify in database that customer is active
+      const db = await getDb();
+      const dbUserRes = await db.query('SELECT id, phone, role, is_active FROM users WHERE id = $1', [registeredUserId]);
+      assert.strictEqual(dbUserRes.rows.length, 1, 'Customer record must exist in PostgreSQL users table');
+      assert.notStrictEqual(dbUserRes.rows[0].is_active, false, 'New customer must be active by default');
+
+      // Step 2: Login customer
+      const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: e2ePhone,
+          password: e2ePassword
+        })
+      });
+      assert.strictEqual(loginRes.status, 200, 'Login must succeed');
+      const loginData = await loginRes.json();
+      assert.ok(loginData.token, 'Login must return token');
+      assert.strictEqual(loginData.user.id, registeredUserId, 'Login user ID must match registered ID');
+
+      // Step 3: Validate session (/api/auth/me)
+      const sessionRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${loginData.token}` }
+      });
+      assert.strictEqual(sessionRes.status, 200, 'Session verification /api/auth/me must succeed');
+      const sessionData = await sessionRes.json();
+      assert.strictEqual(sessionData.user.id, registeredUserId, 'Session user ID must match database ID');
+
+      // Step 4: Customer places COD order
+      const prodRes = await db.query('SELECT id, price, stock FROM products WHERE stock >= 2 LIMIT 1');
+      const prod = prodRes.rows[0];
+
+      const checkoutRes = await fetch(`${baseUrl}/api/orders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${loginData.token}`
+        },
+        body: JSON.stringify({
+          items: [{ product_id: prod.id, quantity: 2 }],
+          customer_name: loginData.user.name,
+          customer_phone: loginData.user.phone,
+          delivery_address: loginData.user.address,
+          landmark: 'Near Station Road, Karanja Lad',
+          pincode: '444105',
+          delivery_type: 'immediate',
+          tip_amount: 15
+        })
+      });
+
+      assert.strictEqual(checkoutRes.status, 201, `Checkout must succeed without error (got status ${checkoutRes.status})`);
+      const checkoutData = await checkoutRes.json();
+      assert.ok(checkoutData.order, 'Order object must be returned');
+      assert.strictEqual(checkoutData.order.customer_id, registeredUserId, 'Order customer_id must match authenticated user ID');
+      assert.strictEqual(checkoutData.order.payment_mode, 'COD', 'Payment mode must be COD');
+      assert.strictEqual(checkoutData.order.status, 'placed', 'Order status must be placed');
+      assert.strictEqual(Number(checkoutData.order.tip_amount), 15, 'Tip amount must be recorded');
+
+      // Step 5: Verify customer can fetch their placed order
+      const customerOrdersRes = await fetch(`${baseUrl}/api/orders`, {
+        headers: { Authorization: `Bearer ${loginData.token}` }
+      });
+      assert.strictEqual(customerOrdersRes.status, 200);
+      const customerOrders = await customerOrdersRes.json();
+      const matchedOrder = customerOrders.find((o: any) => o.id === checkoutData.order.id);
+      assert.ok(matchedOrder, 'Placed order must appear in customer orders list');
+    });
+
   } finally {
     server.close();
   }

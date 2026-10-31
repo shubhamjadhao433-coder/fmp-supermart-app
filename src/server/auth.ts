@@ -39,12 +39,16 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
 
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthUser;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const userId = parseInt(String(decoded.id), 10);
     
-    // Optionally fetch full user record to ensure current state
+    // Fetch full user record to ensure current active state
     const db = await getDb();
-    const userRes = await db.query('SELECT id, phone, name, role, address, landmark, pincode FROM users WHERE id = $1', [decoded.id]);
-    if (userRes.rows.length === 0) {
+    const userRes = await db.query(
+      'SELECT id, phone, name, role, address, landmark, pincode, is_active FROM users WHERE id = $1 OR (phone = $2 AND role = $3)',
+      [userId, decoded.phone, decoded.role]
+    );
+    if (userRes.rows.length === 0 || userRes.rows[0].is_active === false) {
       return res.status(401).json({ error: 'User account not found or deactivated.' });
     }
     

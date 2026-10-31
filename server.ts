@@ -117,9 +117,9 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     const passwordHash = await bcrypt.hash(password, 10);
 
     const result = await db.query(
-      `INSERT INTO users (phone, name, email, role, password_hash, address, landmark, city, pincode)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'Karanja Lad', $8)
-       RETURNING id, phone, name, email, role, address, landmark, pincode`,
+      `INSERT INTO users (phone, name, email, role, password_hash, address, landmark, city, pincode, is_active, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'Karanja Lad', $8, TRUE, CURRENT_TIMESTAMP)
+       RETURNING id, phone, name, email, role, address, landmark, pincode, is_active`,
       [cleanPhone, name.trim(), email?.trim() || null, userRole, passwordHash, address || null, landmark || null, pincode || '444105']
     );
 

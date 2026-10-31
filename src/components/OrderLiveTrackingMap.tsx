@@ -10,7 +10,7 @@ import {
 import { Truck, MapPin, Store, Navigation, Phone, Clock, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { Order } from '../types.ts';
 
-// Central Warehouse in Shivaji Chowk, Karanja Lad, Maharashtra (444105)
+// FMP Supermart Dispatch Hub in Karanja Lad, Maharashtra (444105)
 const WAREHOUSE_COORDS = { lat: 20.4839, lng: 77.4877 };
 
 // Approximate landmark coordinates in Karanja Lad for destinations
