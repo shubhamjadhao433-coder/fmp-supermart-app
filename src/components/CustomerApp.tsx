@@ -36,6 +36,8 @@ import {
 import confetti from 'canvas-confetti';
 import { Product, Category, CartItem, Order, User, ProductReview, NotificationItem } from '../types.ts';
 import { api, authStorage } from '../services/api.ts';
+import { OrderLiveTrackingMap } from './OrderLiveTrackingMap.tsx';
+import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 interface CustomerAppProps {
   currentUser: User | null;
@@ -121,8 +123,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [scheduledSlot, setScheduledSlot] = useState<string>('09:00 AM - 12:00 PM (Morning Slot)');
   const [customerName, setCustomerName] = useState<string>(currentUser?.name || '');
   const [customerPhone, setCustomerPhone] = useState<string>(currentUser?.phone || '');
-  const [deliveryAddress, setDeliveryAddress] = useState<string>(currentUser?.address || 'Near Shivaji Chowk, Karanja Lad, Maharashtra');
-  const [landmark, setLandmark] = useState<string>(currentUser?.landmark || 'Near Guru Mandir');
+  const [deliveryAddress, setDeliveryAddress] = useState<string>(currentUser?.address || 'Karanja Lad, Maharashtra');
+  const [landmark, setLandmark] = useState<string>(currentUser?.landmark || 'Karanja Lad');
   const [checkoutSubmitting, setCheckoutSubmitting] = useState<boolean>(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
@@ -442,14 +444,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const unreadNotifs = notifications.filter(n => !n.is_read).length;
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col font-sans w-full overflow-x-hidden pb-24 md:pb-12 text-gray-900 selection:bg-emerald-600 selection:text-white">
+    <div className="min-h-screen bg-gray-50 flex flex-col font-sans w-full pb-28 md:pb-12 text-gray-900 selection:bg-emerald-600 selection:text-white">
       {/* ======================================================== */}
-      {/* BLINKIT / ZEPTO INSPIRED STICKY TOP HEADER */}
+      {/* RESPONSIVE STICKY TOP HEADER */}
       {/* ======================================================== */}
       <header className="sticky top-0 z-40 bg-white border-b border-gray-200 shadow-xs">
         {/* Main Navigation Bar */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
-          <div className="flex items-center justify-between gap-3 sm:gap-6">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-2.5 sm:py-3 w-full min-w-0">
+          <div className="flex items-center justify-between gap-2 sm:gap-6 w-full min-w-0">
             {/* Logo */}
             <div
               onClick={() => {
@@ -457,22 +459,23 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 setSearchQuery('');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              className="flex items-center gap-2.5 cursor-pointer shrink-0"
+              className="flex items-center gap-2 sm:gap-2.5 cursor-pointer shrink-0 min-w-0"
             >
-              <div className="bg-emerald-600 text-white p-2 rounded-2xl shadow-sm flex items-center justify-center">
+              <div className="bg-emerald-600 text-white p-1.5 sm:p-2 rounded-xl sm:rounded-2xl shadow-sm flex items-center justify-center shrink-0">
                 <ShoppingBag className="w-5 h-5 sm:w-6 sm:h-6" />
               </div>
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-lg sm:text-xl font-black tracking-tight text-gray-900">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1 sm:gap-1.5">
+                  <span className="text-base sm:text-xl font-black tracking-tight text-gray-900 truncate">
                     FMP <span className="text-emerald-600">Supermart</span>
                   </span>
-                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-extrabold px-1.5 py-0.2 rounded-md uppercase tracking-wider">
+                  <span className="bg-emerald-100 text-emerald-800 text-[9px] sm:text-[10px] font-extrabold px-1.5 py-0.2 rounded-md uppercase tracking-wider shrink-0 hidden xs:inline">
                     Karanja
                   </span>
                 </div>
-                <p className="text-[10px] sm:text-[11px] text-gray-500 font-medium truncate max-w-[170px] sm:max-w-none">
-                  Central Hub • Karanja Lad, Maharashtra
+                <p className="text-[10px] sm:text-[11px] text-emerald-700 font-semibold flex items-center gap-0.5 truncate">
+                  <MapPin className="w-3 h-3 text-emerald-600 shrink-0 inline" />
+                  <span>Karanja Lad</span>
                 </p>
               </div>
             </div>
@@ -498,15 +501,17 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             </div>
 
             {/* Header Right Actions */}
-            <div className="flex items-center gap-2 sm:gap-3">
-              {/* Favorites (Desktop) */}
+            <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+              <PWAInstallButton variant="compact" className="hidden md:flex" />
+
+              {/* Favorites (Desktop only - mobile accesses via bottom nav) */}
               <button
                 onClick={() => {
                   if (!currentUser) onOpenAuth();
                   else if (onOpenFavorites) onOpenFavorites();
                 }}
                 title="Favorite Products"
-                className="relative p-2 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-xl transition cursor-pointer"
+                className="hidden md:flex relative p-2 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-xl transition cursor-pointer"
               >
                 <Heart className={`w-5 h-5 ${favorites.length > 0 ? 'text-red-500 fill-red-500' : ''}`} />
                 {favorites.length > 0 && (
@@ -521,12 +526,12 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 <div className="relative">
                   <button
                     onClick={() => setShowNotifications(!showNotifications)}
-                    className="relative p-2 text-gray-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-xl transition cursor-pointer"
+                    className="relative p-1.5 sm:p-2 text-gray-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-xl transition cursor-pointer shrink-0"
                     title="Notifications"
                   >
-                    <Bell className="w-5 h-5" />
+                    <Bell className="w-4 h-4 sm:w-5 sm:h-5" />
                     {unreadNotifs > 0 && (
-                      <span className="absolute -top-1 -right-1 bg-amber-500 text-white text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center animate-pulse">
+                      <span className="absolute -top-1 -right-1 bg-amber-500 text-white text-[9px] font-bold w-3.5 h-3.5 rounded-full flex items-center justify-center animate-pulse">
                         {unreadNotifs}
                       </span>
                     )}
@@ -534,7 +539,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                   {/* Dropdown */}
                   {showNotifications && (
-                    <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-gray-100 py-2 z-50 animate-in fade-in zoom-in-95">
+                    <div className="absolute right-0 mt-2 w-72 sm:w-80 md:w-96 bg-white rounded-2xl shadow-2xl border border-gray-100 py-2 z-50 animate-in fade-in zoom-in-95">
                       <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
                         <span className="font-bold text-gray-900 text-xs">Notifications</span>
                         <span className="text-[10px] text-gray-500">{notifications.length} updates</span>
@@ -572,32 +577,32 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 </div>
               )}
 
-              {/* Cart Button */}
+              {/* Cart Button - ALWAYS FULLY VISIBLE & NEVER CUT OFF */}
               <button
                 onClick={() => {
                   if (onOpenCart) onOpenCart();
                 }}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 sm:px-4 py-2 rounded-2xl flex items-center gap-2 font-bold text-xs shadow-sm transition cursor-pointer"
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl flex items-center gap-1.5 sm:gap-2 font-bold text-xs shadow-sm transition cursor-pointer shrink-0"
               >
-                <ShoppingCart className="w-4 h-4" />
+                <ShoppingCart className="w-4 h-4 shrink-0" />
                 <div className="flex flex-col text-left leading-tight">
-                  <span className="text-[10px] text-emerald-200">
+                  <span className="text-[9px] sm:text-[10px] text-emerald-200">
                     {cartItemCount} {cartItemCount === 1 ? 'item' : 'items'}
                   </span>
-                  <span className="text-xs font-black">₹{totalAmount}</span>
+                  <span className="text-xs sm:text-xs font-black">₹{totalAmount}</span>
                 </div>
               </button>
 
-              {/* User Account Button */}
+              {/* User Account Button (Desktop) / Sign In */}
               {currentUser ? (
                 <button
                   onClick={() => setIsProfileOpen(true)}
-                  className="flex items-center gap-1.5 p-1.5 pl-2.5 rounded-2xl bg-gray-100 hover:bg-gray-200 transition cursor-pointer text-xs"
+                  className="hidden sm:flex items-center gap-1.5 p-1.5 pl-2.5 rounded-2xl bg-gray-100 hover:bg-gray-200 transition cursor-pointer text-xs shrink-0"
                 >
                   <div className="w-7 h-7 rounded-xl bg-emerald-100 text-emerald-800 font-bold flex items-center justify-center">
                     {currentUser.name.charAt(0)}
                   </div>
-                  <span className="hidden sm:inline font-semibold text-gray-800 max-w-[100px] truncate">
+                  <span className="hidden md:inline font-semibold text-gray-800 max-w-[90px] truncate">
                     {currentUser.name.split(' ')[0]}
                   </span>
                   <ChevronDown className="w-3.5 h-3.5 text-gray-500" />
@@ -605,7 +610,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               ) : (
                 <button
                   onClick={onOpenAuth}
-                  className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-3.5 py-2 rounded-2xl font-bold text-xs transition cursor-pointer"
+                  className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl font-bold text-xs transition cursor-pointer shrink-0"
                 >
                   Sign In
                 </button>
@@ -614,35 +619,40 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
           </div>
 
           {/* Mobile Search Bar */}
-          <div className="mt-3 md:hidden relative">
-            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <div className="mt-2.5 md:hidden relative w-full">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               placeholder="Search groceries, vegetables, dairy..."
-              className="w-full pl-10 pr-9 py-2 bg-gray-100 focus:bg-white border border-gray-200 rounded-xl text-xs text-gray-900 outline-hidden font-medium"
+              className="w-full pl-9 pr-8 py-2 bg-gray-100 focus:bg-white border border-gray-200 focus:border-emerald-500 rounded-xl text-xs text-gray-900 outline-hidden font-medium"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5"
               >
-                <X className="w-4 h-4" />
+                <X className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
         </div>
       </header>
 
+      {/* PWA In-App Install Banner for Android & iOS */}
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-2.5 w-full min-w-0">
+        <PWAInstallButton variant="banner" />
+      </div>
+
       {/* ======================================================== */}
       {/* CATEGORIES HORIZONTAL PILLS */}
       {/* ======================================================== */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-5">
-        <div className="flex items-center justify-between mb-2.5">
-          <h3 className="font-extrabold text-sm sm:text-base text-gray-900 flex items-center gap-2">
+      <section id="categories-section" className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 w-full min-w-0">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="font-extrabold text-xs sm:text-base text-gray-900 flex items-center gap-1.5 sm:gap-2">
             <span>Explore Categories</span>
-            <span className="text-[11px] font-medium text-gray-400">({categories.length} sections)</span>
+            <span className="text-[10px] sm:text-[11px] font-medium text-gray-400">({categories.length} sections)</span>
           </h3>
           {selectedCategory !== 'all' && (
             <button
@@ -654,10 +664,10 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none">
+        <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto pb-2 scrollbar-none w-full max-w-full min-w-0 touch-pan-x">
           <button
             onClick={() => setSelectedCategory('all')}
-            className={`px-4 py-2 rounded-2xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+            className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
               selectedCategory === 'all'
                 ? 'bg-emerald-600 text-white shadow-xs'
                 : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-100'
@@ -673,7 +683,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               <button
                 key={category.id}
                 onClick={() => setSelectedCategory(category.name)}
-                className={`px-3.5 py-2 rounded-2xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-2 ${
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
                   isSelected
                     ? 'bg-emerald-600 text-white shadow-xs'
                     : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-100'
@@ -1118,6 +1128,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 </div>
                 <ChevronRight className="w-4 h-4 text-gray-400" />
               </button>
+
+              {/* PWA App Install option in Profile */}
+              <div className="pt-1">
+                <PWAInstallButton variant="banner" />
+              </div>
             </div>
 
             {onLogout && (
@@ -1710,6 +1725,13 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                           <p className="text-[11px] text-amber-100 text-center">
                             Give this 4-digit OTP to rider <strong className="text-white">{order.rider_name || 'Sunil'}</strong> only after receiving your package and paying ₹{order.total_amount} COD.
                           </p>
+                        </div>
+                      )}
+
+                      {/* GOOGLE MAPS REAL-TIME GPS TRACKING COMPONENT */}
+                      {isDispatched && (
+                        <div className="pt-1">
+                          <OrderLiveTrackingMap order={order} />
                         </div>
                       )}
 

@@ -10,11 +10,12 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "IS_TEST_SUITE=true tsx src/test/runTests.ts"
+    "test": "IS_TEST_SUITE=true tsx src/test/runTests.ts && IS_TEST_SUITE=true tsx scripts/verify-pwa.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
+    "@vis.gl/react-google-maps": "^1.10.2",
     "@vitejs/plugin-react": "^6.1.1",
     "bcryptjs": "^3.0.3",
     "canvas-confetti": "^1.9.4",
@@ -44,6 +45,7 @@
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite-plugin-pwa": "^2.0.0"
   }
 }

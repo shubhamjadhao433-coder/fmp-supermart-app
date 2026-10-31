@@ -21,6 +21,7 @@ import {
 import confetti from 'canvas-confetti';
 import { Order, RiderSummary, User } from '../types.ts';
 import { api } from '../services/api.ts';
+import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 interface DeliveryBoyAppProps {
   currentUser: User | null;
@@ -176,12 +177,13 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                   </span>
                 </div>
                 <p className="text-xs text-amber-100 font-medium truncate">
-                  FMP Supermart • Karanja Lad Central Hub • {currentUser?.phone || '9699925206'}
+                  FMP Supermart • Karanja Lad • {currentUser?.phone || '9699925206'}
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              <PWAInstallButton className="bg-amber-700/80 text-white border-amber-400/50 hover:bg-amber-800" />
               <button
                 onClick={loadRiderData}
                 disabled={loading}
@@ -344,9 +346,9 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
               </div>
 
               <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm col-span-2 sm:col-span-1">
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Hub Location</div>
-                <div className="text-sm font-bold text-gray-900 mt-1 truncate">Shivaji Chowk</div>
-                <div className="text-[10px] text-gray-500 font-medium">Karanja Lad (444105)</div>
+                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Service Location</div>
+                <div className="text-sm font-bold text-gray-900 mt-1 truncate">Karanja Lad</div>
+                <div className="text-[10px] text-gray-500 font-medium">Maharashtra</div>
               </div>
             </div>
 
@@ -577,7 +579,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
                         {isPickupPending && (
                           <div className="text-xs text-blue-700 bg-blue-50 px-3 py-1.5 rounded-xl font-semibold border border-blue-200">
-                            Awaiting Dispatch from Store Central Hub
+                            Awaiting Dispatch (Karanja Lad)
                           </div>
                         )}
                       </div>

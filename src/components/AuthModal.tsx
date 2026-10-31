@@ -320,7 +320,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 type="text"
                 value={landmark}
                 onChange={(e) => setLandmark(e.target.value)}
-                placeholder="Near Guru Mandir / Shivaji Chowk / Bus Stand"
+                placeholder="e.g. Landmark or Area, Karanja Lad"
                 className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-emerald-500"
               />
             </div>
@@ -379,8 +379,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <p className="text-xs text-emerald-700">{resetSuccessMessage}</p>
                 <div className="pt-2 text-[11px] text-gray-600 bg-white p-2.5 rounded-xl border border-emerald-100">
                   <span className="font-semibold block text-gray-800">Direct Helpline:</span>
-                  <span>📞 +91 9699925206 (Store Manager)</span>
-                  <span className="block text-gray-500 mt-0.5">Shivaji Chowk Central Warehouse, Karanja Lad</span>
+                  <span>📞 +91 9699925206 (FMP Supermart Support)</span>
+                  <span className="block text-gray-500 mt-0.5">Karanja Lad, Maharashtra</span>
                 </div>
                 <button
                   type="button"

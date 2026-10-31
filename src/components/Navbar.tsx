@@ -57,11 +57,8 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="bg-emerald-900 text-emerald-100 text-xs px-4 py-1.5 flex flex-wrap justify-between items-center gap-2">
         <div className="flex items-center gap-2">
           <MapPin className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-          <span className="font-semibold text-white">Central Hub:</span>
-          <span>Shivaji Chowk, Karanja Lad, Maharashtra (444105)</span>
-          <span className="hidden sm:inline bg-emerald-800 text-emerald-200 px-1.5 py-0.5 rounded text-[10px] font-semibold">
-            One Central Warehouse
-          </span>
+          <span className="font-semibold text-white">Service Location:</span>
+          <span>Karanja Lad, Maharashtra</span>
         </div>
         <div className="flex items-center gap-4 text-[11px]">
           <span className="hidden md:inline">⚡ Fast Delivery Across Karanja Lad | Cash on Delivery (COD) Only</span>

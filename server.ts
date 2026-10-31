@@ -25,6 +25,19 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Serve public directory for PWA assets, manifest, and icons
+const publicDirPath = path.resolve(__dirname, 'public');
+app.get(['/manifest.json', '/manifest.webmanifest'], (req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.sendFile(path.resolve(publicDirPath, 'manifest.json'));
+});
+app.get('/sw.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.sendFile(path.resolve(publicDirPath, 'sw.js'));
+});
+app.use(express.static(publicDirPath));
+
 // Initialize database schema and seeds
 let dbInitialized = false;
 async function ensureDb() {
@@ -156,7 +169,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     }
 
     if (matchedUser.is_active === false) {
-      return res.status(403).json({ error: 'Your account is deactivated. Please contact store admin at Shivaji Chowk (9699925206).' });
+      return res.status(403).json({ error: 'Your account is deactivated. Please contact store admin at Karanja Lad (9699925206).' });
     }
 
     const token = generateToken(matchedUser);
@@ -218,7 +231,7 @@ app.post('/api/auth/forgot-password-request', async (req: Request, res: Response
     res.json({
       message: 'Password reset request registered successfully! The FMP Supermart central store admin has received your ticket.',
       support_phone: '9699925206',
-      support_address: 'Central Warehouse, Shivaji Chowk, Karanja Lad (444105)'
+      support_address: 'Karanja Lad, Maharashtra (444105)'
     });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to process request: ' + err.message });

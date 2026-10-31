@@ -5,6 +5,7 @@ import { CustomerApp } from './components/CustomerApp.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { DeliveryBoyApp } from './components/DeliveryBoyApp.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
+import { OfflineIndicator } from './components/OfflineIndicator.tsx';
 import { ShieldAlert, ArrowLeft, LogOut, Lock, ShieldCheck, Truck } from 'lucide-react';
 
 const CART_STORAGE_KEY = 'fmp_supermart_cart';
@@ -361,6 +362,9 @@ export default function App() {
         onClose={() => setIsAuthOpen(false)}
         onAuthSuccess={handleAuthSuccess}
       />
+
+      {/* PWA Network Connectivity Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }
