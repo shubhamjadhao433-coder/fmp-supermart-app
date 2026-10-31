@@ -126,14 +126,23 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [checkoutSubmitting, setCheckoutSubmitting] = useState<boolean>(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
-  // Delivery Slots definitions
-  const availableSlots = [
+  // Delivery settings from backend
+  const [deliveryFeeConfig, setDeliveryFeeConfig] = useState<number>(25);
+  const [handlingFeeConfig, setHandlingFeeConfig] = useState<number>(5);
+  const [deliverySlots, setDeliverySlots] = useState<{ id: number; name: string; time_window: string }[]>([]);
+
+  // Default fallback slots if server loading
+  const defaultSlots = [
     '07:00 AM - 09:00 AM (Early Morning Fresh)',
     '09:00 AM - 12:00 PM (Morning Slot)',
     '12:00 PM - 03:00 PM (Afternoon Slot)',
     '03:00 PM - 06:00 PM (Evening Slot)',
     '06:00 PM - 09:00 PM (Night Dinner Slot)'
   ];
+
+  const availableSlotOptions = deliverySlots.length > 0
+    ? deliverySlots.map(s => `${s.time_window} (${s.name})`)
+    : defaultSlots;
 
   // Next 7 days for scheduling
   const next7Days = Array.from({ length: 7 }).map((_, i) => {
@@ -144,23 +153,46 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     return d.toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric' });
   });
 
-  // Calculate Cart Totals
+  // Delivery Partner Tip State
+  const [tipAmount, setTipAmount] = useState<number>(0);
+  const [customTip, setCustomTip] = useState<string>('');
+  const [isCustomTip, setIsCustomTip] = useState<boolean>(false);
+
+  // Calculate Cart Totals (Admin Controlled Fee, Handling Fee ₹5, Delivery Tip)
   const cartSubtotal = cart.reduce((sum, item) => sum + Number(item.product.price) * item.quantity, 0);
-  const deliveryCharge = cartSubtotal === 0 ? 0 : cartSubtotal >= 299 ? 0 : 25;
-  const handlingCharge = cartSubtotal === 0 ? 0 : 5;
-  const totalAmount = cartSubtotal + deliveryCharge + handlingCharge;
+  const deliveryCharge = cartSubtotal === 0 ? 0 : deliveryFeeConfig;
+  const handlingCharge = cartSubtotal === 0 ? 0 : handlingFeeConfig;
+  const totalAmount = cartSubtotal + deliveryCharge + handlingCharge + (cartSubtotal === 0 ? 0 : tipAmount);
   const cartItemCount = cart.reduce((sum, i) => sum + i.quantity, 0);
 
   // Load Catalog & Customer Data
   const loadCatalogData = async () => {
     setLoading(true);
     try {
-      const [cats, prods] = await Promise.all([
-        api.getCategories(),
-        api.getProducts()
+      const [cats, prods, feeRes, slotsRes] = await Promise.all([
+        api.getCategories().catch(() => []),
+        api.getProducts().catch(() => []),
+        api.getDeliverySettings().catch(() => null),
+        api.getDeliverySlots().catch(() => [])
       ]);
-      setCategories(cats);
-      setProducts(prods);
+      if (cats && cats.length > 0) setCategories(cats);
+      if (prods && prods.length > 0) setProducts(prods);
+      if (feeRes) {
+        if (typeof feeRes.default_delivery_fee === 'number') setDeliveryFeeConfig(feeRes.default_delivery_fee);
+        if (typeof feeRes.handling_fee === 'number') setHandlingFeeConfig(feeRes.handling_fee);
+      }
+      if (slotsRes && slotsRes.length > 0) setDeliverySlots(slotsRes);
+
+      // Auto retry if catalog was empty on initial cold start
+      if ((!cats || cats.length === 0) || (!prods || prods.length === 0)) {
+        setTimeout(async () => {
+          try {
+            const [retryCats, retryProds] = await Promise.all([api.getCategories(), api.getProducts()]);
+            if (retryCats && retryCats.length > 0) setCategories(retryCats);
+            if (retryProds && retryProds.length > 0) setProducts(retryProds);
+          } catch (e) {}
+        }, 500);
+      }
     } catch (e) {
       console.error('Failed to load store catalog:', e);
     } finally {
@@ -209,6 +241,19 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         .finally(() => setOrdersLoading(false));
     }
   }, [isOrdersOpen, currentUser]);
+
+  // Synchronize active bottom navigation tab with drawer open/close state
+  useEffect(() => {
+    if (isOrdersOpen) {
+      setActiveNav('orders');
+    } else if (isFavoritesOpen) {
+      setActiveNav('favorites');
+    } else if (isProfileOpen) {
+      setActiveNav('profile');
+    } else {
+      setActiveNav('home');
+    }
+  }, [isOrdersOpen, isFavoritesOpen, isProfileOpen]);
 
   // Toggle Favorite
   const handleToggleFavorite = async (e: React.MouseEvent, product: Product) => {
@@ -311,7 +356,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         pincode: '444105',
         delivery_type: deliveryType,
         scheduled_date: deliveryType === 'scheduled' ? scheduledDate : 'Immediate Express',
-        time_slot: deliveryType === 'scheduled' ? scheduledSlot : 'Within 30-45 mins'
+        time_slot: deliveryType === 'scheduled' ? scheduledSlot : 'Within 30-45 mins',
+        tip_amount: tipAmount
       };
 
       const res = await api.createOrder(payload);
@@ -325,6 +371,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       } catch (e) {}
 
       onClearCart();
+      setTipAmount(0);
+      setCustomTip('');
+      setIsCustomTip(false);
       onCloseCart();
       onOrderPlaced(res.order);
       loadCatalogData();
@@ -363,7 +412,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
   // Filter & Sort Products
   const filteredProducts = products.filter(product => {
-    if (selectedCategory !== 'all' && product.category_name !== selectedCategory) {
+    if (selectedCategory !== 'all' && product.category_name !== selectedCategory && product.category_slug !== selectedCategory) {
       return false;
     }
     if (onlyInStock && product.stock <= 0) {
@@ -859,9 +908,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             <div>
               <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Delivery & Charges</h4>
               <ul className="space-y-2 text-gray-500">
-                <li>• Free Delivery on orders ₹299 and above</li>
-                <li>• ₹25 delivery charge on orders below ₹299</li>
-                <li>• ₹5 packaging & handling fee</li>
+                <li>• Standard Delivery: ₹{deliveryFeeConfig} (Admin Configurable)</li>
+                <li>• Packaging & Handling: ₹{handlingFeeConfig}</li>
+                <li>• Central Warehouse: Karanja Lad (444105)</li>
                 <li>• Payment Mode: Cash on Delivery (COD) only</li>
               </ul>
             </div>
@@ -915,7 +964,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   {cartItemCount} {cartItemCount === 1 ? 'item' : 'items'} • ₹{totalAmount}
                 </div>
                 <div className="text-[10px] text-emerald-200">
-                  {cartSubtotal >= 299 ? '🎉 Free Delivery Applied!' : `Add ₹${299 - cartSubtotal} more for Free Delivery`}
+                  {deliveryCharge === 0 ? '🎉 Free Delivery' : `Delivery: ₹${deliveryCharge} • Cash on Delivery`}
                 </div>
               </div>
             </div>
@@ -1352,7 +1401,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         onChange={e => setScheduledSlot(e.target.value)}
                         className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
                       >
-                        {availableSlots.map((s, i) => (
+                        {availableSlotOptions.map((s, i) => (
                           <option key={i} value={s}>
                             {s}
                           </option>
@@ -1415,50 +1464,135 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </div>
                 </div>
 
-                {/* Delivery Charge Calculation & Bill Breakdown (Checkout Only) */}
-                <div className={`p-3 rounded-2xl text-xs flex items-center justify-between gap-2 ${
-                  cartSubtotal >= 299 ? 'bg-emerald-50 text-emerald-900 border border-emerald-200' : 'bg-amber-50 text-amber-900 border border-amber-200'
-                }`}>
-                  <div className="flex items-center gap-2">
-                    <Truck className="w-4 h-4 shrink-0 text-emerald-700" />
-                    <span>
-                      {cartSubtotal >= 299 ? (
-                        <span className="font-bold">🎉 FREE Delivery unlocked! (Orders ₹299+)</span>
-                      ) : (
-                        <span>Add <strong className="text-emerald-700">₹{299 - cartSubtotal}</strong> more for <strong>FREE Delivery</strong></span>
-                      )}
-                    </span>
+                {/* Delivery Partner Tip Selection */}
+                <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3 space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 font-bold text-amber-900 text-xs">
+                      <Heart className="w-4 h-4 text-red-500 fill-red-500" />
+                      <span>Delivery Partner Tip</span>
+                    </div>
+                    {tipAmount > 0 && (
+                      <span className="text-[10px] font-black text-amber-800 bg-amber-200/60 px-2 py-0.5 rounded-full">
+                        +₹{tipAmount} Added
+                      </span>
+                    )}
                   </div>
-                  <span className="font-black text-[11px] shrink-0">
-                    {cartSubtotal >= 299 ? '₹0' : '₹25 fee'}
-                  </span>
+                  <p className="text-[11px] text-amber-800 leading-snug">
+                    Say thanks to your Karanja Lad delivery partner. 100% of this tip goes directly to them.
+                  </p>
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    {[
+                      { label: 'No Tip', value: 0 },
+                      { label: '₹10', value: 10 },
+                      { label: '₹20', value: 20 },
+                      { label: '₹30', value: 30 },
+                      { label: '₹50', value: 50 },
+                    ].map(opt => {
+                      const isSelected = !isCustomTip && tipAmount === opt.value;
+                      return (
+                        <button
+                          type="button"
+                          key={opt.label}
+                          onClick={() => {
+                            setIsCustomTip(false);
+                            setTipAmount(opt.value);
+                            setCustomTip('');
+                          }}
+                          className={`px-2.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer border ${
+                            isSelected
+                              ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                              : 'bg-white text-gray-700 border-gray-200 hover:bg-amber-50'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCustomTip(true);
+                      }}
+                      className={`px-2.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer border ${
+                        isCustomTip
+                          ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                          : 'bg-white text-gray-700 border-gray-200 hover:bg-amber-50'
+                      }`}
+                    >
+                      Custom
+                    </button>
+                  </div>
+
+                  {isCustomTip && (
+                    <div className="flex items-center gap-2 pt-1">
+                      <div className="relative flex-1">
+                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 font-bold">₹</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="500"
+                          value={customTip}
+                          onChange={e => {
+                            const val = e.target.value.replace(/\D/g, '');
+                            setCustomTip(val);
+                            setTipAmount(Math.max(0, parseInt(val, 10) || 0));
+                          }}
+                          placeholder="Enter tip (e.g. 25)"
+                          className="w-full pl-6 pr-2 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold text-gray-900 outline-hidden focus:ring-1 focus:ring-amber-500"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsCustomTip(false);
+                          setTipAmount(0);
+                          setCustomTip('');
+                        }}
+                        className="text-[11px] text-gray-500 hover:text-gray-800 font-semibold px-2 py-1 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
                 </div>
 
-                <div className="p-3 bg-white rounded-xl border border-gray-200 text-xs space-y-1.5">
+                {/* Delivery Charge Calculation & Bill Breakdown (Admin Controlled) */}
+                <div className="p-3.5 bg-white rounded-2xl border border-gray-200 text-xs space-y-2 shadow-xs">
                   <div className="flex justify-between text-gray-600">
                     <span>Items Subtotal:</span>
-                    <span className="font-semibold text-gray-800">₹{cartSubtotal}</span>
+                    <span className="font-semibold text-gray-900">₹{cartSubtotal}</span>
                   </div>
                   <div className="flex justify-between text-gray-600">
                     <span>Delivery Charge:</span>
                     <span>
                       {deliveryCharge === 0 ? (
-                        <span className="text-emerald-700 font-bold">FREE (₹299 & above)</span>
+                        <span className="text-emerald-700 font-bold">FREE Delivery</span>
                       ) : (
-                        <span className="text-gray-800 font-semibold">₹25 (below ₹299)</span>
+                        <span className="text-gray-900 font-semibold">₹{deliveryCharge}</span>
                       )}
                     </span>
                   </div>
                   <div className="flex justify-between text-gray-600">
-                    <span>Handling Charge:</span>
-                    <span className="text-gray-800 font-semibold">₹5 per order</span>
+                    <span>Handling Fee:</span>
+                    <span className="text-gray-900 font-semibold">₹{handlingCharge}</span>
                   </div>
-                  <div className="flex justify-between font-black text-gray-900 text-sm pt-1.5 border-t border-gray-100">
-                    <span>Total Cash to Pay:</span>
-                    <span className="text-emerald-800 text-base">₹{totalAmount}</span>
+                  {tipAmount > 0 && (
+                    <div className="flex justify-between text-amber-800 font-semibold">
+                      <span className="flex items-center gap-1">
+                        <Heart className="w-3.5 h-3.5 text-red-500 fill-red-500" />
+                        <span>Delivery Partner Tip:</span>
+                      </span>
+                      <span>₹{tipAmount}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between font-black text-gray-900 text-sm pt-2 border-t border-gray-100">
+                    <span>Total Cash on Delivery:</span>
+                    <span className="text-emerald-700 text-base">₹{totalAmount}</span>
                   </div>
-                  <div className="text-[10px] text-gray-500 font-medium pt-0.5">
-                    Mode: Cash on Delivery (COD) Only
+                  <div className="text-[10px] text-gray-400 font-medium pt-0.5">
+                    • Central warehouse dispatch • Pay cash to delivery partner
                   </div>
                 </div>
 
@@ -1584,6 +1718,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         <div>
                           <span className="text-gray-500">COD Total: </span>
                           <span className="font-black text-gray-900 text-sm">₹{order.total_amount}</span>
+                          {Number(order.tip_amount) > 0 && (
+                            <span className="block text-[10px] text-amber-700 font-semibold">
+                              (Includes ₹{order.tip_amount} tip for delivery partner 💖)
+                            </span>
+                          )}
                         </div>
 
                         {canCancel && (

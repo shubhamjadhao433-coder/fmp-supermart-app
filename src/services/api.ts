@@ -53,6 +53,9 @@ export const api = {
   login: (phone: string, password: string): Promise<{ token: string; user: User }> =>
     fetchWithAuth('/api/auth/login', { method: 'POST', body: JSON.stringify({ phone, password }) }),
 
+  requestPasswordReset: (phone: string, notes?: string): Promise<{ message: string; support_phone: string; support_address: string }> =>
+    fetchWithAuth('/api/auth/forgot-password-request', { method: 'POST', body: JSON.stringify({ phone, notes }) }),
+
   demoSwitch: (role: 'customer' | 'admin' | 'rider'): Promise<{ token: string; user: User }> =>
     fetchWithAuth('/api/auth/demo-switch', { method: 'POST', body: JSON.stringify({ role }) }),
 
@@ -99,6 +102,7 @@ export const api = {
     delivery_type?: 'immediate' | 'scheduled';
     scheduled_date?: string;
     time_slot?: string;
+    tip_amount?: number;
   }): Promise<{ message: string; order: Order }> =>
     fetchWithAuth('/api/orders', { method: 'POST', body: JSON.stringify(payload) }),
 
@@ -131,8 +135,48 @@ export const api = {
   getAdminRiders: (): Promise<any[]> =>
     fetchWithAuth('/api/admin/riders'),
 
+  createRider: (payload: { name: string; phone: string; password: string; email?: string; address?: string; landmark?: string }): Promise<{ message: string; rider: any }> =>
+    fetchWithAuth('/api/admin/riders', { method: 'POST', body: JSON.stringify(payload) }),
+
+  updateRider: (id: number, payload: Partial<any>): Promise<{ message: string; rider: any }> =>
+    fetchWithAuth(`/api/admin/riders/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+
+  resetRiderPassword: (id: number, password: string): Promise<{ message: string }> =>
+    fetchWithAuth(`/api/admin/riders/${id}/reset-password`, { method: 'PUT', body: JSON.stringify({ password }) }),
+
+  getPasswordResetRequests: (): Promise<any[]> =>
+    fetchWithAuth('/api/admin/password-reset-requests'),
+
+  adminResetUserPassword: (phone: string, new_password: string, request_id?: number): Promise<{ message: string }> =>
+    fetchWithAuth('/api/admin/reset-user-password', {
+      method: 'POST',
+      body: JSON.stringify({ phone, new_password, request_id })
+    }),
+
+  // Delivery Settings & Slots
+  getDeliverySettings: (): Promise<any> =>
+    fetchWithAuth('/api/settings/delivery'),
+
+  updateDeliverySettings: (payload: any): Promise<{ message: string; settings: any }> =>
+    fetchWithAuth('/api/admin/settings/delivery', { method: 'PUT', body: JSON.stringify(payload) }),
+
+  getDeliverySlots: (): Promise<any[]> =>
+    fetchWithAuth('/api/delivery-slots'),
+
+  createDeliverySlot: (payload: any): Promise<any> =>
+    fetchWithAuth('/api/admin/delivery-slots', { method: 'POST', body: JSON.stringify(payload) }),
+
+  updateDeliverySlot: (id: number, payload: any): Promise<any> =>
+    fetchWithAuth(`/api/admin/delivery-slots/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+
+  deleteDeliverySlot: (id: number): Promise<{ message: string }> =>
+    fetchWithAuth(`/api/admin/delivery-slots/${id}`, { method: 'DELETE' }),
+
   assignRider: (orderId: number, riderId: number): Promise<Order> =>
     fetchWithAuth(`/api/orders/${orderId}/assign-rider`, { method: 'POST', body: JSON.stringify({ rider_id: riderId }) }),
+
+  updateOrderDeliveryFee: (orderId: number, deliveryFee: number): Promise<{ message: string; order: Order }> =>
+    fetchWithAuth(`/api/orders/${orderId}/delivery-fee`, { method: 'PUT', body: JSON.stringify({ delivery_fee: deliveryFee }) }),
 
   updateOrderStatus: (orderId: number, status: 'confirmed' | 'packed'): Promise<Order> =>
     fetchWithAuth(`/api/orders/${orderId}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),

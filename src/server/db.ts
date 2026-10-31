@@ -8,22 +8,21 @@ export interface DBClient {
   query: (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount: number }>;
 }
 
-let pool: pg.Pool | null = null;
+let activeDb: DBClient | null = null;
 let memDb: any = null;
 
-export async function getDb(): Promise<DBClient> {
-  if (process.env.DATABASE_URL) {
-    if (!pool) {
-      pool = new Pool({
-        connectionString: process.env.DATABASE_URL,
-        ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
-      });
-      pool.on('error', (err: any) => console.error('Unexpected PG client error', err));
-    }
-    return pool;
+function isRealPostgresUrl(url?: string): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (['memory', 'in-memory', 'sqlite', 'none', 'mock', 'local', 'null', 'undefined'].includes(lower)) {
+    return false;
   }
+  return lower.startsWith('postgres://') || lower.startsWith('postgresql://');
+}
 
-  // Fallback to high-fidelity in-memory PostgreSQL emulator
+function getMemDb(): DBClient {
   if (!memDb) {
     memDb = newDb();
     
@@ -35,10 +34,36 @@ export async function getDb(): Promise<DBClient> {
     
     // Get adapter that mimics pg Pool interface
     const adapter = memDb.adapters.createPg();
-    pool = new adapter.Pool();
+    activeDb = new adapter.Pool();
+  }
+  return activeDb!;
+}
+
+export async function getDb(): Promise<DBClient> {
+  if (activeDb) return activeDb;
+
+  const dbUrl = process.env.DATABASE_URL;
+  if (isRealPostgresUrl(dbUrl)) {
+    try {
+      const pool = new Pool({
+        connectionString: dbUrl,
+        ssl: dbUrl!.includes('localhost') ? false : { rejectUnauthorized: false },
+        connectionTimeoutMillis: 3000
+      });
+      pool.on('error', (err: any) => console.error('Unexpected PG client error', err));
+      // Test connectivity immediately
+      await pool.query('SELECT 1');
+      activeDb = pool;
+      return activeDb;
+    } catch (err: any) {
+      console.warn(`External PostgreSQL connection failed (${err.message}). Falling back to in-memory PostgreSQL engine.`);
+      activeDb = getMemDb();
+      return activeDb;
+    }
   }
 
-  return pool!;
+  activeDb = getMemDb();
+  return activeDb;
 }
 
 // Transaction runner that works across standard pg and pg-mem
@@ -99,6 +124,7 @@ export async function initDatabase() {
       landmark VARCHAR(150),
       city VARCHAR(50),
       pincode VARCHAR(10),
+      is_active BOOLEAN DEFAULT TRUE,
       created_at TIMESTAMP
     );
   `);
@@ -145,6 +171,7 @@ export async function initDatabase() {
       subtotal NUMERIC(10, 2),
       delivery_fee NUMERIC(10, 2),
       handling_fee NUMERIC(10, 2),
+      tip_amount NUMERIC(10, 2) DEFAULT 0,
       total_amount NUMERIC(10, 2),
       payment_mode VARCHAR(20),
       status VARCHAR(30),
@@ -296,6 +323,41 @@ export async function initDatabase() {
       review_text TEXT,
       status VARCHAR(20),
       created_at TIMESTAMP
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE delivery_settings (
+      id SERIAL PRIMARY KEY,
+      default_delivery_fee NUMERIC(10, 2) DEFAULT 25.00,
+      handling_fee NUMERIC(10, 2) DEFAULT 5.00,
+      min_order_amount NUMERIC(10, 2) DEFAULT 0.00,
+      delivery_areas TEXT,
+      updated_at TIMESTAMP
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE delivery_slots (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(100),
+      time_window VARCHAR(100),
+      max_orders_per_slot INT DEFAULT 25,
+      is_active BOOLEAN DEFAULT TRUE,
+      display_order INT DEFAULT 1
+    );
+  `);
+
+  await db.query(`
+    CREATE TABLE password_reset_requests (
+      id SERIAL PRIMARY KEY,
+      phone VARCHAR(15),
+      name VARCHAR(100),
+      role VARCHAR(20),
+      status VARCHAR(20) DEFAULT 'pending',
+      notes TEXT,
+      created_at TIMESTAMP,
+      resolved_at TIMESTAMP
     );
   `);
 
@@ -460,6 +522,23 @@ async function seedInitialData(db: DBClient) {
       (1, 3, 'Rahul Deshmukh', 5, 'Best quality wheat flour in Karanja Lad! Rotis come out very soft.', 'approved'),
       (2, 3, 'Rahul Deshmukh', 4, 'Good pure sunflower oil for daily Indian cooking.', 'approved'),
       (7, 3, 'Rahul Deshmukh', 5, 'Bananas were very fresh and naturally sweet. Prompt delivery!', 'approved')
+  `);
+
+  // 6. Seed Delivery Settings (Admin controlled fees - default ₹25 delivery, ₹5 handling)
+  await db.query(`
+    INSERT INTO delivery_settings (id, default_delivery_fee, handling_fee, min_order_amount, delivery_areas)
+    VALUES (1, 25.00, 5.00, 0.00, '[{"pincode":"444105","area":"Karanja Lad City Center","fee":25},{"pincode":"444105","area":"Station Road & APMC","fee":25},{"pincode":"444105","area":"Outskirts / Rural Karanja","fee":35}]')
+  `);
+
+  // 7. Seed Delivery Slots
+  await db.query(`
+    INSERT INTO delivery_slots (name, time_window, max_orders_per_slot, is_active, display_order)
+    VALUES 
+      ('Early Morning Fresh', '07:00 AM - 09:00 AM', 25, TRUE, 1),
+      ('Morning Regular', '09:00 AM - 12:00 PM', 30, TRUE, 2),
+      ('Afternoon Express', '12:00 PM - 03:00 PM', 25, TRUE, 3),
+      ('Evening Prime', '03:00 PM - 06:00 PM', 35, TRUE, 4),
+      ('Dinner Slot', '06:00 PM - 09:00 PM', 30, TRUE, 5)
   `);
 
   console.log('Database seeded successfully for Karanja Lad!');

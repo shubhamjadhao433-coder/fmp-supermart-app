@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { User, CartItem, Product, Order } from './types.ts';
+import { User, CartItem, Product } from './types.ts';
 import { api, authStorage } from './services/api.ts';
 import { CustomerApp } from './components/CustomerApp.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { DeliveryBoyApp } from './components/DeliveryBoyApp.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
-import { ShieldCheck, Truck, ShoppingBag, ArrowLeft, Lock, Phone, AlertCircle } from 'lucide-react';
+import { ShieldAlert, ArrowLeft, LogOut, Lock, ShieldCheck, Truck } from 'lucide-react';
 
 const CART_STORAGE_KEY = 'fmp_supermart_cart';
 
@@ -31,22 +31,11 @@ export default function App() {
     }
   });
 
-  // Customer modals
+  // Customer navigation modals
   const [isAuthOpen, setIsAuthOpen] = useState<boolean>(false);
   const [isCartOpen, setIsCartOpen] = useState<boolean>(false);
   const [isFavoritesOpen, setIsFavoritesOpen] = useState<boolean>(false);
   const [isOrdersOpen, setIsOrdersOpen] = useState<boolean>(false);
-
-  // Route Login forms (for dedicated protected routes)
-  const [adminPhone, setAdminPhone] = useState('9699925206');
-  const [adminPassword, setAdminPassword] = useState('test@12345');
-  const [adminError, setAdminError] = useState<string | null>(null);
-  const [adminLoading, setAdminLoading] = useState(false);
-
-  const [riderPhone, setRiderPhone] = useState('9699925206');
-  const [riderPassword, setRiderPassword] = useState('Shubham@7');
-  const [riderError, setRiderError] = useState<string | null>(null);
-  const [riderLoading, setRiderLoading] = useState(false);
 
   // Sync route on hashchange
   useEffect(() => {
@@ -64,7 +53,7 @@ export default function App() {
     } catch (e) {}
   }, [cart]);
 
-  // Check login on startup
+  // Check and persist session on startup/refresh
   useEffect(() => {
     const initAuth = async () => {
       const token = authStorage.getToken();
@@ -115,47 +104,26 @@ export default function App() {
     setCart([]);
   };
 
+  // Secure Logout
   const handleLogout = () => {
     authStorage.clearToken();
     setCurrentUser(null);
     window.location.hash = '#/';
+    setRoute('customer');
   };
 
-  // Dedicated Admin Login Handler
-  const handleAdminLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAdminLoading(true);
-    setAdminError(null);
-    try {
-      const res = await api.login(adminPhone.trim(), adminPassword);
-      if (res.user.role !== 'admin') {
-        throw new Error('Access denied: Account does not have Administrator privileges.');
-      }
-      authStorage.setToken(res.token);
-      setCurrentUser(res.user);
-    } catch (err: any) {
-      setAdminError(err.message || 'Invalid administrator credentials.');
-    } finally {
-      setAdminLoading(false);
-    }
-  };
-
-  // Dedicated Rider Login Handler
-  const handleRiderLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setRiderLoading(true);
-    setRiderError(null);
-    try {
-      const res = await api.login(riderPhone.trim(), riderPassword);
-      if (res.user.role !== 'rider' && res.user.role !== 'admin') {
-        throw new Error('Access denied: Account is not registered as a Delivery Partner.');
-      }
-      authStorage.setToken(res.token);
-      setCurrentUser(res.user);
-    } catch (err: any) {
-      setRiderError(err.message || 'Invalid delivery partner credentials.');
-    } finally {
-      setRiderLoading(false);
+  // Automatic role-based routing upon successful authentication
+  const handleAuthSuccess = (user: User) => {
+    setCurrentUser(user);
+    if (user.role === 'admin') {
+      window.location.hash = '#/admin';
+      setRoute('admin');
+    } else if (user.role === 'rider') {
+      window.location.hash = '#/rider';
+      setRoute('rider');
+    } else {
+      window.location.hash = '#/';
+      setRoute('customer');
     }
   };
 
@@ -168,90 +136,85 @@ export default function App() {
   }
 
   // ========================================================
-  // ROUTE 1: PROTECTED ADMIN DASHBOARD (#/admin)
+  // ROUTE 1: ADMIN DASHBOARD (#/admin)
   // ========================================================
   if (route === 'admin') {
-    if (!currentUser || currentUser.role !== 'admin') {
+    // If not logged in, show unified login modal/screen
+    if (!currentUser) {
       return (
         <div className="min-h-screen bg-linear-to-br from-purple-950 via-gray-900 to-purple-900 flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-purple-100 space-y-6">
-            <div className="text-center space-y-2">
-              <div className="w-16 h-16 bg-purple-100 text-purple-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-                <ShieldCheck className="w-8 h-8" />
-              </div>
-              <h2 className="text-xl font-black text-gray-900">FMP Supermart Admin Portal</h2>
-              <p className="text-xs text-gray-500">
-                Protected Console • Karanja Lad Central Warehouse
+          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-purple-100 text-center space-y-5">
+            <div className="w-16 h-16 bg-purple-100 text-purple-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+              <ShieldCheck className="w-8 h-8" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-gray-900">Admin Authentication Required</h2>
+              <p className="text-xs text-gray-500 mt-1">
+                Please sign in with your authorized administrator credentials for Karanja Lad central store.
               </p>
             </div>
-
-            {adminError && (
-              <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{adminError}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleAdminLogin} className="space-y-4">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-1">
-                  Admin Mobile Number
-                </label>
-                <div className="relative">
-                  <Phone className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
-                  <input
-                    type="tel"
-                    required
-                    value={adminPhone}
-                    onChange={e => setAdminPhone(e.target.value)}
-                    placeholder="9699925206"
-                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 focus:bg-white focus:border-purple-600 focus:ring-1 focus:ring-purple-600 outline-hidden"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-1">
-                  Master Password
-                </label>
-                <div className="relative">
-                  <Lock className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
-                  <input
-                    type="password"
-                    required
-                    value={adminPassword}
-                    onChange={e => setAdminPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 focus:bg-white focus:border-purple-600 focus:ring-1 focus:ring-purple-600 outline-hidden"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={adminLoading}
-                className="w-full bg-purple-700 hover:bg-purple-800 text-white font-black py-3 rounded-xl text-xs tracking-wider uppercase transition cursor-pointer shadow-md flex items-center justify-center gap-2 disabled:opacity-60"
-              >
-                {adminLoading ? (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                ) : (
-                  <>
-                    <ShieldCheck className="w-4 h-4" />
-                    <span>Enter Admin Dashboard</span>
-                  </>
-                )}
-              </button>
-            </form>
-
+            <button
+              onClick={() => setIsAuthOpen(true)}
+              className="w-full py-3 bg-purple-700 hover:bg-purple-800 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2"
+            >
+              <Lock className="w-4 h-4" />
+              <span>Sign In to Continue</span>
+            </button>
             <div className="pt-2 border-t border-gray-100 flex items-center justify-between text-xs">
-              <a
-                href="#/"
+              <button
+                onClick={() => {
+                  window.location.hash = '#/';
+                  setRoute('customer');
+                }}
                 className="text-gray-500 hover:text-gray-900 font-semibold flex items-center gap-1 cursor-pointer"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Return to Storefront</span>
-              </a>
+              </button>
               <span className="text-[11px] text-gray-400 font-medium">Karanja Lad (444105)</span>
+            </div>
+          </div>
+
+          <AuthModal
+            isOpen={isAuthOpen}
+            onClose={() => setIsAuthOpen(false)}
+            onAuthSuccess={handleAuthSuccess}
+          />
+        </div>
+      );
+    }
+
+    // Role-based Access Control: Customer or Rider attempting to view Admin
+    if (currentUser.role !== 'admin') {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-red-200 text-center space-y-4">
+            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center mx-auto">
+              <ShieldAlert className="w-8 h-8" />
+            </div>
+            <h2 className="text-lg font-black text-gray-900">Access Denied (403 Forbidden)</h2>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              You are currently signed in as <span className="font-bold text-gray-900">{currentUser.name}</span> (
+              <span className="capitalize font-semibold text-red-600">{currentUser.role}</span>).
+              Only store administrators are authorized to access the Admin Dashboard.
+            </p>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                onClick={() => {
+                  window.location.hash = '#/';
+                  setRoute('customer');
+                }}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
+              >
+                Return to Customer Storefront
+              </button>
+              <button
+                onClick={handleLogout}
+                className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Sign Out & Switch Account</span>
+              </button>
             </div>
           </div>
         </div>
@@ -264,96 +227,91 @@ export default function App() {
         onLogout={handleLogout}
         onSwitchToCustomerView={() => {
           window.location.hash = '#/';
+          setRoute('customer');
         }}
       />
     );
   }
 
   // ========================================================
-  // ROUTE 2: PROTECTED DELIVERY PARTNER APP (#/rider)
+  // ROUTE 2: DELIVERY PARTNER DASHBOARD (#/rider)
   // ========================================================
   if (route === 'rider') {
-    if (!currentUser || (currentUser.role !== 'rider' && currentUser.role !== 'admin')) {
+    // If not logged in, prompt sign in via single login modal/screen
+    if (!currentUser) {
       return (
         <div className="min-h-screen bg-linear-to-br from-amber-950 via-gray-900 to-amber-900 flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-amber-100 space-y-6">
-            <div className="text-center space-y-2">
-              <div className="w-16 h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-                <Truck className="w-8 h-8" />
-              </div>
+          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-amber-100 text-center space-y-5">
+            <div className="w-16 h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+              <Truck className="w-8 h-8" />
+            </div>
+            <div>
               <h2 className="text-xl font-black text-gray-900">Delivery Partner Portal</h2>
-              <p className="text-xs text-gray-500">
-                FMP Supermart Fleet • Karanja Lad
+              <p className="text-xs text-gray-500 mt-1">
+                Please sign in with your registered delivery partner account.
               </p>
             </div>
-
-            {riderError && (
-              <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{riderError}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleRiderLogin} className="space-y-4">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-1">
-                  Rider Registered Mobile
-                </label>
-                <div className="relative">
-                  <Phone className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
-                  <input
-                    type="tel"
-                    required
-                    value={riderPhone}
-                    onChange={e => setRiderPhone(e.target.value)}
-                    placeholder="9699925206"
-                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 focus:bg-white focus:border-amber-600 focus:ring-1 focus:ring-amber-600 outline-hidden"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-1">
-                  Password
-                </label>
-                <div className="relative">
-                  <Lock className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
-                  <input
-                    type="password"
-                    required
-                    value={riderPassword}
-                    onChange={e => setRiderPassword(e.target.value)}
-                    placeholder="••••••••"
-                    className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 focus:bg-white focus:border-amber-600 focus:ring-1 focus:ring-amber-600 outline-hidden"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={riderLoading}
-                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-black py-3 rounded-xl text-xs tracking-wider uppercase transition cursor-pointer shadow-md flex items-center justify-center gap-2 disabled:opacity-60"
-              >
-                {riderLoading ? (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                ) : (
-                  <>
-                    <Truck className="w-4 h-4" />
-                    <span>Sign In to Rider Dashboard</span>
-                  </>
-                )}
-              </button>
-            </form>
-
+            <button
+              onClick={() => setIsAuthOpen(true)}
+              className="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2"
+            >
+              <Lock className="w-4 h-4" />
+              <span>Sign In to Continue</span>
+            </button>
             <div className="pt-2 border-t border-gray-100 flex items-center justify-between text-xs">
-              <a
-                href="#/"
+              <button
+                onClick={() => {
+                  window.location.hash = '#/';
+                  setRoute('customer');
+                }}
                 className="text-gray-500 hover:text-gray-900 font-semibold flex items-center gap-1 cursor-pointer"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Return to Storefront</span>
-              </a>
+              </button>
               <span className="text-[11px] text-gray-400 font-medium">OTP Verification Enabled</span>
+            </div>
+          </div>
+
+          <AuthModal
+            isOpen={isAuthOpen}
+            onClose={() => setIsAuthOpen(false)}
+            onAuthSuccess={handleAuthSuccess}
+          />
+        </div>
+      );
+    }
+
+    // Role-based Access Control: Customers cannot view rider dashboard
+    if (currentUser.role !== 'rider' && currentUser.role !== 'admin') {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-amber-200 text-center space-y-4">
+            <div className="w-16 h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto">
+              <ShieldAlert className="w-8 h-8" />
+            </div>
+            <h2 className="text-lg font-black text-gray-900">Access Denied (403 Forbidden)</h2>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              You are signed in as <span className="font-bold text-gray-900">{currentUser.name}</span> (Customer).
+              This console is reserved exclusively for registered FMP delivery riders.
+            </p>
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                onClick={() => {
+                  window.location.hash = '#/';
+                  setRoute('customer');
+                }}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
+              >
+                Return to Customer Storefront
+              </button>
+              <button
+                onClick={handleLogout}
+                className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Sign Out & Switch Account</span>
+              </button>
             </div>
           </div>
         </div>
@@ -370,7 +328,7 @@ export default function App() {
 
   // ========================================================
   // ROUTE 3: CUSTOMER STOREFRONT (#/ or default)
-  // No top switchers, no banner clutter, clean grocery shopping
+  // Clean grocery shopping inspired by Blinkit/Zepto
   // ========================================================
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans antialiased text-gray-900">
@@ -397,19 +355,11 @@ export default function App() {
         />
       </main>
 
-      {/* Customer Auth Modal (for normal shoppers) */}
+      {/* Unified Single Login Modal */}
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
-        initialRole="customer"
-        onAuthSuccess={(user) => {
-          setCurrentUser(user);
-          if (user.role === 'admin') {
-            window.location.hash = '#/admin';
-          } else if (user.role === 'rider') {
-            window.location.hash = '#/rider';
-          }
-        }}
+        onAuthSuccess={handleAuthSuccess}
       />
     </div>
   );

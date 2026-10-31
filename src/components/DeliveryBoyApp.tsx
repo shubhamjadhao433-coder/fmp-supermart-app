@@ -318,11 +318,17 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
         {/* Tab 5: Cash in Hand dedicated View */}
         {activeTab === 'cash_in_hand' && codSummary && (
           <div className="space-y-4">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
               <div className="bg-white rounded-2xl p-4 border-2 border-emerald-500 shadow-sm">
                 <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider">Cash in Hand</div>
                 <div className="text-2xl font-black text-emerald-900 mt-1">₹{codSummary.summary.cash_in_hand}</div>
                 <div className="text-[10px] text-emerald-700 font-medium">To Handover to Admin</div>
+              </div>
+
+              <div className="bg-white rounded-2xl p-4 border border-amber-300 bg-amber-50/40 shadow-sm">
+                <div className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">Tips Earned</div>
+                <div className="text-2xl font-black text-amber-900 mt-1">₹{codSummary.summary.total_tips_collected || 0}</div>
+                <div className="text-[10px] text-amber-700 font-bold">100% Rider Earnings</div>
               </div>
 
               <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm">
@@ -337,7 +343,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                 <div className="text-[10px] text-purple-600 font-medium">{codSummary.summary.reconciled_orders} orders deposited</div>
               </div>
 
-              <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm">
+              <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm col-span-2 sm:col-span-1">
                 <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Hub Location</div>
                 <div className="text-sm font-bold text-gray-900 mt-1 truncate">Shivaji Chowk</div>
                 <div className="text-[10px] text-gray-500 font-medium">Karanja Lad (444105)</div>
@@ -527,7 +533,13 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                       <div>
                         <div className="text-[10px] text-gray-400 font-bold uppercase">COD Amount to Collect</div>
                         <div className="font-black text-lg text-emerald-800">₹{order.total_amount}</div>
-                        <div className="text-[10px] text-gray-500">Cash on Delivery only</div>
+                        {Number(order.tip_amount) > 0 ? (
+                          <div className="text-[10px] text-amber-800 font-bold bg-amber-50 px-2 py-0.5 rounded-md mt-0.5 border border-amber-200">
+                            Includes ₹{order.tip_amount} Customer Tip (100% yours! 💖)
+                          </div>
+                        ) : (
+                          <div className="text-[10px] text-gray-500">Cash on Delivery only</div>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">

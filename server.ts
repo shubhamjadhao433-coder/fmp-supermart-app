@@ -63,13 +63,13 @@ app.get('/api/health', async (req: Request, res: Response) => {
       },
       database: {
         healthy: test.rows.length > 0,
-        type: process.env.DATABASE_URL ? 'PostgreSQL (External)' : 'PostgreSQL (High-fidelity Engine)'
+        type: process.env.DATABASE_URL && (process.env.DATABASE_URL.startsWith('postgres://') || process.env.DATABASE_URL.startsWith('postgresql://')) ? 'PostgreSQL (External)' : 'PostgreSQL (High-fidelity Engine)'
       },
       businessRules: {
-        minFreeDeliveryThreshold: 299,
-        deliveryFeeBelowThreshold: 25,
+        deliveryFeeModel: 'Admin Controlled (Default ₹25, Configurable per order/area, ₹0 allowed)',
         handlingCharge: 5,
-        paymentMode: 'Cash on Delivery (COD) Only'
+        paymentMode: 'Cash on Delivery (COD) Only',
+        warehouseLocation: 'Karanja Lad Central Hub (444105)'
       }
     });
   } catch (err: any) {
@@ -94,7 +94,8 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     }
 
     const db = await getDb();
-    const userRole = role === 'admin' || role === 'rider' ? role : 'customer';
+    // Public registration is strictly for customers only. Delivery partner accounts are managed exclusively by Admin.
+    const userRole = 'customer';
     const existing = await db.query('SELECT id FROM users WHERE phone = $1 AND role = $2', [cleanPhone, userRole]);
     if (existing.rows.length > 0) {
       return res.status(400).json({ error: `An account with this phone number already exists as ${userRole}. Please login.` });
@@ -154,6 +155,10 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Incorrect password. Please try again.' });
     }
 
+    if (matchedUser.is_active === false) {
+      return res.status(403).json({ error: 'Your account is deactivated. Please contact store admin at Shivaji Chowk (9699925206).' });
+    }
+
     const token = generateToken(matchedUser);
     await logAudit(matchedUser.id, matchedUser.role, 'USER_LOGIN', 'users', matchedUser.id, `User ${matchedUser.name} logged in as ${matchedUser.role}`);
 
@@ -172,6 +177,105 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     res.status(500).json({ error: 'Login failed: ' + err.message });
+  }
+});
+
+// Secure Admin-Assisted Forgot Password Workflow (Zero Fake SMS)
+app.post('/api/auth/forgot-password-request', async (req: Request, res: Response) => {
+  try {
+    const { phone, notes } = req.body;
+    if (!phone) {
+      return res.status(400).json({ error: 'Registered mobile number is required.' });
+    }
+
+    const cleanPhone = phone.trim().replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit registered mobile number.' });
+    }
+
+    const db = await getDb();
+    const userRes = await db.query('SELECT id, name, role FROM users WHERE phone = $1', [cleanPhone]);
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ error: 'No account found with this mobile number. Please check the number or register as a new customer.' });
+    }
+
+    const matched = userRes.rows[0];
+    await db.query(
+      `INSERT INTO password_reset_requests (phone, name, role, status, notes, created_at)
+       VALUES ($1, $2, $3, 'pending', $4, CURRENT_TIMESTAMP)`,
+      [cleanPhone, matched.name, matched.role, notes ? notes.trim() : 'Requested via single login portal']
+    );
+
+    await logAudit(
+      matched.id,
+      matched.role,
+      'PASSWORD_RESET_REQUESTED',
+      'password_reset_requests',
+      matched.id,
+      `User ${matched.name} requested password reset assistance`
+    );
+
+    res.json({
+      message: 'Password reset request registered successfully! The FMP Supermart central store admin has received your ticket.',
+      support_phone: '9699925206',
+      support_address: 'Central Warehouse, Shivaji Chowk, Karanja Lad (444105)'
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to process request: ' + err.message });
+  }
+});
+
+// Admin view pending password reset requests
+app.get('/api/admin/password-reset-requests', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = await getDb();
+    const result = await db.query('SELECT * FROM password_reset_requests ORDER BY created_at DESC LIMIT 50');
+    res.json(result.rows);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin reset password for a user
+app.post('/api/admin/reset-user-password', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { phone, new_password, request_id } = req.body;
+    if (!phone || !new_password) {
+      return res.status(400).json({ error: 'Phone number and new password are required.' });
+    }
+    if (new_password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+
+    const cleanPhone = phone.trim().replace(/\D/g, '');
+    const newHash = await bcrypt.hash(new_password, 10);
+    const db = await getDb();
+
+    const userRes = await db.query('SELECT id, name, role FROM users WHERE phone = $1', [cleanPhone]);
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    await db.query('UPDATE users SET password_hash = $1 WHERE phone = $2', [newHash, cleanPhone]);
+
+    if (request_id) {
+      await db.query("UPDATE password_reset_requests SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE id = $1", [request_id]);
+    } else {
+      await db.query("UPDATE password_reset_requests SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE phone = $1 AND status = 'pending'", [cleanPhone]);
+    }
+
+    await logAudit(
+      req.user!.id,
+      'admin',
+      'USER_PASSWORD_RESET',
+      'users',
+      userRes.rows[0].id,
+      `Admin reset password for user ${userRes.rows[0].name} (${cleanPhone})`
+    );
+
+    res.json({ message: `Password reset successfully for ${userRes.rows[0].name}.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -225,6 +329,136 @@ app.get('/api/categories', async (req: Request, res: Response) => {
   }
 });
 
+// ----------------------------------------------------
+// Delivery Settings & Delivery Slots Endpoints
+// Admin has complete control over delivery fee & handling
+// ----------------------------------------------------
+app.get('/api/settings/delivery', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const result = await db.query('SELECT * FROM delivery_settings LIMIT 1');
+    if (result.rows.length === 0) {
+      return res.json({
+        default_delivery_fee: 25,
+        handling_fee: 5,
+        min_order_amount: 0,
+        delivery_areas: '[{"pincode":"444105","area":"Karanja Lad City Center","fee":25}]'
+      });
+    }
+    const settings = result.rows[0];
+    res.json({
+      ...settings,
+      default_delivery_fee: Number(settings.default_delivery_fee),
+      handling_fee: Number(settings.handling_fee),
+      min_order_amount: Number(settings.min_order_amount || 0)
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/settings/delivery', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { default_delivery_fee, handling_fee, min_order_amount, delivery_areas } = req.body;
+    const db = await getDb();
+
+    const defFee = Number(default_delivery_fee);
+    const handFee = handling_fee !== undefined ? Number(handling_fee) : 5;
+    const minOrder = Number(min_order_amount || 0);
+    const areasStr = typeof delivery_areas === 'object' ? JSON.stringify(delivery_areas) : (delivery_areas || '[]');
+
+    const check = await db.query('SELECT id FROM delivery_settings LIMIT 1');
+    let result;
+    if (check.rows.length === 0) {
+      result = await db.query(
+        `INSERT INTO delivery_settings (id, default_delivery_fee, handling_fee, min_order_amount, delivery_areas, updated_at)
+         VALUES (1, $1, $2, $3, $4, CURRENT_TIMESTAMP) RETURNING *`,
+        [defFee, handFee, minOrder, areasStr]
+      );
+    } else {
+      result = await db.query(
+        `UPDATE delivery_settings
+         SET default_delivery_fee = $1, handling_fee = $2, min_order_amount = $3, delivery_areas = $4, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5 RETURNING *`,
+        [defFee, handFee, minOrder, areasStr, check.rows[0].id]
+      );
+    }
+
+    await logAudit(req.user!.id, 'admin', 'DELIVERY_SETTINGS_UPDATED', 'delivery_settings', 1, `Updated delivery fee to ₹${defFee}, handling to ₹${handFee}`);
+    res.json({ message: 'Delivery settings updated successfully.', settings: result.rows[0] });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/delivery-slots', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const result = await db.query('SELECT * FROM delivery_slots WHERE is_active = TRUE ORDER BY display_order ASC, id ASC');
+    res.json(result.rows);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/delivery-slots', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, time_window, max_orders_per_slot, display_order } = req.body;
+    if (!name || !time_window) {
+      return res.status(400).json({ error: 'Slot name and time window are required.' });
+    }
+
+    const db = await getDb();
+    const result = await db.query(
+      `INSERT INTO delivery_slots (name, time_window, max_orders_per_slot, is_active, display_order)
+       VALUES ($1, $2, $3, TRUE, $4) RETURNING *`,
+      [name.trim(), time_window.trim(), Number(max_orders_per_slot) || 25, Number(display_order) || 1]
+    );
+
+    await logAudit(req.user!.id, 'admin', 'DELIVERY_SLOT_CREATED', 'delivery_slots', result.rows[0].id, `Added slot ${name}`);
+    res.status(201).json(result.rows[0]);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/delivery-slots/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { name, time_window, max_orders_per_slot, is_active, display_order } = req.body;
+
+    const db = await getDb();
+    const result = await db.query(
+      `UPDATE delivery_slots
+       SET name = COALESCE($1, name),
+           time_window = COALESCE($2, time_window),
+           max_orders_per_slot = COALESCE($3, max_orders_per_slot),
+           is_active = COALESCE($4, is_active),
+           display_order = COALESCE($5, display_order)
+       WHERE id = $6 RETURNING *`,
+      [name?.trim(), time_window?.trim(), max_orders_per_slot, is_active, display_order, id]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Delivery slot not found.' });
+    await logAudit(req.user!.id, 'admin', 'DELIVERY_SLOT_UPDATED', 'delivery_slots', id, `Updated delivery slot`);
+    res.json(result.rows[0]);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/delivery-slots/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const db = await getDb();
+    await db.query('UPDATE delivery_slots SET is_active = FALSE WHERE id = $1', [id]);
+    await logAudit(req.user!.id, 'admin', 'DELIVERY_SLOT_DEACTIVATED', 'delivery_slots', id, `Deactivated slot`);
+    res.json({ message: 'Delivery slot removed.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/products', async (req: Request, res: Response) => {
   try {
     const { category, search, in_stock } = req.query;
@@ -245,7 +479,7 @@ app.get('/api/products', async (req: Request, res: Response) => {
 
     if (search) {
       params.push(`%${search}%`);
-      query += ` AND (p.name ILIKE $${params.length} OR p.description ILIKE $${params.length})`;
+      query += ` AND (p.name ILIKE $${params.length} OR p.description ILIKE $${params.length} OR ('FMP-' || p.id) ILIKE $${params.length} OR c.name ILIKE $${params.length})`;
     }
 
     if (in_stock === 'true') {
@@ -465,10 +699,31 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
         });
       }
 
-      // Business Rules for Delivery Charges
-      const deliveryFee = subtotal >= 299 ? 0 : 25;
-      const handlingFee = 5;
-      const totalAmount = subtotal + deliveryFee + handlingFee;
+      // Business Rules for Delivery Charges (Admin-controlled, no automatic ₹299 threshold)
+      const settingsRes = await client.query('SELECT * FROM delivery_settings LIMIT 1');
+      const settings = settingsRes.rows[0];
+      let deliveryFee = settings ? Number(settings.default_delivery_fee) : 25;
+
+      // Area-based delivery fee matching if configured
+      if (settings && settings.delivery_areas && (req.body.landmark || address)) {
+        try {
+          const areas = typeof settings.delivery_areas === 'string' ? JSON.parse(settings.delivery_areas) : settings.delivery_areas;
+          const searchStr = `${req.body.landmark || ''} ${address || ''}`.toLowerCase();
+          const matchedArea = areas.find((a: any) => searchStr.includes(a.area.toLowerCase()));
+          if (matchedArea && typeof matchedArea.fee === 'number') {
+            deliveryFee = matchedArea.fee;
+          }
+        } catch (e) {}
+      }
+
+      // Explicit delivery fee override if passed by admin or promotional coupon
+      if (typeof req.body.delivery_fee === 'number' && req.body.delivery_fee >= 0) {
+        deliveryFee = Number(req.body.delivery_fee);
+      }
+
+      const handlingFee = settings ? Number(settings.handling_fee) : 5;
+      const tipAmount = Math.max(0, Math.round(Number(req.body.tip_amount) || 0));
+      const totalAmount = subtotal + deliveryFee + handlingFee + tipAmount;
 
       // Insert Order with scheduling and default false flags
       const deliveryType = req.body.delivery_type === 'scheduled' ? 'scheduled' : 'immediate';
@@ -478,10 +733,10 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
       const orderRes = await client.query(
         `INSERT INTO orders (
           order_number, customer_id, customer_name, customer_phone,
-          delivery_address, landmark, pincode, subtotal, delivery_fee, handling_fee, total_amount,
+          delivery_address, landmark, pincode, subtotal, delivery_fee, handling_fee, tip_amount, total_amount,
           payment_mode, status, delivery_type, scheduled_date, time_slot, cod_collected, cod_reconciled
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'COD', 'placed', $12, $13, $14, FALSE, FALSE
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'COD', 'placed', $13, $14, $15, FALSE, FALSE
         ) RETURNING *`,
         [
           orderNumber,
@@ -494,6 +749,7 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
           subtotal,
           deliveryFee,
           handlingFee,
+          tipAmount,
           totalAmount,
           deliveryType,
           scheduledDate,
@@ -706,19 +962,22 @@ app.put('/api/orders/:id/status', requireAuth, requireRole(['admin']), async (re
   }
 });
 
-// List riders for assignment
+// List riders for assignment and fleet management
 app.get('/api/admin/riders', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const db = await getDb();
     const result = await db.query(
-      `SELECT u.id, u.name, u.phone,
+      `SELECT u.id, u.name, u.phone, u.email, u.address, u.landmark, u.is_active,
+              COUNT(CASE WHEN o.status IN ('placed', 'confirmed', 'packed', 'dispatched') THEN 1 END) as assigned_deliveries,
               COUNT(CASE WHEN o.status = 'dispatched' THEN 1 END) as active_deliveries,
+              COUNT(CASE WHEN o.status = 'delivered' THEN 1 END) as total_delivered,
+              COUNT(CASE WHEN o.failure_reason IS NOT NULL THEN 1 END) as failed_deliveries,
               COUNT(CASE WHEN o.status = 'delivered' AND o.cod_reconciled = FALSE THEN 1 END) as unreconciled_orders,
               COALESCE(SUM(CASE WHEN o.status = 'delivered' AND o.cod_reconciled = FALSE THEN o.total_amount ELSE 0 END), 0) as cash_in_hand
        FROM users u
        LEFT JOIN orders o ON u.id = o.rider_id
        WHERE u.role = 'rider'
-       GROUP BY u.id, u.name, u.phone
+       GROUP BY u.id, u.name, u.phone, u.email, u.address, u.landmark, u.is_active
        ORDER BY u.name ASC`
     );
     res.json(result.rows);
@@ -727,18 +986,125 @@ app.get('/api/admin/riders', requireAuth, requireRole(['admin']), async (req: Au
   }
 });
 
-// Assign rider to order
+// Admin Create Rider Account
+app.post('/api/admin/riders', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, phone, password, email, address, landmark } = req.body;
+    if (!name || !phone || !password) {
+      return res.status(400).json({ error: 'Rider name, mobile number, and initial password are required.' });
+    }
+
+    const cleanPhone = phone.trim().replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
+    }
+
+    const db = await getDb();
+    const existing = await db.query('SELECT id FROM users WHERE phone = $1 AND role = $2', [cleanPhone, 'rider']);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'A delivery rider with this mobile number already exists.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await db.query(
+      `INSERT INTO users (phone, name, email, role, password_hash, address, landmark, city, pincode, is_active)
+       VALUES ($1, $2, $3, 'rider', $4, $5, $6, 'Karanja Lad', '444105', TRUE)
+       RETURNING id, name, phone, email, address, landmark, is_active`,
+      [cleanPhone, name.trim(), email?.trim() || null, passwordHash, address?.trim() || 'Karanja Lad', landmark?.trim() || null]
+    );
+
+    const rider = result.rows[0];
+    await logAudit(req.user!.id, 'admin', 'RIDER_CREATED', 'users', rider.id, `Created delivery partner account for ${rider.name} (${cleanPhone})`);
+
+    res.status(201).json({ message: 'Delivery partner account created successfully.', rider });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Update Rider Details / Toggle Active
+app.put('/api/admin/riders/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { name, phone, email, address, landmark, is_active } = req.body;
+
+    const db = await getDb();
+    const result = await db.query(
+      `UPDATE users
+       SET name = COALESCE($1, name),
+           phone = COALESCE($2, phone),
+           email = COALESCE($3, email),
+           address = COALESCE($4, address),
+           landmark = COALESCE($5, landmark),
+           is_active = COALESCE($6, is_active)
+       WHERE id = $7 AND role = 'rider'
+       RETURNING id, name, phone, email, address, landmark, is_active`,
+      [name?.trim(), phone ? phone.trim().replace(/\D/g, '') : null, email?.trim(), address?.trim(), landmark?.trim(), is_active, id]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Delivery rider not found.' });
+
+    await logAudit(req.user!.id, 'admin', 'RIDER_UPDATED', 'users', id, `Updated delivery partner profile for ${result.rows[0].name}`);
+    res.json({ message: 'Rider details updated.', rider: result.rows[0] });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Reset Rider Password
+app.put('/api/admin/riders/:id/reset-password', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { password } = req.body;
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const db = await getDb();
+    const result = await db.query(
+      'UPDATE users SET password_hash = $1 WHERE id = $2 AND role = $3 RETURNING id, name, phone',
+      [passwordHash, id, 'rider']
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Delivery rider not found.' });
+
+    await logAudit(req.user!.id, 'admin', 'RIDER_PASSWORD_RESET', 'users', id, `Reset password for rider ${result.rows[0].name}`);
+    res.json({ message: `Password successfully reset for ${result.rows[0].name}.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Assign or Reassign rider to order
 app.post('/api/orders/:id/assign-rider', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
     const { rider_id } = req.body;
 
     const db = await getDb();
-    const riderRes = await db.query('SELECT id, name, phone FROM users WHERE id = $1 AND role = $2', [rider_id, 'rider']);
+    const riderRes = await db.query('SELECT id, name, phone, is_active FROM users WHERE id = $1 AND role = $2', [rider_id, 'rider']);
     if (riderRes.rows.length === 0) {
       return res.status(404).json({ error: 'Delivery rider not found.' });
     }
     const rider = riderRes.rows[0];
+
+    // Prevent assigning to inactive delivery partners
+    if (rider.is_active === false) {
+      return res.status(400).json({ error: 'Cannot assign order to an inactive delivery partner. Please activate their account first.' });
+    }
+
+    const currentOrderRes = await db.query('SELECT rider_id, rider_name, order_number, customer_name, delivery_address, status FROM orders WHERE id = $1', [id]);
+    if (currentOrderRes.rows.length === 0) return res.status(404).json({ error: 'Order not found.' });
+    const currentOrder = currentOrderRes.rows[0];
+
+    // Prevent duplicate active ownership
+    if (currentOrder.rider_id === rider.id) {
+      return res.json({ message: `Order #${currentOrder.order_number} is already assigned to ${rider.name}.`, order: currentOrder });
+    }
+
+    const isReassignment = !!currentOrder.rider_id;
+    const oldRiderName = currentOrder.rider_name || 'Unassigned';
 
     const result = await db.query(
       `UPDATE orders 
@@ -747,18 +1113,82 @@ app.post('/api/orders/:id/assign-rider', requireAuth, requireRole(['admin']), as
       [rider.id, rider.name, rider.phone, id]
     );
 
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Order not found.' });
     const order = result.rows[0];
 
-    // Notification to rider
+    // Notification to new rider
     await db.query(
       `INSERT INTO notifications (user_id, title, message, type, order_id)
        VALUES ($1, 'New Order Assigned 🛵', $2, 'order', $3)`,
       [rider.id, `Order #${order.order_number} to ${order.customer_name} (${order.delivery_address}) assigned to you.`, id]
     );
 
-    await logAudit(req.user!.id, 'admin', 'RIDER_ASSIGNED', 'orders', id, `Assigned rider ${rider.name} to order #${order.order_number}`);
+    const auditAction = isReassignment ? 'RIDER_REASSIGNED' : 'RIDER_ASSIGNED';
+    const auditText = isReassignment
+      ? `Reassigned order #${order.order_number} from ${oldRiderName} to ${rider.name}`
+      : `Assigned rider ${rider.name} to order #${order.order_number}`;
+
+    await logAudit(req.user!.id, 'admin', auditAction, 'orders', id, auditText);
     res.json(order);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin: Set/Update delivery fee for an individual order (including ₹0)
+app.put('/api/orders/:id/delivery-fee', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { delivery_fee } = req.body;
+
+    if (delivery_fee === undefined || isNaN(Number(delivery_fee)) || Number(delivery_fee) < 0) {
+      return res.status(400).json({ error: 'Please specify a valid delivery fee (₹0 or greater).' });
+    }
+
+    const newFee = Number(delivery_fee);
+    const db = await getDb();
+
+    const orderRes = await db.query('SELECT * FROM orders WHERE id = $1', [id]);
+    if (orderRes.rows.length === 0) return res.status(404).json({ error: 'Order not found.' });
+    const order = orderRes.rows[0];
+
+    if (['delivered', 'cancelled'].includes(order.status)) {
+      return res.status(400).json({ error: `Cannot alter delivery fee for an order that is already ${order.status}.` });
+    }
+
+    const oldFee = Number(order.delivery_fee);
+    const tip = Number(order.tip_amount) || 0;
+    const newTotal = Number(order.subtotal) + newFee + Number(order.handling_fee) + tip;
+
+    const updateRes = await db.query(
+      `UPDATE orders 
+       SET delivery_fee = $1, total_amount = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3 RETURNING *`,
+      [newFee, newTotal, id]
+    );
+
+    const updatedOrder = updateRes.rows[0];
+
+    // Notification to customer
+    await db.query(
+      `INSERT INTO notifications (user_id, title, message, type, order_id)
+       VALUES ($1, 'Order Delivery Fee Updated', $2, 'order', $3)`,
+      [
+        order.customer_id,
+        `Delivery fee for order #${order.order_number} was adjusted from ₹${oldFee} to ₹${newFee}. New payable COD amount: ₹${newTotal}.`,
+        id
+      ]
+    );
+
+    await logAudit(
+      req.user!.id,
+      'admin',
+      'ORDER_DELIVERY_FEE_UPDATED',
+      'orders',
+      id,
+      `Adjusted delivery fee from ₹${oldFee} to ₹${newFee}. Total COD payable updated to ₹${newTotal}.`
+    );
+
+    res.json({ message: `Delivery fee updated to ₹${newFee}. Total payable: ₹${newTotal}.`, order: updatedOrder });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1216,6 +1646,7 @@ app.get('/api/rider/cod-summary', requireAuth, requireRole(['rider', 'admin']), 
       `SELECT 
          COUNT(CASE WHEN cod_collected = TRUE THEN 1 END) as total_collected_orders,
          COALESCE(SUM(CASE WHEN cod_collected = TRUE THEN total_amount ELSE 0 END), 0) as total_cash_collected,
+         COALESCE(SUM(CASE WHEN cod_collected = TRUE THEN tip_amount ELSE 0 END), 0) as total_tips_collected,
          COUNT(CASE WHEN cod_collected = TRUE AND (cod_reconciled IS NULL OR cod_reconciled = FALSE) THEN 1 END) as pending_reconcile_orders,
          COALESCE(SUM(CASE WHEN cod_collected = TRUE AND (cod_reconciled IS NULL OR cod_reconciled = FALSE) THEN total_amount ELSE 0 END), 0) as cash_in_hand,
          COUNT(CASE WHEN cod_reconciled = TRUE THEN 1 END) as reconciled_orders,
@@ -1226,7 +1657,7 @@ app.get('/api/rider/cod-summary', requireAuth, requireRole(['rider', 'admin']), 
     );
 
     const pendingOrders = await db.query(
-      `SELECT id, order_number, customer_name, delivery_address, total_amount, cod_collected_at
+      `SELECT id, order_number, customer_name, delivery_address, total_amount, tip_amount, cod_collected_at
        FROM orders
        WHERE rider_id = $1 AND cod_collected = TRUE AND (cod_reconciled IS NULL OR cod_reconciled = FALSE)
        ORDER BY cod_collected_at DESC`,

@@ -66,6 +66,7 @@ export interface Order {
   subtotal: number | string;
   delivery_fee: number | string;
   handling_fee: number | string;
+  tip_amount?: number | string;
   total_amount: number | string;
   payment_mode: 'COD';
   status: 'placed' | 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled';
@@ -164,6 +165,7 @@ export interface RiderSummary {
   summary: {
     total_collected_orders: number;
     total_cash_collected: number;
+    total_tips_collected?: number;
     pending_reconcile_orders: number;
     cash_in_hand: number;
     reconciled_orders: number;
@@ -171,3 +173,47 @@ export interface RiderSummary {
   };
   pendingOrders: Order[];
 }
+
+export interface PasswordResetRequest {
+  id: number;
+  phone: string;
+  name?: string;
+  role: string;
+  status: 'pending' | 'resolved';
+  notes?: string;
+  created_at: string;
+  resolved_at?: string;
+}
+
+export interface DeliverySettings {
+  id?: number;
+  default_delivery_fee: number;
+  handling_fee: number;
+  min_order_amount?: number;
+  delivery_areas?: string;
+  updated_at?: string;
+}
+
+export interface DeliverySlot {
+  id: number;
+  name: string;
+  time_window: string;
+  max_orders_per_slot: number;
+  is_active: boolean;
+  display_order: number;
+}
+
+export interface RiderUser {
+  id: number;
+  name: string;
+  phone: string;
+  email?: string;
+  address?: string;
+  landmark?: string;
+  is_active: boolean;
+  active_deliveries: number;
+  total_delivered?: number;
+  unreconciled_orders: number;
+  cash_in_hand: number;
+}
+
