@@ -16,7 +16,8 @@ import {
   LogOut,
   ShoppingBag,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Bell
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Order, RiderSummary, User } from '../types.ts';
@@ -40,6 +41,8 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
   const [assignedOrders, setAssignedOrders] = useState<Order[]>([]);
   const [codSummary, setCodSummary] = useState<RiderSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [showNotifications, setShowNotifications] = useState<boolean>(false);
 
   // OTP Verification Modal
   const [otpModalOrder, setOtpModalOrder] = useState<Order | null>(null);
@@ -55,18 +58,40 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
   const loadRiderData = async () => {
     setLoading(true);
     try {
-      const [ordersData, summaryData] = await Promise.all([
+      const [ordersData, summaryData, notifsData] = await Promise.all([
         api.getRiderOrders(),
-        api.getRiderCodSummary()
+        api.getRiderCodSummary(),
+        api.getNotifications().catch(() => [])
       ]);
       setAssignedOrders(ordersData);
       setCodSummary(summaryData);
+      setNotifications(notifsData || []);
     } catch (err) {
       console.error('Failed to load rider data:', err);
     } finally {
       setLoading(false);
     }
   };
+
+  const handleMarkNotifRead = async (id: number) => {
+    try {
+      await api.markNotificationRead(id);
+      setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
+    } catch (err) {
+      console.error('Failed to mark notification read:', err);
+    }
+  };
+
+  const handleMarkAllNotifsRead = async () => {
+    try {
+      await api.markAllNotificationsRead();
+      setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+    } catch (err) {
+      console.error('Failed to mark all notifications read:', err);
+    }
+  };
+
+  const unreadNotifCount = notifications.filter(n => !n.is_read).length;
 
   useEffect(() => {
     if (currentUser && (currentUser.role === 'rider' || currentUser.role === 'admin')) {
@@ -184,6 +209,81 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
             <div className="flex items-center gap-2 shrink-0">
               <PWAInstallButton className="bg-amber-700/80 text-white border-amber-400/50 hover:bg-amber-800" />
+              
+              {/* Rider Notifications */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowNotifications(!showNotifications)}
+                  className="bg-amber-700 hover:bg-amber-800 p-2 sm:px-3 sm:py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shadow-xs border border-amber-500/50 relative"
+                  title="Delivery Notifications"
+                >
+                  <Bell className="w-4 h-4" />
+                  {unreadNotifCount > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center font-bold ring-2 ring-amber-600 animate-pulse">
+                      {unreadNotifCount}
+                    </span>
+                  )}
+                  <span className="hidden sm:inline">Alerts</span>
+                </button>
+
+                {showNotifications && (
+                  <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden z-50 text-gray-800">
+                    <div className="p-3 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Bell className="w-4 h-4 text-amber-700" />
+                        <h4 className="font-bold text-sm text-gray-800">Delivery Alerts</h4>
+                        {unreadNotifCount > 0 && (
+                          <span className="bg-amber-200 text-amber-900 text-xs px-2 py-0.5 rounded-full font-bold">
+                            {unreadNotifCount} new
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {unreadNotifCount > 0 && (
+                          <button
+                            onClick={handleMarkAllNotifsRead}
+                            className="text-xs text-amber-700 hover:underline font-bold px-1 py-0.5 cursor-pointer"
+                          >
+                            Mark all read
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setShowNotifications(false)}
+                          className="text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="max-h-80 overflow-y-auto divide-y divide-gray-100">
+                      {notifications.length === 0 ? (
+                        <div className="p-6 text-center text-gray-500 text-xs">
+                          No notifications yet
+                        </div>
+                      ) : (
+                        notifications.map((n) => (
+                          <div
+                            key={n.id}
+                            onClick={() => !n.is_read && handleMarkNotifRead(n.id)}
+                            className={`p-3 text-xs transition cursor-pointer hover:bg-gray-50 ${
+                              !n.is_read ? 'bg-amber-50/50 font-medium' : 'text-gray-600'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <span className="font-bold text-gray-900">{n.title}</span>
+                              <span className="text-[10px] text-gray-400 shrink-0">
+                                {n.created_at ? new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                              </span>
+                            </div>
+                            <p className="text-gray-600 mt-1">{n.message}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <button
                 onClick={loadRiderData}
                 disabled={loading}

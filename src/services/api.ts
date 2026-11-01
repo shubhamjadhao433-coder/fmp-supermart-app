@@ -56,11 +56,11 @@ export const api = {
   requestPasswordReset: (phone: string, notes?: string): Promise<{ message: string; support_phone: string; support_address: string }> =>
     fetchWithAuth('/api/auth/forgot-password-request', { method: 'POST', body: JSON.stringify({ phone, notes }) }),
 
-  demoSwitch: (role: 'customer' | 'admin' | 'rider'): Promise<{ token: string; user: User }> =>
-    fetchWithAuth('/api/auth/demo-switch', { method: 'POST', body: JSON.stringify({ role }) }),
-
   getMe: (): Promise<{ user: User }> =>
     fetchWithAuth('/api/auth/me'),
+
+  updateProfile: (payload: { name?: string; address?: string; landmark?: string; email?: string }): Promise<{ message: string; user: User }> =>
+    fetchWithAuth('/api/auth/profile', { method: 'PUT', body: JSON.stringify(payload) }),
 
   // Catalog
   getCategories: (): Promise<Category[]> =>
@@ -121,6 +121,9 @@ export const api = {
 
   markNotificationRead: (id: number): Promise<{ success: boolean }> =>
     fetchWithAuth(`/api/notifications/${id}/read`, { method: 'PUT' }),
+
+  markAllNotificationsRead: (): Promise<{ success: boolean }> =>
+    fetchWithAuth('/api/notifications/mark-all-read', { method: 'PUT' }),
 
   // Admin
   getAdminStats: (): Promise<AdminStats> =>

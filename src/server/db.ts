@@ -294,9 +294,9 @@ export async function initDatabase() {
       title VARCHAR(150),
       message TEXT,
       type VARCHAR(30),
-      is_read BOOLEAN,
+      is_read BOOLEAN DEFAULT FALSE,
       order_id INT,
-      created_at TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
 

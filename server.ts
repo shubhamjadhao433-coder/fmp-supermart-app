@@ -292,41 +292,37 @@ app.post('/api/admin/reset-user-password', requireAuth, requireRole(['admin']), 
   }
 });
 
-// Quick demo login / role switcher helper
-app.post('/api/auth/demo-switch', async (req: Request, res: Response) => {
-  try {
-    const { role } = req.body;
-    const targetRole = role === 'admin' || role === 'rider' ? role : 'customer';
-
-    const db = await getDb();
-    const result = await db.query('SELECT * FROM users WHERE role = $1 ORDER BY id ASC LIMIT 1', [targetRole]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: `No user found for role ${targetRole}` });
-    }
-
-    const user = result.rows[0];
-    const token = generateToken(user);
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        phone: user.phone,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        address: user.address,
-        landmark: user.landmark,
-        pincode: user.pincode
-      }
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   res.json({ user: req.user });
+});
+
+app.put('/api/auth/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, address, landmark, email } = req.body;
+    const db = await getDb();
+    const result = await db.query(
+      `UPDATE users
+       SET name = COALESCE($1, name),
+           address = COALESCE($2, address),
+           landmark = COALESCE($3, landmark),
+           email = COALESCE($4, email)
+       WHERE id = $5
+       RETURNING id, phone, name, email, role, address, landmark, pincode, is_active`,
+      [name ? name.trim() : null, address ? address.trim() : null, landmark ? landmark.trim() : null, email ? email.trim() : null, req.user!.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    const updatedUser = result.rows[0];
+    await logAudit(req.user!.id, req.user!.role, 'PROFILE_UPDATED', 'users', req.user!.id, `User updated profile information`);
+
+    res.json({ message: 'Profile updated successfully', user: updatedUser });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ----------------------------------------------------
@@ -783,14 +779,28 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
 
       // Customer Notification
       await client.query(
-        `INSERT INTO notifications (user_id, title, message, type, order_id)
-         VALUES ($1, 'Order Placed Successfully! 🎉', $2, 'order', $3)`,
+        `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+         VALUES ($1, 'Order Placed Successfully! 🎉', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
         [
           req.user!.id,
           `Your FMP Supermart order #${orderNumber} for ₹${totalAmount} has been placed. Payment via Cash on Delivery.`,
           order.id
         ]
       );
+
+      // Admin Notifications for Central Hub
+      const adminUsers = await client.query("SELECT id FROM users WHERE role = 'admin'");
+      for (const adm of adminUsers.rows) {
+        await client.query(
+          `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+           VALUES ($1, 'New Order Received! 🛒', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
+          [
+            adm.id,
+            `New order #${orderNumber} for ₹${totalAmount} placed by ${recipientName} (${cleanPhone}).`,
+            order.id
+          ]
+        );
+      }
 
       return { ...order, items: validatedItems };
     });
@@ -923,12 +933,31 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req: AuthenticatedRequest
         [reason || 'Cancelled by ' + req.user!.role, id]
       );
 
-      // Notification
+      // Notification to Customer
       await client.query(
-        `INSERT INTO notifications (user_id, title, message, type, order_id)
-         VALUES ($1, 'Order Cancelled', $2, 'order', $3)`,
+        `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+         VALUES ($1, 'Order Cancelled', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
         [order.customer_id, `Order #${order.order_number} has been cancelled. Reserved items have been released.`, id]
       );
+
+      // Notification to Admin
+      const adminUsers = await client.query("SELECT id FROM users WHERE role = 'admin'");
+      for (const adm of adminUsers.rows) {
+        await client.query(
+          `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+           VALUES ($1, 'Order Cancelled ⚠️', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
+          [adm.id, `Order #${order.order_number} was cancelled by ${req.user!.name} (${req.user!.role}). Stock was restored.`, id]
+        );
+      }
+
+      // Notification to Rider if assigned
+      if (order.rider_id) {
+        await client.query(
+          `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+           VALUES ($1, 'Assigned Order Cancelled', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
+          [order.rider_id, `Assigned order #${order.order_number} was cancelled. Do not deliver this package.`, id]
+        );
+      }
 
       return updated.rows[0];
     });
@@ -1028,6 +1057,13 @@ app.post('/api/admin/riders', requireAuth, requireRole(['admin']), async (req: A
 
     const rider = result.rows[0];
     await logAudit(req.user!.id, 'admin', 'RIDER_CREATED', 'users', rider.id, `Created delivery partner account for ${rider.name} (${cleanPhone})`);
+
+    // Welcome notification for rider
+    await db.query(
+      `INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
+       VALUES ($1, 'Welcome to FMP Supermart Fleet! 🛵', $2, 'account', FALSE, CURRENT_TIMESTAMP)`,
+      [rider.id, `Welcome ${rider.name}! Your delivery partner account is active. Admin will assign delivery orders to you.`]
+    );
 
     res.status(201).json({ message: 'Delivery partner account created successfully.', rider });
   } catch (err: any) {
@@ -1130,9 +1166,16 @@ app.post('/api/orders/:id/assign-rider', requireAuth, requireRole(['admin']), as
 
     // Notification to new rider
     await db.query(
-      `INSERT INTO notifications (user_id, title, message, type, order_id)
-       VALUES ($1, 'New Order Assigned 🛵', $2, 'order', $3)`,
+      `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+       VALUES ($1, 'New Order Assigned 🛵', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
       [rider.id, `Order #${order.order_number} to ${order.customer_name} (${order.delivery_address}) assigned to you.`, id]
+    );
+
+    // Notification to customer
+    await db.query(
+      `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+       VALUES ($1, 'Delivery Partner Assigned 🛵', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
+      [order.customer_id, `Delivery partner ${rider.name} (${rider.phone}) has been assigned to deliver order #${order.order_number}.`, id]
     );
 
     const auditAction = isReassignment ? 'RIDER_REASSIGNED' : 'RIDER_ASSIGNED';
@@ -1590,14 +1633,28 @@ app.post('/api/rider/orders/:id/verify-otp-deliver', requireAuth, requireRole(['
 
       // Customer Notification
       await client.query(
-        `INSERT INTO notifications (user_id, title, message, type, order_id)
-         VALUES ($1, 'Order Delivered! 🛍️', $2, 'order', $3)`,
+        `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+         VALUES ($1, 'Order Delivered! 🛍️', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
         [
           delivered.customer_id,
           `Your order #${delivered.order_number} has been delivered by ${req.user!.name}. ₹${delivered.total_amount} COD received. Thank you for choosing FMP Supermart Karanja Lad!`,
           id
         ]
       );
+
+      // Admin Notifications
+      const adminUsers = await client.query("SELECT id FROM users WHERE role = 'admin'");
+      for (const adm of adminUsers.rows) {
+        await client.query(
+          `INSERT INTO notifications (user_id, title, message, type, is_read, order_id, created_at)
+           VALUES ($1, 'Order Delivered & COD Collected ✅', $2, 'order', FALSE, $3, CURRENT_TIMESTAMP)`,
+          [
+            adm.id,
+            `Order #${delivered.order_number} delivered by ${req.user!.name}. Collected ₹${delivered.total_amount} in Cash.`,
+            id
+          ]
+        );
+      }
 
       return delivered;
     });
@@ -1793,6 +1850,16 @@ app.put('/api/notifications/:id/read', requireAuth, async (req: AuthenticatedReq
     const id = parseInt(req.params.id, 10);
     const db = await getDb();
     await db.query('UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2', [id, req.user!.id]);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/notifications/mark-all-read', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const db = await getDb();
+    await db.query('UPDATE notifications SET is_read = TRUE WHERE user_id = $1', [req.user!.id]);
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

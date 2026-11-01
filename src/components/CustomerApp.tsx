@@ -128,6 +128,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [checkoutSubmitting, setCheckoutSubmitting] = useState<boolean>(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
+  // Profile Edit State
+  const [isEditingAddress, setIsEditingAddress] = useState<boolean>(false);
+  const [profileSaving, setProfileSaving] = useState<boolean>(false);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+
   // Delivery settings from backend
   const [deliveryFeeConfig, setDeliveryFeeConfig] = useState<number>(25);
   const [handlingFeeConfig, setHandlingFeeConfig] = useState<number>(5);
@@ -327,6 +332,32 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       setReviewMessage(err.message || 'Failed to submit review.');
     } finally {
       setReviewSubmitting(false);
+    }
+  };
+
+  // Update Customer Profile & Saved Address
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) return;
+    setProfileSaving(true);
+    setProfileMessage(null);
+    try {
+      const res = await api.updateProfile({
+        name: customerName.trim(),
+        address: deliveryAddress.trim(),
+        landmark: landmark.trim()
+      });
+      setProfileMessage('Address & profile updated successfully!');
+      setIsEditingAddress(false);
+      if (res.user) {
+        currentUser.name = res.user.name;
+        currentUser.address = res.user.address;
+        currentUser.landmark = res.user.landmark;
+      }
+    } catch (err: any) {
+      setProfileMessage(err.message || 'Failed to update profile.');
+    } finally {
+      setProfileSaving(false);
     }
   };
 
@@ -1118,13 +1149,69 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             </div>
 
             <div className="space-y-2 text-xs">
-              <div className="p-3 bg-gray-50 rounded-xl space-y-1">
-                <div className="text-[10px] font-bold uppercase text-gray-400">Saved Delivery Address</div>
-                <div className="text-gray-800 font-medium">{currentUser.address || 'Karanja Lad, Maharashtra'}</div>
-                {currentUser.landmark && (
-                  <div className="text-[11px] text-gray-500">Landmark: {currentUser.landmark}</div>
+              <div className="p-3 bg-gray-50 rounded-xl space-y-1.5 border border-gray-100">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase text-gray-400">Saved Delivery Address</span>
+                  <button
+                    onClick={() => setIsEditingAddress(!isEditingAddress)}
+                    className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 cursor-pointer"
+                  >
+                    {isEditingAddress ? 'Cancel' : 'Edit'}
+                  </button>
+                </div>
+
+                {isEditingAddress ? (
+                  <form onSubmit={handleSaveProfile} className="space-y-2 pt-1">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-500">Full Name</label>
+                      <input
+                        type="text"
+                        value={customerName}
+                        onChange={e => setCustomerName(e.target.value)}
+                        className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs font-semibold"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-500">Address in Karanja Lad</label>
+                      <textarea
+                        rows={2}
+                        value={deliveryAddress}
+                        onChange={e => setDeliveryAddress(e.target.value)}
+                        className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-500">Landmark</label>
+                      <input
+                        type="text"
+                        value={landmark}
+                        onChange={e => setLandmark(e.target.value)}
+                        placeholder="e.g. Landmark or Area in Karanja Lad"
+                        className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={profileSaving}
+                      className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs shadow-xs cursor-pointer"
+                    >
+                      {profileSaving ? 'Saving...' : 'Save Updated Address'}
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <div className="text-gray-800 font-medium">{currentUser.address || 'Karanja Lad, Maharashtra'}</div>
+                    {currentUser.landmark && (
+                      <div className="text-[11px] text-gray-500">Landmark: {currentUser.landmark}</div>
+                    )}
+                    <div className="text-[11px] text-emerald-700 font-bold">Pincode: 444105</div>
+                  </>
                 )}
-                <div className="text-[11px] text-emerald-700 font-bold">Pincode: 444105</div>
+                {profileMessage && (
+                  <div className="text-[11px] font-bold text-emerald-800 mt-1">{profileMessage}</div>
+                )}
               </div>
 
               <button

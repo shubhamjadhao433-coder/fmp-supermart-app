@@ -27,7 +27,8 @@ import {
   Star,
   Settings,
   UserCheck,
-  ClipboardList
+  ClipboardList,
+  Bell
 } from 'lucide-react';
 import {
   AdminStats,
@@ -58,6 +59,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [categories, setCategories] = useState<Category[]>([]);
   const [riders, setRiders] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [showNotifications, setShowNotifications] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
 
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
@@ -131,7 +134,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const loadAdminData = async () => {
     setLoading(true);
     try {
-      const [statsData, ordersData, prodsData, catsData, ridersData, auditData, feeSettings, slotsData, reviewsData, reportsData] = await Promise.all([
+      const [statsData, ordersData, prodsData, catsData, ridersData, auditData, feeSettings, slotsData, reviewsData, reportsData, notifsData] = await Promise.all([
         api.getAdminStats(),
         api.getOrders(),
         api.getProducts(),
@@ -141,7 +144,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         api.getDeliverySettings().catch(() => null),
         api.getDeliverySlots().catch(() => []),
         api.getAdminReviews().catch(() => []),
-        api.getAdminReports().catch(() => ({ categorySales: [], inventoryLogs: [] }))
+        api.getAdminReports().catch(() => ({ categorySales: [], inventoryLogs: [] })),
+        api.getNotifications().catch(() => [])
       ]);
       setStats(statsData);
       setOrders(ordersData);
@@ -149,6 +153,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setCategories(catsData);
       setRiders(ridersData);
       setAuditLogs(auditData);
+      setNotifications(notifsData);
       if (feeSettings) setDeliverySettings(feeSettings);
       if (slotsData) setDeliverySlots(slotsData);
       if (reviewsData) setReviews(reviewsData);
@@ -159,6 +164,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleMarkNotifRead = async (id: number) => {
+    try {
+      await api.markNotificationRead(id);
+      setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
+    } catch (e) {}
+  };
+
+  const handleMarkAllNotifsRead = async () => {
+    try {
+      await api.markAllNotificationsRead();
+      setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+    } catch (e) {}
   };
 
   useEffect(() => {
@@ -542,6 +561,66 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
             {/* Quick Actions */}
             <div className="flex items-center gap-2 shrink-0">
+              {/* Notification Bell */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowNotifications(!showNotifications)}
+                  title="Store Notifications"
+                  className="relative p-2 bg-purple-800 hover:bg-purple-700 text-purple-100 rounded-xl transition cursor-pointer border border-purple-700"
+                >
+                  <Bell className="w-4 h-4" />
+                  {notifications.filter(n => !n.is_read).length > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-amber-500 text-gray-900 text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center animate-pulse">
+                      {notifications.filter(n => !n.is_read).length}
+                    </span>
+                  )}
+                </button>
+
+                {showNotifications && (
+                  <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white text-gray-900 rounded-2xl shadow-2xl border border-gray-100 py-2 z-50 animate-in fade-in zoom-in-95">
+                    <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
+                      <span className="font-bold text-xs text-gray-900">Admin Alerts ({notifications.length})</span>
+                      {notifications.filter(n => !n.is_read).length > 0 && (
+                        <button
+                          onClick={handleMarkAllNotifsRead}
+                          className="text-[10px] font-bold text-purple-700 hover:text-purple-900 cursor-pointer"
+                        >
+                          Mark all as read
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-72 overflow-y-auto divide-y divide-gray-100 text-xs">
+                      {notifications.length === 0 ? (
+                        <div className="p-6 text-center text-gray-400 text-xs">
+                          No notifications yet. Store is quiet!
+                        </div>
+                      ) : (
+                        notifications.map(n => (
+                          <div
+                            key={n.id}
+                            onClick={() => handleMarkNotifRead(n.id)}
+                            className={`p-3 hover:bg-purple-50/50 transition cursor-pointer ${
+                              !n.is_read ? 'bg-purple-50/60 font-semibold' : ''
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <span className="font-bold text-gray-900 text-xs">{n.title}</span>
+                              {!n.is_read && (
+                                <span className="w-2 h-2 rounded-full bg-purple-600 shrink-0 mt-1"></span>
+                              )}
+                            </div>
+                            <p className="text-gray-600 mt-0.5 leading-relaxed text-[11px] font-normal">{n.message}</p>
+                            <span className="text-[10px] text-gray-400 mt-1 block font-normal">
+                              {n.created_at ? new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Recent'}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {onSwitchToCustomerView && (
                 <button
                   onClick={onSwitchToCustomerView}
