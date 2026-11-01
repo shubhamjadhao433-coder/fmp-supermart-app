@@ -93,17 +93,36 @@ app.get('/api/health', async (req: Request, res: Response) => {
 // ----------------------------------------------------
 // Authentication Routes
 // ----------------------------------------------------
+// Authentication Helpers & Endpoints
+// ----------------------------------------------------
+function normalizePhone(rawPhone: any): string {
+  if (!rawPhone) return '';
+  let cleaned = String(rawPhone).trim().replace(/\D/g, '');
+  if (cleaned.length === 12 && cleaned.startsWith('91')) {
+    cleaned = cleaned.slice(2);
+  } else if (cleaned.length === 11 && cleaned.startsWith('0')) {
+    cleaned = cleaned.slice(1);
+  }
+  return cleaned;
+}
+
 app.post('/api/auth/register', async (req: Request, res: Response) => {
   try {
     const { phone, name, email, password, address, landmark, pincode, role } = req.body;
 
-    if (!phone || !name || !password) {
+    const cleanPhone = normalizePhone(phone);
+    const cleanPassword = typeof password === 'string' ? password.trim() : '';
+
+    if (!cleanPhone || !name || !cleanPassword) {
       return res.status(400).json({ error: 'Phone number, name, and password are required.' });
     }
 
-    const cleanPhone = phone.trim().replace(/\D/g, '');
     if (cleanPhone.length < 10) {
       return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
+    }
+
+    if (cleanPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters.' });
     }
 
     const db = await getDb();
@@ -114,23 +133,28 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
       return res.status(400).json({ error: `An account with this phone number already exists as ${userRole}. Please login.` });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(cleanPassword, 10);
 
     const result = await db.query(
       `INSERT INTO users (phone, name, email, role, password_hash, address, landmark, city, pincode, is_active, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'Karanja Lad', $8, TRUE, CURRENT_TIMESTAMP)
        RETURNING id, phone, name, email, role, address, landmark, pincode, is_active`,
-      [cleanPhone, name.trim(), email?.trim() || null, userRole, passwordHash, address || null, landmark || null, pincode || '444105']
+      [cleanPhone, name.trim(), email?.trim() || null, userRole, passwordHash, address ? address.trim() : null, landmark ? landmark.trim() : null, pincode || '444105']
     );
 
     const user = result.rows[0];
-    const token = generateToken(user);
+    const userPayload = {
+      ...user,
+      status: user.is_active !== false ? 'active' : 'inactive',
+      is_active: user.is_active !== false
+    };
+    const token = generateToken(userPayload as any);
     await logAudit(user.id, user.role, 'USER_REGISTERED', 'users', user.id, `User ${user.name} registered as ${user.role}`);
 
     res.status(201).json({
       message: 'Account created successfully',
       token,
-      user
+      user: userPayload
     });
   } catch (err: any) {
     console.error('Registration error:', err);
@@ -141,11 +165,13 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
     const { phone, password } = req.body;
-    if (!phone || !password) {
+    const cleanPhone = normalizePhone(phone);
+    const cleanPassword = typeof password === 'string' ? password.trim() : '';
+
+    if (!cleanPhone || !cleanPassword) {
       return res.status(400).json({ error: 'Phone number and password are required.' });
     }
 
-    const cleanPhone = phone.trim().replace(/\D/g, '');
     const db = await getDb();
     const result = await db.query('SELECT * FROM users WHERE phone = $1', [cleanPhone]);
 
@@ -157,7 +183,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     // Find the account whose hashed password matches the provided password
     let matchedUser = null;
     for (const u of result.rows) {
-      const isMatch = await bcrypt.compare(password, u.password_hash);
+      const isMatch = await bcrypt.compare(cleanPassword, u.password_hash);
       if (isMatch) {
         matchedUser = u;
         break;
@@ -172,25 +198,33 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Your account is deactivated. Please contact store admin at Karanja Lad (9699925206).' });
     }
 
-    const token = generateToken(matchedUser);
+    const userPayload = {
+      id: matchedUser.id,
+      phone: matchedUser.phone,
+      name: matchedUser.name,
+      email: matchedUser.email,
+      role: matchedUser.role,
+      status: matchedUser.is_active !== false ? 'active' : 'inactive',
+      is_active: matchedUser.is_active !== false,
+      address: matchedUser.address,
+      landmark: matchedUser.landmark,
+      pincode: matchedUser.pincode
+    };
+
+    const token = generateToken(userPayload as any);
     await logAudit(matchedUser.id, matchedUser.role, 'USER_LOGIN', 'users', matchedUser.id, `User ${matchedUser.name} logged in as ${matchedUser.role}`);
 
     res.json({
       token,
-      user: {
-        id: matchedUser.id,
-        phone: matchedUser.phone,
-        name: matchedUser.name,
-        email: matchedUser.email,
-        role: matchedUser.role,
-        address: matchedUser.address,
-        landmark: matchedUser.landmark,
-        pincode: matchedUser.pincode
-      }
+      user: userPayload
     });
   } catch (err: any) {
     res.status(500).json({ error: 'Login failed: ' + err.message });
   }
+});
+
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  res.json({ message: 'Logged out successfully.' });
 });
 
 // Secure Admin-Assisted Forgot Password Workflow (Zero Fake SMS)

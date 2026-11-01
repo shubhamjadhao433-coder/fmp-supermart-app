@@ -53,6 +53,9 @@ export const api = {
   login: (phone: string, password: string): Promise<{ token: string; user: User }> =>
     fetchWithAuth('/api/auth/login', { method: 'POST', body: JSON.stringify({ phone, password }) }),
 
+  logout: (): Promise<{ message: string }> =>
+    fetchWithAuth('/api/auth/logout', { method: 'POST' }).catch(() => ({ message: 'Logged out successfully.' })),
+
   requestPasswordReset: (phone: string, notes?: string): Promise<{ message: string; support_phone: string; support_address: string }> =>
     fetchWithAuth('/api/auth/forgot-password-request', { method: 'POST', body: JSON.stringify({ phone, notes }) }),
 

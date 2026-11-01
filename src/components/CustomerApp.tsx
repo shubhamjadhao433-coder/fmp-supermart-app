@@ -229,12 +229,22 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   }, []);
 
   useEffect(() => {
-    loadUserData();
     if (currentUser) {
-      if (currentUser.name) setCustomerName(currentUser.name);
-      if (currentUser.phone) setCustomerPhone(currentUser.phone);
-      if (currentUser.address) setDeliveryAddress(currentUser.address);
-      if (currentUser.landmark) setLandmark(currentUser.landmark);
+      loadUserData();
+      setCustomerName(currentUser.name || '');
+      setCustomerPhone(currentUser.phone || '');
+      setDeliveryAddress(currentUser.address || 'Karanja Lad, Maharashtra');
+      setLandmark(currentUser.landmark || 'Karanja Lad');
+    } else {
+      setCustomerName('');
+      setCustomerPhone('');
+      setDeliveryAddress('Karanja Lad, Maharashtra');
+      setLandmark('Karanja Lad');
+      setFavorites([]);
+      setFavoriteIds(new Set());
+      setNotifications([]);
+      setOrders([]);
+      setIsProfileOpen(false);
     }
   }, [currentUser]);
 

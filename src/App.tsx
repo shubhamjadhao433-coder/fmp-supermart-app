@@ -106,7 +106,10 @@ export default function App() {
   };
 
   // Secure Logout
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch (e) {}
     authStorage.clearToken();
     setCurrentUser(null);
     window.location.hash = '#/';

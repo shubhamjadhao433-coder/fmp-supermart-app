@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Phone,
@@ -30,7 +30,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 }) => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>(initialMode);
 
-  // Form Fields
+  // Form Fields - explicitly reset whenever modal opens or mode changes
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -41,6 +41,42 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resetSuccessMessage, setResetSuccessMessage] = useState<string | null>(null);
+
+  const resetAllFields = () => {
+    setName('');
+    setPhone('');
+    setPassword('');
+    setAddress('');
+    setLandmark('');
+    setForgotNotes('');
+    setError(null);
+    setResetSuccessMessage(null);
+  };
+
+  // Ensure fresh registration or login form has zero stale fields when opening
+  useEffect(() => {
+    if (isOpen) {
+      setMode(initialMode);
+      resetAllFields();
+    }
+  }, [isOpen, initialMode]);
+
+  const handleSwitchToRegister = () => {
+    setMode('register');
+    resetAllFields();
+  };
+
+  const handleSwitchToLogin = () => {
+    setMode('login');
+    setPassword('');
+    setError(null);
+    setResetSuccessMessage(null);
+  };
+
+  const handleModalClose = () => {
+    resetAllFields();
+    onClose();
+  };
 
   if (!isOpen) return null;
 
@@ -59,6 +95,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const res = await api.login(cleanPhone, password);
       authStorage.setToken(res.token);
+      resetAllFields();
       onAuthSuccess(res.user);
       onClose();
     } catch (err: any) {
@@ -97,6 +134,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         pincode: '444105'
       });
       authStorage.setToken(res.token);
+      resetAllFields();
       onAuthSuccess(res.user);
       onClose();
     } catch (err: any) {
@@ -156,7 +194,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleModalClose}
             aria-label="Close dialog"
             className="text-gray-400 hover:text-gray-600 p-1.5 rounded-xl hover:bg-gray-100 transition cursor-pointer"
           >
@@ -234,10 +272,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <span className="text-gray-500 text-[11px]">New to FMP Supermart? </span>
               <button
                 type="button"
-                onClick={() => {
-                  setMode('register');
-                  setError(null);
-                }}
+                onClick={handleSwitchToRegister}
                 className="text-[11px] font-bold text-emerald-700 hover:underline cursor-pointer"
               >
                 Create Customer Account
@@ -247,10 +282,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         )}
 
         {/* ======================================================== */}
-        {/* 2. CUSTOMER REGISTRATION VIEW */}
+        {/* 2. CUSTOMER REGISTRATION VIEW (ALWAYS EMPTY FOR FRESH USERS) */}
         {/* ======================================================== */}
         {mode === 'register' && (
-          <form onSubmit={handleRegisterSubmit} className="space-y-3 text-xs">
+          <form onSubmit={handleRegisterSubmit} className="space-y-3 text-xs" autoComplete="off">
             <div>
               <label className="block text-[11px] font-bold text-gray-700 mb-1">Full Name</label>
               <div className="relative">
@@ -261,6 +296,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g. Rahul Deshmukh"
+                  autoComplete="off"
+                  spellCheck={false}
                   className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
                 />
               </div>
@@ -277,6 +314,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   value={phone}
                   onChange={(e) => setPhone(e.target.value.replace(/\D/g, ''))}
                   placeholder="10-digit mobile number"
+                  autoComplete="off"
                   className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
                 />
               </div>
@@ -292,6 +330,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Minimum 6 characters"
+                  autoComplete="new-password"
                   className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
                 />
               </div>
@@ -309,6 +348,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
                   placeholder="House/Plot No., Street name, Karanja Lad (444105)"
+                  autoComplete="off"
                   className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden text-xs text-gray-900"
                 />
               </div>
@@ -321,6 +361,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 value={landmark}
                 onChange={(e) => setLandmark(e.target.value)}
                 placeholder="e.g. Landmark or Area, Karanja Lad"
+                autoComplete="off"
                 className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-emerald-500"
               />
             </div>
@@ -345,10 +386,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <span className="text-gray-500 text-[11px]">Already have an account? </span>
               <button
                 type="button"
-                onClick={() => {
-                  setMode('login');
-                  setError(null);
-                }}
+                onClick={handleSwitchToLogin}
                 className="text-[11px] font-bold text-emerald-700 hover:underline cursor-pointer"
               >
                 Sign In
@@ -384,10 +422,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    setMode('login');
-                    setResetSuccessMessage(null);
-                  }}
+                  onClick={handleSwitchToLogin}
                   className="mt-2 px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs hover:bg-emerald-700 cursor-pointer"
                 >
                   Return to Sign In
@@ -445,10 +480,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <div className="pt-2 text-center">
                   <button
                     type="button"
-                    onClick={() => {
-                      setMode('login');
-                      setError(null);
-                    }}
+                    onClick={handleSwitchToLogin}
                     className="text-xs font-semibold text-gray-600 hover:text-gray-900 cursor-pointer"
                   >
                     ← Back to Sign In
