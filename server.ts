@@ -488,7 +488,7 @@ app.get('/api/products', async (req: Request, res: Response) => {
 
     if (search) {
       params.push(`%${search}%`);
-      query += ` AND (p.name ILIKE $${params.length} OR p.description ILIKE $${params.length} OR ('FMP-' || p.id) ILIKE $${params.length} OR c.name ILIKE $${params.length})`;
+      query += ` AND (p.name ILIKE $${params.length} OR COALESCE(p.description, '') ILIKE $${params.length} OR CAST(p.id AS text) ILIKE $${params.length} OR COALESCE(c.name, '') ILIKE $${params.length})`;
     }
 
     if (in_stock === 'true') {
