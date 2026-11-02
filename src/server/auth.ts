@@ -32,12 +32,29 @@ export function generateToken(user: AuthUser): string {
 }
 
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  let token: string | undefined;
+
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  }
+
+  // Also support HttpOnly session cookie if Authorization header is not provided
+  if (!token && req.headers.cookie) {
+    const cookies = req.headers.cookie.split(';').reduce((acc: Record<string, string>, item) => {
+      const parts = item.trim().split('=');
+      const key = parts[0]?.trim();
+      const val = parts.slice(1).join('=').trim();
+      if (key && val) acc[key] = decodeURIComponent(val);
+      return acc;
+    }, {});
+    token = cookies['token'] || cookies['fmp_supermart_token'] || cookies['fmp_token'];
+  }
+
+  if (!token) {
     return res.status(401).json({ error: 'Authentication required. Please login.' });
   }
 
-  const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     const userId = parseInt(String(decoded.id), 10);

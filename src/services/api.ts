@@ -12,11 +12,91 @@ import {
 } from '../types.ts';
 
 const TOKEN_KEY = 'fmp_supermart_token';
+const USER_KEY = 'fmp_supermart_user';
+
+// In-memory token cache fallback for environments where Web Storage is restricted
+let inMemoryToken: string | null = null;
+let inMemoryUser: User | null = null;
 
 export const authStorage = {
-  getToken: () => localStorage.getItem(TOKEN_KEY),
-  setToken: (token: string) => localStorage.setItem(TOKEN_KEY, token),
-  clearToken: () => localStorage.removeItem(TOKEN_KEY),
+  getToken: (): string | null => {
+    if (inMemoryToken) return inMemoryToken;
+    try {
+      const token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
+      if (token) {
+        inMemoryToken = token;
+        return token;
+      }
+    } catch {
+      // Storage access blocked or restricted
+    }
+    return inMemoryToken;
+  },
+
+  setToken: (token: string): void => {
+    inMemoryToken = token;
+    try {
+      localStorage.setItem(TOKEN_KEY, token);
+      sessionStorage.setItem(TOKEN_KEY, token);
+    } catch {
+      // Ignore storage write issues
+    }
+  },
+
+  clearToken: (): void => {
+    inMemoryToken = null;
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // Ignore storage cleanup issues
+    }
+  },
+
+  getUser: (): User | null => {
+    if (inMemoryUser) return inMemoryUser;
+    try {
+      const raw = localStorage.getItem(USER_KEY) || sessionStorage.getItem(USER_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        inMemoryUser = parsed;
+        return parsed;
+      }
+    } catch {
+      // JSON parse error or storage restricted
+    }
+    return inMemoryUser;
+  },
+
+  setUser: (user: User): void => {
+    inMemoryUser = user;
+    try {
+      const raw = JSON.stringify(user);
+      localStorage.setItem(USER_KEY, raw);
+      sessionStorage.setItem(USER_KEY, raw);
+    } catch {
+      // Ignore storage write issues
+    }
+  },
+
+  clearUser: (): void => {
+    inMemoryUser = null;
+    try {
+      localStorage.removeItem(USER_KEY);
+      sessionStorage.removeItem(USER_KEY);
+    } catch {
+      // Ignore storage cleanup issues
+    }
+  },
+
+  clearAll: (): void => {
+    authStorage.clearToken();
+    authStorage.clearUser();
+  },
+
+  hasActiveSession: (): boolean => {
+    return Boolean(authStorage.getToken() || authStorage.getUser());
+  }
 };
 
 async function fetchWithAuth(url: string, options: RequestInit = {}) {
@@ -27,18 +107,25 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
     headers.set('Content-Type', 'application/json');
   }
 
+  // Attach Bearer token when available
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
+  // Include credentials so HttpOnly cookies are automatically sent & accepted by the browser
   const response = await fetch(url, {
     ...options,
+    credentials: 'include',
     headers,
   });
 
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
+    // If the server explicitly rejected the token as expired or invalid (401), clean up local session
+    if (response.status === 401 && (url.startsWith('/api/auth/me') || url.startsWith('/api/admin') || url.startsWith('/api/rider'))) {
+      authStorage.clearAll();
+    }
     throw new Error(data?.error || `Request failed with status ${response.status}`);
   }
 
@@ -47,23 +134,63 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
 
 export const api = {
   // Auth
-  register: (payload: any): Promise<{ token: string; user: User }> =>
-    fetchWithAuth('/api/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
+  register: async (payload: any): Promise<{ token: string; user: User; message: string }> => {
+    const data = await fetchWithAuth('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (data?.token) {
+      authStorage.setToken(data.token);
+    }
+    if (data?.user) {
+      authStorage.setUser(data.user);
+    }
+    return data;
+  },
 
-  login: (phone: string, password: string): Promise<{ token: string; user: User }> =>
-    fetchWithAuth('/api/auth/login', { method: 'POST', body: JSON.stringify({ phone, password }) }),
+  login: async (phone: string, password: string): Promise<{ token: string; user: User }> => {
+    const data = await fetchWithAuth('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ phone, password })
+    });
+    if (data?.token) {
+      authStorage.setToken(data.token);
+    }
+    if (data?.user) {
+      authStorage.setUser(data.user);
+    }
+    return data;
+  },
 
-  logout: (): Promise<{ message: string }> =>
-    fetchWithAuth('/api/auth/logout', { method: 'POST' }).catch(() => ({ message: 'Logged out successfully.' })),
+  logout: async (): Promise<{ message: string }> => {
+    try {
+      const res = await fetchWithAuth('/api/auth/logout', { method: 'POST' });
+      authStorage.clearAll();
+      return res;
+    } catch {
+      authStorage.clearAll();
+      return { message: 'Logged out successfully.' };
+    }
+  },
 
   requestPasswordReset: (phone: string, notes?: string): Promise<{ message: string; support_phone: string; support_address: string }> =>
     fetchWithAuth('/api/auth/forgot-password-request', { method: 'POST', body: JSON.stringify({ phone, notes }) }),
 
-  getMe: (): Promise<{ user: User }> =>
-    fetchWithAuth('/api/auth/me'),
+  getMe: async (): Promise<{ user: User }> => {
+    const data = await fetchWithAuth('/api/auth/me');
+    if (data?.user) {
+      authStorage.setUser(data.user);
+    }
+    return data;
+  },
 
-  updateProfile: (payload: { name?: string; address?: string; landmark?: string; email?: string }): Promise<{ message: string; user: User }> =>
-    fetchWithAuth('/api/auth/profile', { method: 'PUT', body: JSON.stringify(payload) }),
+  updateProfile: async (payload: { name?: string; address?: string; landmark?: string; email?: string }): Promise<{ message: string; user: User }> => {
+    const data = await fetchWithAuth('/api/auth/profile', { method: 'PUT', body: JSON.stringify(payload) });
+    if (data?.user) {
+      authStorage.setUser(data.user);
+    }
+    return data;
+  },
 
   // Catalog
   getCategories: (): Promise<Category[]> =>

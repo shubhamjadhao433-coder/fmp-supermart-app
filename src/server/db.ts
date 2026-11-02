@@ -616,8 +616,18 @@ export async function restoreDbState(db: DBClient): Promise<void> {
         const check = await db.query('SELECT id FROM orders WHERE order_number = $1', [o.order_number]);
         if (check.rows.length === 0) {
           await db.query(
-            `INSERT INTO orders (order_number, customer_id, customer_name, customer_phone, delivery_address, landmark, pincode, status, total_amount, subtotal_amount, delivery_charge, handling_charge, tip_amount, delivery_type, scheduled_date, time_slot, delivery_otp, cod_collected, cod_collected_at, cod_reconciled, failure_reason, rider_id, rider_name, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
+            `INSERT INTO orders (
+              order_number, customer_id, customer_name, customer_phone,
+              delivery_address, landmark, pincode, subtotal, delivery_fee,
+              handling_fee, tip_amount, total_amount, payment_mode, status,
+              delivery_type, scheduled_date, time_slot, rider_id, rider_name,
+              rider_phone, delivery_otp, failure_reason, cod_collected,
+              cod_collected_at, cod_reconciled, cod_reconciled_at, created_at
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+              $11, $12, $13, $14, $15, $16, $17, $18, $19,
+              $20, $21, $22, $23, $24, $25, $26, $27
+            )`,
             [
               o.order_number,
               o.customer_id,
@@ -626,23 +636,26 @@ export async function restoreDbState(db: DBClient): Promise<void> {
               o.delivery_address,
               o.landmark,
               o.pincode,
-              o.status,
+              o.subtotal ?? o.subtotal_amount ?? 0,
+              o.delivery_fee ?? o.delivery_charge ?? 0,
+              o.handling_fee ?? o.handling_charge ?? 0,
+              o.tip_amount ?? 0,
               o.total_amount,
-              o.subtotal_amount,
-              o.delivery_charge,
-              o.handling_charge,
-              o.tip_amount,
-              o.delivery_type,
-              o.scheduled_date,
-              o.time_slot,
-              o.delivery_otp,
-              o.cod_collected,
-              o.cod_collected_at,
-              o.cod_reconciled,
-              o.failure_reason,
-              o.rider_id,
-              o.rider_name,
-              o.created_at
+              o.payment_mode || 'COD',
+              o.status || 'placed',
+              o.delivery_type || 'immediate',
+              o.scheduled_date || null,
+              o.time_slot || null,
+              o.rider_id || null,
+              o.rider_name || null,
+              o.rider_phone || null,
+              o.delivery_otp || null,
+              o.failure_reason || null,
+              o.cod_collected === true,
+              o.cod_collected_at || null,
+              o.cod_reconciled === true,
+              o.cod_reconciled_at || null,
+              o.created_at || null
             ]
           );
         }

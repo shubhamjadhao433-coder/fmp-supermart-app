@@ -429,7 +429,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     } catch (err: any) {
       const msg = err.message || '';
       if (msg.includes('User account not found') || msg.includes('Session expired') || msg.includes('Authentication required') || msg.includes('401')) {
-        authStorage.clearToken();
+        authStorage.clearAll();
         setCheckoutError('Session expired. Please log in to complete your checkout.');
         onOpenAuth();
       } else {

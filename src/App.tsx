@@ -19,8 +19,10 @@ function getRouteFromHash(): 'customer' | 'admin' | 'rider' {
 
 export default function App() {
   const [route, setRoute] = useState<'customer' | 'admin' | 'rider'>(getRouteFromHash());
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  // Hydrate user immediately from secure browser session storage to eliminate flicker on page refresh
+  const [currentUser, setCurrentUser] = useState<User | null>(() => authStorage.getUser());
+  // If we already have a cached session, don't show full-page loading spinner while revalidating
+  const [authChecking, setAuthChecking] = useState<boolean>(() => !authStorage.hasActiveSession());
 
   // Cart state for customer
   const [cart, setCart] = useState<CartItem[]>(() => {
@@ -47,6 +49,18 @@ export default function App() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
+  // Sync session across browser tabs
+  useEffect(() => {
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'fmp_supermart_token' || e.key === 'fmp_supermart_user') {
+        const user = authStorage.getUser();
+        setCurrentUser(user);
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
   // Save Cart to LocalStorage
   useEffect(() => {
     try {
@@ -54,24 +68,52 @@ export default function App() {
     } catch (e) {}
   }, [cart]);
 
-  // Check and persist session on startup/refresh
+  // Check and persist session on startup/refresh (HttpOnly cookie and Bearer token compatibility)
   useEffect(() => {
+    let isMounted = true;
+
     const initAuth = async () => {
-      const token = authStorage.getToken();
-      if (token) {
-        try {
-          const res = await api.getMe();
+      try {
+        // Fetch current user from server (verifies HttpOnly cookie and/or Bearer token)
+        const res = await api.getMe();
+        if (isMounted) {
           setCurrentUser(res.user);
-        } catch {
-          authStorage.clearToken();
-          setCurrentUser(null);
+          authStorage.setUser(res.user);
         }
-      } else {
-        setCurrentUser(null);
+      } catch (err: any) {
+        const msg = String(err?.message || '').toLowerCase();
+        const isUnauthorized =
+          msg.includes('authentication') ||
+          msg.includes('unauthorized') ||
+          msg.includes('expired') ||
+          msg.includes('invalid token') ||
+          msg.includes('deactivated') ||
+          msg.includes('status 401');
+
+        if (isUnauthorized) {
+          authStorage.clearAll();
+          if (isMounted) {
+            setCurrentUser(null);
+          }
+        } else {
+          // If network is offline or transient error, preserve cached session
+          const cachedUser = authStorage.getUser();
+          if (isMounted && cachedUser) {
+            setCurrentUser(cachedUser);
+          }
+        }
+      } finally {
+        if (isMounted) {
+          setAuthChecking(false);
+        }
       }
-      setAuthChecking(false);
     };
+
     initAuth();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // Cart operations
@@ -110,7 +152,7 @@ export default function App() {
     try {
       await api.logout();
     } catch (e) {}
-    authStorage.clearToken();
+    authStorage.clearAll();
     setCurrentUser(null);
     window.location.hash = '#/';
     setRoute('customer');
@@ -118,6 +160,7 @@ export default function App() {
 
   // Automatic role-based routing upon successful authentication
   const handleAuthSuccess = (user: User) => {
+    authStorage.setUser(user);
     setCurrentUser(user);
     if (user.role === 'admin') {
       window.location.hash = '#/admin';
