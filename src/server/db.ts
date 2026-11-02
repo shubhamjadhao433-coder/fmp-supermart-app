@@ -57,11 +57,19 @@ export function getPostgresConnectionString(): { url: string; source: string } |
     }
   }
 
-  // Composite host/user/password variables (standard PG environment variables)
-  const host = process.env.POSTGRES_HOST || process.env.PGHOST;
+  // Support extracting host from SUPABASE_URL if provided (e.g. https://<project-ref>.supabase.co)
+  let host = process.env.POSTGRES_HOST || process.env.PGHOST;
+  if (!host && (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)) {
+    const rawSupabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+    const match = rawSupabaseUrl.match(/https?:\/\/([a-z0-9_-]+)\.supabase\.co/i);
+    if (match && match[1]) {
+      host = `db.${match[1]}.supabase.co`;
+    }
+  }
+
   const user = process.env.POSTGRES_USER || process.env.PGUSER || 'postgres';
-  const password = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD;
-  const database = process.env.POSTGRES_DATABASE || process.env.PGDATABASE;
+  const password = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD || process.env.SUPABASE_DB_PASSWORD;
+  const database = process.env.POSTGRES_DATABASE || process.env.PGDATABASE || 'postgres';
   const port = process.env.POSTGRES_PORT || process.env.PGPORT || '5432';
 
   if (host && password && database) {
@@ -217,8 +225,11 @@ export async function withTransaction<T>(callback: (client: DBClient) => Promise
 export async function initDatabase() {
   if (g.__fmp_db_initialized) return;
   const db = await getDb();
+  const isExternal = isUsingExternalDb();
 
-  const tableCheck = await db.query("SELECT 1 FROM information_schema.tables WHERE table_name = 'users'");
+  // In PostgreSQL/Supabase, verify public.users specifically so auth.users is not falsely matched
+  const schemaFilter = isExternal ? "table_schema = 'public' AND " : "";
+  const tableCheck = await db.query(`SELECT 1 FROM information_schema.tables WHERE ${schemaFilter}table_name = 'users'`);
   if (tableCheck.rows.length > 0) {
     await ensureSpecialCredentials(db);
     await restoreDbState(db);
@@ -226,9 +237,9 @@ export async function initDatabase() {
     return;
   }
 
-  // Create tables with proper types and primary keys (idempotent for cloud PostgreSQL)
+  // Create tables with proper types and primary keys (compatible across pg-mem and PostgreSQL)
   await db.query(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE users (
       id SERIAL PRIMARY KEY,
       phone VARCHAR(15),
       name VARCHAR(100),
@@ -240,12 +251,12 @@ export async function initDatabase() {
       city VARCHAR(50),
       pincode VARCHAR(10),
       is_active BOOLEAN DEFAULT TRUE,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP
     );
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS categories (
+    CREATE TABLE categories (
       id SERIAL PRIMARY KEY,
       name VARCHAR(50),
       slug VARCHAR(50),
@@ -256,7 +267,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS products (
+    CREATE TABLE products (
       id SERIAL PRIMARY KEY,
       category_id INT,
       name VARCHAR(150),
@@ -274,7 +285,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS orders (
+    CREATE TABLE orders (
       id SERIAL PRIMARY KEY,
       order_number VARCHAR(30),
       customer_id INT,
@@ -310,7 +321,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS order_items (
+    CREATE TABLE order_items (
       id SERIAL PRIMARY KEY,
       order_id INT,
       product_id INT,
@@ -324,7 +335,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS suppliers (
+    CREATE TABLE suppliers (
       id SERIAL PRIMARY KEY,
       name VARCHAR(150),
       contact_person VARCHAR(100),
@@ -338,7 +349,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS purchase_orders (
+    CREATE TABLE purchase_orders (
       id SERIAL PRIMARY KEY,
       po_number VARCHAR(30),
       supplier_id INT,
@@ -352,7 +363,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS purchase_order_items (
+    CREATE TABLE purchase_order_items (
       id SERIAL PRIMARY KEY,
       purchase_order_id INT,
       product_id INT,
@@ -364,7 +375,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS inventory_logs (
+    CREATE TABLE inventory_logs (
       id SERIAL PRIMARY KEY,
       product_id INT,
       change_type VARCHAR(50),
@@ -377,7 +388,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS audit_logs (
+    CREATE TABLE audit_logs (
       id SERIAL PRIMARY KEY,
       user_id INT,
       user_role VARCHAR(20),
@@ -391,7 +402,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS cod_reconciliations (
+    CREATE TABLE cod_reconciliations (
       id SERIAL PRIMARY KEY,
       reconciliation_number VARCHAR(30),
       rider_id INT,
@@ -406,7 +417,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS notifications (
+    CREATE TABLE notifications (
       id SERIAL PRIMARY KEY,
       user_id INT,
       title VARCHAR(150),
@@ -414,12 +425,12 @@ export async function initDatabase() {
       type VARCHAR(30),
       is_read BOOLEAN DEFAULT FALSE,
       order_id INT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP
     );
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS favorites (
+    CREATE TABLE favorites (
       id SERIAL PRIMARY KEY,
       customer_id INT,
       product_id INT,
@@ -428,7 +439,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS product_reviews (
+    CREATE TABLE product_reviews (
       id SERIAL PRIMARY KEY,
       product_id INT,
       customer_id INT,
@@ -442,7 +453,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS delivery_settings (
+    CREATE TABLE delivery_settings (
       id SERIAL PRIMARY KEY,
       default_delivery_fee NUMERIC(10, 2) DEFAULT 25.00,
       handling_fee NUMERIC(10, 2) DEFAULT 5.00,
@@ -453,7 +464,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS delivery_slots (
+    CREATE TABLE delivery_slots (
       id SERIAL PRIMARY KEY,
       name VARCHAR(100),
       time_window VARCHAR(100),
@@ -464,7 +475,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE IF NOT EXISTS password_reset_requests (
+    CREATE TABLE password_reset_requests (
       id SERIAL PRIMARY KEY,
       phone VARCHAR(15),
       name VARCHAR(100),
