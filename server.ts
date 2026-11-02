@@ -18,6 +18,11 @@ import {
 
 dotenv.config();
 
+// Fallback: If DATABASE_URL is absent on Vercel but POSTGRES_URL is available, map it directly
+if (!process.env.DATABASE_URL && process.env.POSTGRES_URL) {
+  process.env.DATABASE_URL = process.env.POSTGRES_URL;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 

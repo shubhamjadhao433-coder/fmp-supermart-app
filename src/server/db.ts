@@ -12,11 +12,20 @@ export interface DBClient {
 
 const g = globalThis as any;
 
+function sanitizeDbUrl(raw?: string): string {
+  if (!raw) return '';
+  let cleaned = raw.trim();
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
+}
+
 function isRealPostgresUrl(url?: string): boolean {
   if (!url) return false;
-  const trimmed = url.trim();
-  if (!trimmed) return false;
-  const lower = trimmed.toLowerCase();
+  const cleaned = sanitizeDbUrl(url);
+  if (!cleaned) return false;
+  const lower = cleaned.toLowerCase();
   if (['memory', 'in-memory', 'sqlite', 'none', 'mock', 'local', 'null', 'undefined', 'false', '0'].includes(lower)) {
     return false;
   }
@@ -24,6 +33,12 @@ function isRealPostgresUrl(url?: string): boolean {
 }
 
 export function getPostgresConnectionString(): { url: string; source: string } | null {
+  // If DATABASE_URL is unavailable but POSTGRES_URL is provided (e.g. Vercel Postgres integration),
+  // assign POSTGRES_URL to DATABASE_URL as a seamless fallback
+  if (!process.env.DATABASE_URL && process.env.POSTGRES_URL) {
+    process.env.DATABASE_URL = process.env.POSTGRES_URL;
+  }
+
   const candidateKeys = [
     'DATABASE_URL',
     'POSTGRES_URL',
@@ -35,24 +50,26 @@ export function getPostgresConnectionString(): { url: string; source: string } |
   ];
 
   for (const key of candidateKeys) {
-    const val = process.env[key];
+    const rawVal = process.env[key];
+    const val = sanitizeDbUrl(rawVal);
     if (val && isRealPostgresUrl(val)) {
-      return { url: val.trim(), source: key };
+      return { url: val, source: key };
     }
   }
 
   // Composite host/user/password variables (standard PG environment variables)
   const host = process.env.POSTGRES_HOST || process.env.PGHOST;
-  const user = process.env.POSTGRES_USER || process.env.PGUSER;
+  const user = process.env.POSTGRES_USER || process.env.PGUSER || 'postgres';
   const password = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD;
   const database = process.env.POSTGRES_DATABASE || process.env.PGDATABASE;
   const port = process.env.POSTGRES_PORT || process.env.PGPORT || '5432';
 
-  if (host && user && database) {
-    const authPart = password ? `${encodeURIComponent(user)}:${encodeURIComponent(password)}` : encodeURIComponent(user);
+  if (host && password && database) {
+    const authPart = `${encodeURIComponent(user)}:${encodeURIComponent(password)}`;
+    const sslQuery = host.includes('localhost') || host.includes('127.0.0.1') ? '' : '?sslmode=require';
     return {
-      url: `postgresql://${authPart}@${host}:${port}/${database}`,
-      source: 'PG_COMPOSITE_VARS'
+      url: `postgresql://${authPart}@${host}:${port}/${database}${sslQuery}`,
+      source: 'POSTGRES_COMPOSITE_VARS'
     };
   }
 
@@ -119,7 +136,7 @@ export async function getDb(): Promise<DBClient> {
         const pool = new Pool({
           connectionString: conn.url,
           ssl: isLocal ? false : { rejectUnauthorized: false },
-          connectionTimeoutMillis: 10000, // 10s timeout for cold start / Neon scale-to-zero wake-up
+          connectionTimeoutMillis: 10000, // 10s timeout for cold start / Neon / Supabase scale-to-zero wake-up
           idleTimeoutMillis: 30000,
           max: 5 // Keep pool small for serverless
         });
@@ -134,14 +151,16 @@ export async function getDb(): Promise<DBClient> {
       } catch (err: any) {
         console.error(`[Database] External PostgreSQL connection failed via ${conn.source}: ${err.message}`);
         g.__fmp_db_last_error = err.message;
-        if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
-          console.error('[Database CRITICAL] Vercel serverless deployment cannot persist user accounts across lambdas without a working PostgreSQL connection!');
+        const isProductionRuntime = (Boolean(process.env.VERCEL) || process.env.NODE_ENV === 'production') && process.env.IS_TEST_SUITE !== 'true';
+        if (isProductionRuntime) {
+          throw new Error(`[Database CRITICAL] Production PostgreSQL database connection failed (${err.message}). Verify ${conn.source} in Vercel environment variables.`);
         }
         g.__fmp_active_db = getMemDb();
       }
     } else {
-      if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
-        console.warn('[Database WARNING] No external PostgreSQL URL detected (DATABASE_URL / POSTGRES_URL). Running on ephemeral in-memory database; state will not persist across serverless function invocations!');
+      const isProductionRuntime = (Boolean(process.env.VERCEL) || process.env.NODE_ENV === 'production') && process.env.IS_TEST_SUITE !== 'true';
+      if (isProductionRuntime) {
+        throw new Error('[Database CRITICAL] No external PostgreSQL URL detected in production. Set POSTGRES_URL or DATABASE_URL in Vercel project settings.');
       }
       g.__fmp_active_db = getMemDb();
     }
