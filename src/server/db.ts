@@ -1,6 +1,8 @@
 import pg from 'pg';
 import { newDb } from 'pg-mem';
 import bcrypt from 'bcryptjs';
+import fs from 'fs';
+import path from 'path';
 
 const { Pool } = pg;
 
@@ -104,6 +106,7 @@ export async function initDatabase() {
   const tableCheck = await db.query("SELECT 1 FROM information_schema.tables WHERE table_name = 'users'");
   if (tableCheck.rows.length > 0) {
     await ensureSpecialCredentials(db);
+    await restoreDbState(db);
     g.__fmp_db_initialized = true;
     return;
   }
@@ -360,6 +363,7 @@ export async function initDatabase() {
 
   // Seed default data if users table is empty
   await seedInitialData(db);
+  await restoreDbState(db);
   g.__fmp_db_initialized = true;
 }
 
@@ -540,3 +544,112 @@ async function seedInitialData(db: DBClient) {
 
   console.log('Database seeded successfully for Karanja Lad!');
 }
+
+const STATE_FILE_PATH = path.resolve(process.cwd(), 'data', 'fmp_db_state.json');
+
+export async function persistDbState(dbClient?: DBClient): Promise<void> {
+  try {
+    const db = dbClient || (await getDb());
+    const usersRes = await db.query('SELECT * FROM users');
+    const ordersRes = await db.query('SELECT * FROM orders');
+    const notifsRes = await db.query('SELECT * FROM notifications');
+    const favsRes = await db.query('SELECT * FROM favorites');
+
+    const state = {
+      users: usersRes.rows,
+      orders: ordersRes.rows,
+      notifications: notifsRes.rows,
+      favorites: favsRes.rows,
+      updated_at: new Date().toISOString()
+    };
+
+    const dir = path.dirname(STATE_FILE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(STATE_FILE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+  } catch (err: any) {
+    console.error('Failed to persist database state:', err?.message || err);
+  }
+}
+
+export async function restoreDbState(db: DBClient): Promise<void> {
+  try {
+    if (!fs.existsSync(STATE_FILE_PATH)) return;
+    const raw = fs.readFileSync(STATE_FILE_PATH, 'utf-8');
+    const state = JSON.parse(raw);
+
+    if (Array.isArray(state.users)) {
+      for (const u of state.users) {
+        // Check if user already exists
+        const check = await db.query('SELECT id FROM users WHERE phone = $1 AND role = $2', [u.phone, u.role]);
+        if (check.rows.length === 0) {
+          await db.query(
+            `INSERT INTO users (phone, name, email, role, password_hash, address, landmark, city, pincode, is_active, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            [
+              u.phone,
+              u.name,
+              u.email || null,
+              u.role,
+              u.password_hash,
+              u.address || null,
+              u.landmark || null,
+              u.city || 'Karanja Lad',
+              u.pincode || '444105',
+              u.is_active !== false,
+              u.created_at || new Date()
+            ]
+          );
+        } else {
+          // Keep active status and password in sync
+          await db.query(
+            'UPDATE users SET password_hash = $1, is_active = $2, name = $3, address = COALESCE($4, address), landmark = COALESCE($5, landmark) WHERE id = $6',
+            [u.password_hash, u.is_active !== false, u.name, u.address || null, u.landmark || null, check.rows[0].id]
+          );
+        }
+      }
+    }
+
+    if (Array.isArray(state.orders)) {
+      for (const o of state.orders) {
+        const check = await db.query('SELECT id FROM orders WHERE order_number = $1', [o.order_number]);
+        if (check.rows.length === 0) {
+          await db.query(
+            `INSERT INTO orders (order_number, customer_id, customer_name, customer_phone, delivery_address, landmark, pincode, status, total_amount, subtotal_amount, delivery_charge, handling_charge, tip_amount, delivery_type, scheduled_date, time_slot, delivery_otp, cod_collected, cod_collected_at, cod_reconciled, failure_reason, rider_id, rider_name, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
+            [
+              o.order_number,
+              o.customer_id,
+              o.customer_name,
+              o.customer_phone,
+              o.delivery_address,
+              o.landmark,
+              o.pincode,
+              o.status,
+              o.total_amount,
+              o.subtotal_amount,
+              o.delivery_charge,
+              o.handling_charge,
+              o.tip_amount,
+              o.delivery_type,
+              o.scheduled_date,
+              o.time_slot,
+              o.delivery_otp,
+              o.cod_collected,
+              o.cod_collected_at,
+              o.cod_reconciled,
+              o.failure_reason,
+              o.rider_id,
+              o.rider_name,
+              o.created_at
+            ]
+          );
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('Could not restore persistent database state:', err?.message || err);
+  }
+}
+

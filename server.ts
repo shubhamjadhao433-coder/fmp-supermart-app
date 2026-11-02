@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
-import { getDb, withTransaction, initDatabase } from './src/server/db.ts';
+import { getDb, withTransaction, initDatabase, persistDbState } from './src/server/db.ts';
 import {
   requireAuth,
   requireRole,
@@ -150,6 +150,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     };
     const token = generateToken(userPayload as any);
     await logAudit(user.id, user.role, 'USER_REGISTERED', 'users', user.id, `User ${user.name} registered as ${user.role}`);
+    await persistDbState(db);
 
     res.status(201).json({
       message: 'Account created successfully',

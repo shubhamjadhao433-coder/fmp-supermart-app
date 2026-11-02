@@ -10,7 +10,9 @@ import {
   HelpCircle,
   ShoppingBag,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { api, authStorage } from '../services/api.ts';
 import { User } from '../types.ts';
@@ -33,6 +35,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Form Fields - explicitly reset whenever modal opens or mode changes
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [name, setName] = useState('');
   const [address, setAddress] = useState('');
   const [landmark, setLandmark] = useState('');
@@ -46,6 +49,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setName('');
     setPhone('');
     setPassword('');
+    setShowPassword(false);
     setAddress('');
     setLandmark('');
     setForgotNotes('');
@@ -61,6 +65,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   }, [isOpen, initialMode]);
 
+  const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value;
+    let digits = raw.replace(/\D/g, '');
+    if (digits.length === 12 && digits.startsWith('91')) {
+      digits = digits.slice(2);
+    } else if (digits.length === 11 && digits.startsWith('0')) {
+      digits = digits.slice(1);
+    } else if (digits.length > 10 && digits.startsWith('91')) {
+      digits = digits.slice(digits.length - 10);
+    }
+    if (digits.length > 10) {
+      digits = digits.slice(0, 10);
+    }
+    setPhone(digits);
+  };
+
   const handleSwitchToRegister = () => {
     setMode('register');
     resetAllFields();
@@ -69,6 +89,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleSwitchToLogin = () => {
     setMode('login');
     setPassword('');
+    setShowPassword(false);
     setError(null);
     setResetSuccessMessage(null);
   };
@@ -85,15 +106,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
     setError(null);
 
-    const cleanPhone = phone.trim().replace(/\D/g, '');
+    let cleanPhone = phone.trim().replace(/\D/g, '');
+    if (cleanPhone.length === 12 && cleanPhone.startsWith('91')) {
+      cleanPhone = cleanPhone.slice(2);
+    } else if (cleanPhone.length === 11 && cleanPhone.startsWith('0')) {
+      cleanPhone = cleanPhone.slice(1);
+    } else if (cleanPhone.length > 10 && cleanPhone.startsWith('91')) {
+      cleanPhone = cleanPhone.slice(cleanPhone.length - 10);
+    }
+
     if (cleanPhone.length < 10) {
       setError('Please enter a valid 10-digit mobile number.');
       setLoading(false);
       return;
     }
 
+    const cleanPassword = password.trim();
+    if (!cleanPassword) {
+      setError('Password is required.');
+      setLoading(false);
+      return;
+    }
+
     try {
-      const res = await api.login(cleanPhone, password);
+      const res = await api.login(cleanPhone, cleanPassword);
       authStorage.setToken(res.token);
       resetAllFields();
       onAuthSuccess(res.user);
@@ -110,15 +146,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
     setError(null);
 
-    const cleanPhone = phone.trim().replace(/\D/g, '');
+    let cleanPhone = phone.trim().replace(/\D/g, '');
+    if (cleanPhone.length === 12 && cleanPhone.startsWith('91')) {
+      cleanPhone = cleanPhone.slice(2);
+    } else if (cleanPhone.length === 11 && cleanPhone.startsWith('0')) {
+      cleanPhone = cleanPhone.slice(1);
+    } else if (cleanPhone.length > 10 && cleanPhone.startsWith('91')) {
+      cleanPhone = cleanPhone.slice(cleanPhone.length - 10);
+    }
+
     if (cleanPhone.length < 10) {
       setError('Please enter a valid 10-digit mobile number.');
       setLoading(false);
       return;
     }
 
-    if (password.length < 6) {
+    const cleanPassword = password.trim();
+    if (cleanPassword.length < 6) {
       setError('Password must be at least 6 characters.');
+      setLoading(false);
+      return;
+    }
+
+    if (!name.trim()) {
+      setError('Full name is required.');
       setLoading(false);
       return;
     }
@@ -126,7 +177,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const res = await api.register({
         phone: cleanPhone,
-        password,
+        password: cleanPassword,
         name: name.trim(),
         address: address.trim(),
         landmark: landmark.trim(),
@@ -216,9 +267,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <input
                   type="tel"
                   required
-                  maxLength={10}
+                  maxLength={15}
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value.replace(/\D/g, ''))}
+                  onChange={handlePhoneChange}
                   placeholder="10-digit mobile number"
                   className="w-full pl-9 pr-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
                 />
@@ -242,20 +293,39 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div className="relative">
                 <Lock className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Enter your password"
-                  className="w-full pl-9 pr-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
+                  className="w-full pl-9 pr-10 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
             </div>
 
             {error && (
               <div className="p-3 bg-red-50 text-red-700 text-xs rounded-xl font-medium border border-red-200 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{error}</span>
+                <div className="flex-1">
+                  <span>{error}</span>
+                  {error.includes('No account found') && (
+                    <button
+                      type="button"
+                      onClick={handleSwitchToRegister}
+                      className="block mt-1 font-bold text-emerald-700 hover:underline cursor-pointer"
+                    >
+                      Click here to create a new customer account →
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
@@ -310,9 +380,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <input
                   type="tel"
                   required
-                  maxLength={10}
+                  maxLength={15}
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value.replace(/\D/g, ''))}
+                  onChange={handlePhoneChange}
                   placeholder="10-digit mobile number"
                   autoComplete="off"
                   className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
@@ -325,14 +395,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div className="relative">
                 <Lock className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Minimum 6 characters"
                   autoComplete="new-password"
-                  className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
+                  className="w-full pl-9 pr-10 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden font-medium text-gray-900"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
             </div>
 
@@ -369,7 +447,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             {error && (
               <div className="p-3 bg-red-50 text-red-700 text-xs rounded-xl font-medium border border-red-200 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{error}</span>
+                <div className="flex-1">
+                  <span>{error}</span>
+                  {error.includes('already exists') && (
+                    <button
+                      type="button"
+                      onClick={handleSwitchToLogin}
+                      className="block mt-1 font-bold text-emerald-700 hover:underline cursor-pointer"
+                    >
+                      Already registered? Click here to Sign In →
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
