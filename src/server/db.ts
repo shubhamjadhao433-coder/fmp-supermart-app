@@ -17,10 +17,77 @@ function isRealPostgresUrl(url?: string): boolean {
   const trimmed = url.trim();
   if (!trimmed) return false;
   const lower = trimmed.toLowerCase();
-  if (['memory', 'in-memory', 'sqlite', 'none', 'mock', 'local', 'null', 'undefined'].includes(lower)) {
+  if (['memory', 'in-memory', 'sqlite', 'none', 'mock', 'local', 'null', 'undefined', 'false', '0'].includes(lower)) {
     return false;
   }
   return lower.startsWith('postgres://') || lower.startsWith('postgresql://');
+}
+
+export function getPostgresConnectionString(): { url: string; source: string } | null {
+  const candidateKeys = [
+    'DATABASE_URL',
+    'POSTGRES_URL',
+    'POSTGRES_PRISMA_URL',
+    'POSTGRES_URL_NON_POOLING',
+    'VERCEL_POSTGRES_URL',
+    'SUPABASE_DATABASE_URL',
+    'NEON_DATABASE_URL'
+  ];
+
+  for (const key of candidateKeys) {
+    const val = process.env[key];
+    if (val && isRealPostgresUrl(val)) {
+      return { url: val.trim(), source: key };
+    }
+  }
+
+  // Composite host/user/password variables (standard PG environment variables)
+  const host = process.env.POSTGRES_HOST || process.env.PGHOST;
+  const user = process.env.POSTGRES_USER || process.env.PGUSER;
+  const password = process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD;
+  const database = process.env.POSTGRES_DATABASE || process.env.PGDATABASE;
+  const port = process.env.POSTGRES_PORT || process.env.PGPORT || '5432';
+
+  if (host && user && database) {
+    const authPart = password ? `${encodeURIComponent(user)}:${encodeURIComponent(password)}` : encodeURIComponent(user);
+    return {
+      url: `postgresql://${authPart}@${host}:${port}/${database}`,
+      source: 'PG_COMPOSITE_VARS'
+    };
+  }
+
+  return null;
+}
+
+export function isUsingExternalDb(): boolean {
+  return g.__fmp_db_type === 'external_postgres';
+}
+
+export function getDatabaseDiagnosticInfo() {
+  const conn = getPostgresConnectionString();
+  let maskedHost = 'none';
+  if (conn?.url) {
+    try {
+      const parts = conn.url.split('@');
+      if (parts[1]) {
+        maskedHost = parts[1].split('/')[0];
+      }
+    } catch {
+      maskedHost = 'configured';
+    }
+  }
+
+  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  const isExternal = isUsingExternalDb();
+
+  return {
+    is_external: isExternal,
+    configured_source: conn ? conn.source : 'none',
+    masked_host: maskedHost,
+    serverless_environment: isServerless,
+    serverless_safe: isExternal,
+    last_error: g.__fmp_db_last_error || null
+  };
 }
 
 function getMemDb(): DBClient {
@@ -37,33 +104,62 @@ function getMemDb(): DBClient {
     const adapter = mem.adapters.createPg();
     g.__fmp_active_db = new adapter.Pool();
     g.__fmp_mem_db = mem;
+    g.__fmp_db_type = 'in_memory';
   }
   return g.__fmp_active_db;
 }
 
 export async function getDb(): Promise<DBClient> {
-  if (g.__fmp_active_db) return g.__fmp_active_db;
-
-  const dbUrl = process.env.DATABASE_URL;
-  if (isRealPostgresUrl(dbUrl)) {
-    try {
-      const pool = new Pool({
-        connectionString: dbUrl,
-        ssl: dbUrl!.includes('localhost') ? false : { rejectUnauthorized: false },
-        connectionTimeoutMillis: 3000
-      });
-      pool.on('error', (err: any) => console.error('Unexpected PG client error', err));
-      // Test connectivity immediately
-      await pool.query('SELECT 1');
-      g.__fmp_active_db = pool;
-      return g.__fmp_active_db;
-    } catch (err: any) {
-      console.warn(`External PostgreSQL connection failed (${err.message}). Falling back to in-memory PostgreSQL engine.`);
-      return getMemDb();
+  if (!g.__fmp_active_db) {
+    const conn = getPostgresConnectionString();
+    if (conn) {
+      try {
+        console.log(`[Database] Attempting external PostgreSQL connection via ${conn.source}...`);
+        const isLocal = conn.url.includes('localhost') || conn.url.includes('127.0.0.1');
+        const pool = new Pool({
+          connectionString: conn.url,
+          ssl: isLocal ? false : { rejectUnauthorized: false },
+          connectionTimeoutMillis: 10000, // 10s timeout for cold start / Neon scale-to-zero wake-up
+          idleTimeoutMillis: 30000,
+          max: 5 // Keep pool small for serverless
+        });
+        pool.on('error', (err: any) => console.error('[Database] Unexpected PG pool error:', err?.message || err));
+        
+        // Test connectivity immediately
+        await pool.query('SELECT 1');
+        console.log(`[Database] Successfully connected to external PostgreSQL via ${conn.source}!`);
+        g.__fmp_active_db = pool;
+        g.__fmp_db_type = 'external_postgres';
+        g.__fmp_db_last_error = null;
+      } catch (err: any) {
+        console.error(`[Database] External PostgreSQL connection failed via ${conn.source}: ${err.message}`);
+        g.__fmp_db_last_error = err.message;
+        if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+          console.error('[Database CRITICAL] Vercel serverless deployment cannot persist user accounts across lambdas without a working PostgreSQL connection!');
+        }
+        g.__fmp_active_db = getMemDb();
+      }
+    } else {
+      if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+        console.warn('[Database WARNING] No external PostgreSQL URL detected (DATABASE_URL / POSTGRES_URL). Running on ephemeral in-memory database; state will not persist across serverless function invocations!');
+      }
+      g.__fmp_active_db = getMemDb();
     }
   }
 
-  return getMemDb();
+  // Ensure tables and seeds are ready
+  if (!g.__fmp_db_initialized && !g.__fmp_db_initializing) {
+    g.__fmp_db_initializing = true;
+    try {
+      await initDatabase();
+    } catch (err: any) {
+      console.error('[Database] Failed to initialize schema/seeds:', err?.message || err);
+    } finally {
+      g.__fmp_db_initializing = false;
+    }
+  }
+
+  return g.__fmp_active_db;
 }
 
 
@@ -111,9 +207,9 @@ export async function initDatabase() {
     return;
   }
 
-  // Create tables with proper types and primary keys
+  // Create tables with proper types and primary keys (idempotent for cloud PostgreSQL)
   await db.query(`
-    CREATE TABLE users (
+    CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
       phone VARCHAR(15),
       name VARCHAR(100),
@@ -125,12 +221,12 @@ export async function initDatabase() {
       city VARCHAR(50),
       pincode VARCHAR(10),
       is_active BOOLEAN DEFAULT TRUE,
-      created_at TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
   await db.query(`
-    CREATE TABLE categories (
+    CREATE TABLE IF NOT EXISTS categories (
       id SERIAL PRIMARY KEY,
       name VARCHAR(50),
       slug VARCHAR(50),
@@ -141,7 +237,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE products (
+    CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY,
       category_id INT,
       name VARCHAR(150),
@@ -159,7 +255,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE orders (
+    CREATE TABLE IF NOT EXISTS orders (
       id SERIAL PRIMARY KEY,
       order_number VARCHAR(30),
       customer_id INT,
@@ -195,7 +291,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE order_items (
+    CREATE TABLE IF NOT EXISTS order_items (
       id SERIAL PRIMARY KEY,
       order_id INT,
       product_id INT,
@@ -209,7 +305,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE suppliers (
+    CREATE TABLE IF NOT EXISTS suppliers (
       id SERIAL PRIMARY KEY,
       name VARCHAR(150),
       contact_person VARCHAR(100),
@@ -223,7 +319,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE purchase_orders (
+    CREATE TABLE IF NOT EXISTS purchase_orders (
       id SERIAL PRIMARY KEY,
       po_number VARCHAR(30),
       supplier_id INT,
@@ -237,7 +333,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE purchase_order_items (
+    CREATE TABLE IF NOT EXISTS purchase_order_items (
       id SERIAL PRIMARY KEY,
       purchase_order_id INT,
       product_id INT,
@@ -249,7 +345,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE inventory_logs (
+    CREATE TABLE IF NOT EXISTS inventory_logs (
       id SERIAL PRIMARY KEY,
       product_id INT,
       change_type VARCHAR(50),
@@ -262,7 +358,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE audit_logs (
+    CREATE TABLE IF NOT EXISTS audit_logs (
       id SERIAL PRIMARY KEY,
       user_id INT,
       user_role VARCHAR(20),
@@ -276,7 +372,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE cod_reconciliations (
+    CREATE TABLE IF NOT EXISTS cod_reconciliations (
       id SERIAL PRIMARY KEY,
       reconciliation_number VARCHAR(30),
       rider_id INT,
@@ -291,7 +387,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE notifications (
+    CREATE TABLE IF NOT EXISTS notifications (
       id SERIAL PRIMARY KEY,
       user_id INT,
       title VARCHAR(150),
@@ -304,7 +400,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE favorites (
+    CREATE TABLE IF NOT EXISTS favorites (
       id SERIAL PRIMARY KEY,
       customer_id INT,
       product_id INT,
@@ -313,7 +409,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE product_reviews (
+    CREATE TABLE IF NOT EXISTS product_reviews (
       id SERIAL PRIMARY KEY,
       product_id INT,
       customer_id INT,
@@ -327,7 +423,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE delivery_settings (
+    CREATE TABLE IF NOT EXISTS delivery_settings (
       id SERIAL PRIMARY KEY,
       default_delivery_fee NUMERIC(10, 2) DEFAULT 25.00,
       handling_fee NUMERIC(10, 2) DEFAULT 5.00,
@@ -338,7 +434,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE delivery_slots (
+    CREATE TABLE IF NOT EXISTS delivery_slots (
       id SERIAL PRIMARY KEY,
       name VARCHAR(100),
       time_window VARCHAR(100),
@@ -349,7 +445,7 @@ export async function initDatabase() {
   `);
 
   await db.query(`
-    CREATE TABLE password_reset_requests (
+    CREATE TABLE IF NOT EXISTS password_reset_requests (
       id SERIAL PRIMARY KEY,
       phone VARCHAR(15),
       name VARCHAR(100),
@@ -360,6 +456,15 @@ export async function initDatabase() {
       resolved_at TIMESTAMP
     );
   `);
+
+  // Create performance indexes
+  try {
+    await db.query('CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone)');
+    await db.query('CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)');
+    await db.query('CREATE INDEX IF NOT EXISTS idx_orders_rider ON orders(rider_id)');
+  } catch {
+    // Non-fatal if index creation not supported in memory db
+  }
 
   // Seed default data if users table is empty
   await seedInitialData(db);
@@ -545,9 +650,32 @@ async function seedInitialData(db: DBClient) {
   console.log('Database seeded successfully for Karanja Lad!');
 }
 
-const STATE_FILE_PATH = path.resolve(process.cwd(), 'data', 'fmp_db_state.json');
+function getSafeStateFilePath(): string | null {
+  try {
+    // If running in Vercel or Lambda serverless environment, write to /tmp
+    if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+      return '/tmp/fmp_db_state.json';
+    }
+    const defaultPath = path.resolve(process.cwd(), 'data', 'fmp_db_state.json');
+    const dir = path.dirname(defaultPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return defaultPath;
+  } catch {
+    return '/tmp/fmp_db_state.json';
+  }
+}
 
 export async function persistDbState(dbClient?: DBClient): Promise<void> {
+  // If connected to a real external PostgreSQL database, state is already persistent!
+  if (isUsingExternalDb()) {
+    return;
+  }
+
+  const filePath = getSafeStateFilePath();
+  if (!filePath) return;
+
   try {
     const db = dbClient || (await getDb());
     const usersRes = await db.query('SELECT * FROM users');
@@ -563,20 +691,28 @@ export async function persistDbState(dbClient?: DBClient): Promise<void> {
       updated_at: new Date().toISOString()
     };
 
-    const dir = path.dirname(STATE_FILE_PATH);
+    const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(STATE_FILE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+    fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf-8');
   } catch (err: any) {
-    console.error('Failed to persist database state:', err?.message || err);
+    // Non-blocking in serverless environments
+    console.warn('[Database] In-memory state persistence notice:', err?.message || err);
   }
 }
 
 export async function restoreDbState(db: DBClient): Promise<void> {
+  // Real external PostgreSQL retains its own state
+  if (isUsingExternalDb()) {
+    return;
+  }
+
+  const filePath = getSafeStateFilePath();
+  if (!filePath || !fs.existsSync(filePath)) return;
+
   try {
-    if (!fs.existsSync(STATE_FILE_PATH)) return;
-    const raw = fs.readFileSync(STATE_FILE_PATH, 'utf-8');
+    const raw = fs.readFileSync(filePath, 'utf-8');
     const state = JSON.parse(raw);
 
     if (Array.isArray(state.users)) {

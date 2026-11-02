@@ -1,11 +1,12 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
-import { getDb, withTransaction, initDatabase, persistDbState } from './src/server/db.ts';
+import bcrypt from 'bcryptjs';
+import { getDb, withTransaction, initDatabase, persistDbState, getDatabaseDiagnosticInfo, isUsingExternalDb } from './src/server/db.ts';
 import {
   requireAuth,
   requireRole,
@@ -71,6 +72,19 @@ app.get('/api/health', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
     const test = await db.query('SELECT 1 as healthy');
+    const diag = getDatabaseDiagnosticInfo();
+
+    let userCount = 0;
+    try {
+      const usersRes = await db.query('SELECT COUNT(*) as count FROM users');
+      userCount = parseInt(usersRes.rows[0]?.count || '0', 10);
+    } catch {
+      userCount = 0;
+    }
+
+    const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const hasExternalDb = isUsingExternalDb();
+
     res.json({
       status: 'healthy',
       app: 'FMP Supermart Karanja Lad',
@@ -82,7 +96,15 @@ app.get('/api/health', async (req: Request, res: Response) => {
       },
       database: {
         healthy: test.rows.length > 0,
-        type: process.env.DATABASE_URL && (process.env.DATABASE_URL.startsWith('postgres://') || process.env.DATABASE_URL.startsWith('postgresql://')) ? 'PostgreSQL (External)' : 'PostgreSQL (High-fidelity Engine)'
+        type: hasExternalDb ? 'PostgreSQL (External Cloud / Server)' : 'PostgreSQL (In-Memory Engine)',
+        is_external: hasExternalDb,
+        configured_source: diag.configured_source,
+        masked_host: diag.masked_host,
+        users_count: userCount,
+        serverless_safe: hasExternalDb || !isServerless,
+        warning: isServerless && !hasExternalDb
+          ? 'ACTION REQUIRED IN VERCEL: App is running in serverless mode without a persistent PostgreSQL connection. In-memory data does not survive cold starts. Set DATABASE_URL or POSTGRES_URL in Vercel Project Settings > Environment Variables.'
+          : null
       },
       businessRules: {
         deliveryFeeModel: 'Admin Controlled (Default ₹25, Configurable per order/area, ₹0 allowed)',
@@ -2120,7 +2142,10 @@ async function startServer() {
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -2161,8 +2186,9 @@ async function startServer() {
   });
 }
 
-// Only start listening if not running inside test environment
-const isDirectRun = process.env.IS_TEST_SUITE !== 'true' && process.env.NODE_ENV !== 'test';
+// Only start listening if not running inside test environment or serverless runtime (Vercel / Lambda)
+const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const isDirectRun = !isServerless && process.env.IS_TEST_SUITE !== 'true' && process.env.NODE_ENV !== 'test';
 if (isDirectRun) {
   startServer().catch(err => {
     console.error('Failed to start server:', err);
