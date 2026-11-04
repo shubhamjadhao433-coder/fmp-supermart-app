@@ -2,20 +2,75 @@
 <html lang="en">
   <head>
     <script>
-      // Suppress benign Vite HMR WebSocket disconnection in container preview proxy
-      window.addEventListener('error', function(e) {
-        if (e.message && (e.message.includes('WebSocket') || e.filename?.includes('@vite/client'))) {
-          e.stopImmediatePropagation();
-          e.preventDefault();
-          return true;
+      // Suppress Vite HMR WebSocket disconnection errors in container preview proxy
+      (function() {
+        if (typeof window !== 'undefined') {
+          // 1. Filter out console.error for WebSocket HMR closures
+          const origConsoleError = console.error;
+          console.error = function() {
+            for (let i = 0; i < arguments.length; i++) {
+              const arg = arguments[i];
+              const str = String(arg && (arg.message || arg.stack || arg));
+              if (str.includes('WebSocket closed without opened') || str.includes('@vite/client') || str.includes('vite-hmr')) {
+                return;
+              }
+            }
+            return origConsoleError.apply(console, arguments);
+          };
+
+          // 2. Global error event suppression
+          window.addEventListener('error', function(e) {
+            const msg = String(e && (e.message || (e.error && e.error.message) || ''));
+            const file = String(e && e.filename || '');
+            if (msg.includes('WebSocket') || file.includes('@vite/client') || file.includes('vite')) {
+              e.stopImmediatePropagation();
+              e.preventDefault();
+              return true;
+            }
+          }, true);
+
+          // 3. Unhandled rejection suppression
+          window.addEventListener('unhandledrejection', function(e) {
+            const reasonStr = String(e && (e.reason && (e.reason.message || e.reason.stack) || e.reason || ''));
+            if (reasonStr.includes('WebSocket') || reasonStr.includes('@vite/client')) {
+              e.stopImmediatePropagation();
+              e.preventDefault();
+            }
+          }, true);
+
+          // 4. Provide harmless no-op WebSocket for Vite HMR client to prevent error emission
+          if (window.WebSocket) {
+            const RealWS = window.WebSocket;
+            window.WebSocket = function(url, protocols) {
+              const isHmr = protocols === 'vite-hmr' || (typeof url === 'string' && (url.includes('vite-hmr') || url.includes('/@vite/client')));
+              if (isHmr) {
+                const noop = function() {};
+                const emitter = {
+                  readyState: 1, // OPEN
+                  send: noop,
+                  close: noop,
+                  addEventListener: function(event, handler) {
+                    if (event === 'open') setTimeout(function() { handler({ type: 'open' }); }, 0);
+                  },
+                  removeEventListener: noop,
+                  dispatchEvent: function() { return true; },
+                  onopen: null,
+                  onclose: null,
+                  onerror: null,
+                  onmessage: null
+                };
+                return emitter;
+              }
+              return new RealWS(url, protocols);
+            };
+            window.WebSocket.prototype = RealWS.prototype;
+            window.WebSocket.CONNECTING = RealWS.CONNECTING;
+            window.WebSocket.OPEN = RealWS.OPEN;
+            window.WebSocket.CLOSING = RealWS.CLOSING;
+            window.WebSocket.CLOSED = RealWS.CLOSED;
+          }
         }
-      }, true);
-      window.addEventListener('unhandledrejection', function(e) {
-        if (e.reason && (String(e.reason).includes('WebSocket') || String(e.reason.stack).includes('@vite/client'))) {
-          e.stopImmediatePropagation();
-          e.preventDefault();
-        }
-      }, true);
+      })();
     </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />

@@ -1,0 +1,112 @@
+{
+  "entities": {
+    "users": {
+      "title": "User",
+      "description": "User profile including customers, administrators, and delivery riders",
+      "type": "object",
+      "properties": {
+        "phone": { "type": "string", "description": "10-digit mobile number" },
+        "name": { "type": "string", "description": "Full name" },
+        "email": { "type": "string", "description": "Email address" },
+        "role": { "type": "string", "enum": ["customer", "admin", "rider"], "description": "System role" },
+        "address": { "type": "string", "description": "Delivery address in Karanja Lad" },
+        "landmark": { "type": "string", "description": "Nearby landmark" },
+        "pincode": { "type": "string", "description": "Pin code (e.g. 444105)" },
+        "is_active": { "type": "boolean", "description": "Account status" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["phone", "name", "role"]
+    },
+    "categories": {
+      "title": "Category",
+      "description": "Product category in supermarket",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "slug": { "type": "string" },
+        "icon": { "type": "string" },
+        "display_order": { "type": "number" }
+      },
+      "required": ["name", "slug"]
+    },
+    "products": {
+      "title": "Product",
+      "description": "Store item available in Karanja Lad warehouse",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "hindi_name": { "type": "string" },
+        "category_id": { "type": "string" },
+        "unit": { "type": "string" },
+        "price": { "type": "number" },
+        "mrp": { "type": "number" },
+        "stock": { "type": "number" },
+        "image_url": { "type": "string" },
+        "is_featured": { "type": "boolean" },
+        "is_active": { "type": "boolean" }
+      },
+      "required": ["name", "price", "stock"]
+    },
+    "orders": {
+      "title": "Order",
+      "description": "Customer COD grocery order",
+      "type": "object",
+      "properties": {
+        "order_number": { "type": "string" },
+        "customer_id": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "customer_phone": { "type": "string" },
+        "delivery_address": { "type": "string" },
+        "total_amount": { "type": "number" },
+        "delivery_fee": { "type": "number" },
+        "handling_charge": { "type": "number" },
+        "tip_amount": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "packed", "assigned", "dispatched", "delivered", "cancelled"]
+        },
+        "payment_method": { "type": "string", "enum": ["COD"] },
+        "otp": { "type": "string" },
+        "assigned_rider_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["order_number", "customer_id", "total_amount", "status", "payment_method"]
+    },
+    "notifications": {
+      "title": "Notification",
+      "description": "In-app notification for users",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string" },
+        "is_read": { "type": "boolean" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["user_id", "title", "message"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "User profiles keyed by user ID"
+    },
+    "/categories/{categoryId}": {
+      "schema": "categories",
+      "description": "Grocery categories"
+    },
+    "/products/{productId}": {
+      "schema": "products",
+      "description": "Product catalog and inventory items"
+    },
+    "/orders/{orderId}": {
+      "schema": "orders",
+      "description": "Grocery orders"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "notifications",
+      "description": "User notification messages"
+    }
+  }
+}
