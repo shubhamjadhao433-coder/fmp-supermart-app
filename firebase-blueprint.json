@@ -11,6 +11,7 @@
         "role": { "type": "string", "enum": ["customer", "admin", "rider"], "description": "System role" },
         "address": { "type": "string", "description": "Delivery address in Karanja Lad" },
         "landmark": { "type": "string", "description": "Nearby landmark" },
+        "city": { "type": "string", "description": "City e.g. Karanja Lad" },
         "pincode": { "type": "string", "description": "Pin code (e.g. 444105)" },
         "is_active": { "type": "boolean", "description": "Account status" },
         "created_at": { "type": "string", "format": "date-time" }
@@ -24,8 +25,10 @@
       "properties": {
         "name": { "type": "string" },
         "slug": { "type": "string" },
-        "icon": { "type": "string" },
-        "display_order": { "type": "number" }
+        "description": { "type": "string" },
+        "image_url": { "type": "string" },
+        "display_order": { "type": "number" },
+        "is_active": { "type": "boolean" }
       },
       "required": ["name", "slug"]
     },
@@ -35,21 +38,22 @@
       "type": "object",
       "properties": {
         "name": { "type": "string" },
-        "hindi_name": { "type": "string" },
         "category_id": { "type": "string" },
         "unit": { "type": "string" },
         "price": { "type": "number" },
         "mrp": { "type": "number" },
+        "discount_percent": { "type": "number" },
         "stock": { "type": "number" },
         "image_url": { "type": "string" },
-        "is_featured": { "type": "boolean" },
-        "is_active": { "type": "boolean" }
+        "description": { "type": "string" },
+        "is_active": { "type": "boolean" },
+        "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["name", "price", "stock"]
     },
     "orders": {
       "title": "Order",
-      "description": "Customer COD grocery order",
+      "description": "Customer COD grocery order with OTP verification",
       "type": "object",
       "properties": {
         "order_number": { "type": "string" },
@@ -57,56 +61,200 @@
         "customer_name": { "type": "string" },
         "customer_phone": { "type": "string" },
         "delivery_address": { "type": "string" },
-        "total_amount": { "type": "number" },
+        "landmark": { "type": "string" },
+        "pincode": { "type": "string" },
+        "subtotal": { "type": "number" },
         "delivery_fee": { "type": "number" },
-        "handling_charge": { "type": "number" },
+        "handling_fee": { "type": "number" },
         "tip_amount": { "type": "number" },
+        "total_amount": { "type": "number" },
+        "payment_mode": { "type": "string", "enum": ["COD"] },
         "status": {
           "type": "string",
-          "enum": ["pending", "packed", "assigned", "dispatched", "delivered", "cancelled"]
+          "enum": ["placed", "confirmed", "packed", "dispatched", "delivered", "cancelled"]
         },
-        "payment_method": { "type": "string", "enum": ["COD"] },
-        "otp": { "type": "string" },
-        "assigned_rider_id": { "type": "string" },
+        "delivery_type": { "type": "string" },
+        "scheduled_date": { "type": "string" },
+        "time_slot": { "type": "string" },
+        "rider_id": { "type": "string" },
+        "rider_name": { "type": "string" },
+        "rider_phone": { "type": "string" },
+        "delivery_otp": { "type": "string" },
+        "otp_expires_at": { "type": "string", "format": "date-time" },
+        "otp_attempts": { "type": "number" },
+        "cod_collected": { "type": "boolean" },
+        "cod_reconciled": { "type": "boolean" },
+        "failure_reason": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" }
       },
-      "required": ["order_number", "customer_id", "total_amount", "status", "payment_method"]
+      "required": ["order_number", "customer_id", "total_amount", "status", "payment_mode"]
+    },
+    "order_items": {
+      "title": "OrderItem",
+      "description": "Line items associated with an order",
+      "type": "object",
+      "properties": {
+        "order_id": { "type": "string" },
+        "product_id": { "type": "string" },
+        "product_name": { "type": "string" },
+        "unit": { "type": "string" },
+        "price": { "type": "number" },
+        "quantity": { "type": "number" },
+        "total": { "type": "number" },
+        "image_url": { "type": "string" }
+      },
+      "required": ["order_id", "product_id", "quantity", "price"]
+    },
+    "inventory": {
+      "title": "InventoryLog",
+      "description": "Transactional log of inventory stock changes",
+      "type": "object",
+      "properties": {
+        "product_id": { "type": "string" },
+        "change_type": { "type": "string" },
+        "quantity_change": { "type": "number" },
+        "stock_after": { "type": "number" },
+        "reference_id": { "type": "string" },
+        "notes": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["product_id", "quantity_change", "stock_after"]
+    },
+    "riders": {
+      "title": "Rider",
+      "description": "Delivery fleet profile and operational metrics",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "vehicle_type": { "type": "string" },
+        "status": { "type": "string" },
+        "cash_in_hand": { "type": "number" },
+        "total_deliveries": { "type": "number" }
+      },
+      "required": ["user_id", "name", "phone"]
+    },
+    "addresses": {
+      "title": "Address",
+      "description": "Saved customer delivery addresses",
+      "type": "object",
+      "properties": {
+        "user_id": { "type": "string" },
+        "label": { "type": "string" },
+        "address": { "type": "string" },
+        "landmark": { "type": "string" },
+        "pincode": { "type": "string" },
+        "is_default": { "type": "boolean" }
+      },
+      "required": ["user_id", "address"]
     },
     "notifications": {
       "title": "Notification",
-      "description": "In-app notification for users",
+      "description": "In-app notifications for orders and account alerts",
       "type": "object",
       "properties": {
         "user_id": { "type": "string" },
         "title": { "type": "string" },
         "message": { "type": "string" },
         "type": { "type": "string" },
+        "order_id": { "type": "string" },
         "is_read": { "type": "boolean" },
         "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["user_id", "title", "message"]
+    },
+    "settings": {
+      "title": "Settings",
+      "description": "Global supermarket business settings including delivery fees",
+      "type": "object",
+      "properties": {
+        "default_delivery_fee": { "type": "number" },
+        "handling_fee": { "type": "number" },
+        "min_order_amount": { "type": "number" },
+        "delivery_areas": { "type": "string" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["default_delivery_fee", "handling_fee"]
+    },
+    "delivery_slots": {
+      "title": "DeliverySlot",
+      "description": "Available delivery time windows in Karanja Lad",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "time_window": { "type": "string" },
+        "max_orders_per_slot": { "type": "number" },
+        "is_active": { "type": "boolean" },
+        "display_order": { "type": "number" }
+      },
+      "required": ["name", "time_window"]
+    },
+    "reviews": {
+      "title": "Review",
+      "description": "Product rating and review from verified customers",
+      "type": "object",
+      "properties": {
+        "product_id": { "type": "string" },
+        "customer_id": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "order_id": { "type": "string" },
+        "rating": { "type": "number" },
+        "review_text": { "type": "string" },
+        "status": { "type": "string", "enum": ["approved", "rejected"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["product_id", "customer_id", "rating", "review_text"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "users",
-      "description": "User profiles keyed by user ID"
+      "description": "Customer, Admin, and Rider user profiles"
     },
     "/categories/{categoryId}": {
       "schema": "categories",
-      "description": "Grocery categories"
+      "description": "Grocery catalogue categories"
     },
     "/products/{productId}": {
       "schema": "products",
-      "description": "Product catalog and inventory items"
+      "description": "Grocery catalogue products with stock"
     },
     "/orders/{orderId}": {
       "schema": "orders",
-      "description": "Grocery orders"
+      "description": "Cash on Delivery customer orders"
+    },
+    "/order_items/{itemId}": {
+      "schema": "order_items",
+      "description": "Items purchased in an order"
+    },
+    "/inventory/{logId}": {
+      "schema": "inventory",
+      "description": "Stock deduction and replenishment audit logs"
+    },
+    "/riders/{riderId}": {
+      "schema": "riders",
+      "description": "Delivery partner fleet records and metrics"
+    },
+    "/addresses/{addressId}": {
+      "schema": "addresses",
+      "description": "Customer delivery addresses"
     },
     "/notifications/{notificationId}": {
       "schema": "notifications",
       "description": "User notification messages"
+    },
+    "/settings/{settingId}": {
+      "schema": "settings",
+      "description": "Store configuration and admin delivery fee settings"
+    },
+    "/delivery_slots/{slotId}": {
+      "schema": "delivery_slots",
+      "description": "Delivery scheduling windows"
+    },
+    "/reviews/{reviewId}": {
+      "schema": "reviews",
+      "description": "Customer product reviews and ratings"
     }
   }
 }

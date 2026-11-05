@@ -6,7 +6,7 @@ import firebaseConfig from '../../firebase-applet-config.json';
 // Initialize Firebase client
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 // Initial boot connection test
 export async function testFirestoreConnection(): Promise<boolean> {

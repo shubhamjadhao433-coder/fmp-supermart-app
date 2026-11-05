@@ -603,9 +603,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                             No notifications yet. You're up to date!
                           </div>
                         ) : (
-                          notifications.map(n => (
+                          notifications.map((n, idx) => (
                             <div
-                              key={n.id}
+                              key={n.id || `notif-${idx}`}
                               onClick={() => handleMarkNotificationRead(n.id)}
                               className={`p-3 text-xs hover:bg-gray-50 transition cursor-pointer ${
                                 !n.is_read ? 'bg-emerald-50/50' : ''
@@ -730,11 +730,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             <span>All Items</span>
           </button>
 
-          {categories.map(category => {
+          {categories.map((category, idx) => {
             const isSelected = selectedCategory === category.name;
             return (
               <button
-                key={category.id}
+                key={category.id || `cat-${category.slug || category.name || idx}`}
                 onClick={() => setSelectedCategory(category.name)}
                 className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
                   isSelected
@@ -822,7 +822,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 sm:gap-4 w-full min-w-0">
-            {filteredProducts.map(product => {
+            {filteredProducts.map((product, idx) => {
               const inCart = cart.find(i => i.product.id === product.id);
               const isFavorite = favoriteIds.has(product.id);
               const isOutOfStock = product.stock <= 0;
@@ -833,7 +833,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
               return (
                 <div
-                  key={product.id}
+                  key={product.id || `prod-${product.name || idx}`}
                   className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs hover:shadow-md transition flex flex-col justify-between group relative w-full min-w-0"
                 >
                   {/* Top Image Box */}
@@ -1323,14 +1323,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     No reviews yet. Be the first to rate this product!
                   </div>
                 ) : (
-                  productReviews.map(rev => (
-                    <div key={rev.id} className="py-2.5">
+                  productReviews.map((rev, idx) => (
+                    <div key={rev.id || `rev-${idx}`} className="py-2.5">
                       <div className="flex items-center justify-between">
                         <span className="font-bold text-gray-900">{rev.customer_name}</span>
                         <div className="flex items-center text-amber-400">
                           {Array.from({ length: 5 }).map((_, idx) => (
                             <Star
-                              key={idx}
+                              key={`star-${idx}`}
                               className={`w-3 h-3 ${
                                 idx < rev.rating ? 'fill-amber-400' : 'text-gray-200'
                               }`}
@@ -1352,7 +1352,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     {[1, 2, 3, 4, 5].map(st => (
                       <button
                         type="button"
-                        key={st}
+                        key={`rating-star-${st}`}
                         onClick={() => setNewRating(st)}
                         className="cursor-pointer"
                       >
@@ -1432,8 +1432,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </button>
                 </div>
               ) : (
-                cart.map(item => (
-                  <div key={item.product.id} className="py-3 flex items-center gap-3 text-xs">
+                cart.map((item, idx) => (
+                  <div key={item.product?.id || `cart-${idx}`} className="py-3 flex items-center gap-3 text-xs">
                     <img
                       src={item.product.image_url}
                       alt={item.product.name}
@@ -1766,14 +1766,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   <p>When you place an order, you can view your live delivery OTP right here.</p>
                 </div>
               ) : (
-                orders.map(order => {
+                orders.map((order, idx) => {
                   const isDispatched = order.status === 'dispatched';
                   const isDelivered = order.status === 'delivered';
                   const canCancel = ['placed', 'confirmed', 'packed'].includes(order.status);
 
                   return (
                     <div
-                      key={order.id}
+                      key={order.id || `order-${order.order_number || idx}`}
                       className={`p-4 rounded-2xl border space-y-3 shadow-xs ${
                         isDispatched
                           ? 'border-amber-300 bg-amber-50/20 ring-2 ring-amber-100'
@@ -1909,8 +1909,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   <p>Tap the heart icon on any grocery or fresh produce item to add it to your quick-access favorites list.</p>
                 </div>
               ) : (
-                favorites.map(fav => (
-                  <div key={fav.id} className="py-3 flex items-center gap-3 text-xs">
+                favorites.map((fav, idx) => (
+                  <div key={fav.id || `fav-${idx}`} className="py-3 flex items-center gap-3 text-xs">
                     <img
                       src={fav.image_url}
                       alt={fav.name}

@@ -2,15 +2,14 @@
  * Verification test for HttpOnly cookie compatibility and session persistence across refresh.
  */
 import app from '../server.ts';
-import { initDatabase, getDb } from '../src/server/db.ts';
+import { seedFirestoreIfEmpty, usersRepo } from '../src/server/firestoreDb.ts';
 
 async function run() {
   console.log('===================================================================');
   console.log('🧪 Verifying JWT Storage, HttpOnly Cookie & Session Persistence');
   console.log('===================================================================');
 
-  await initDatabase();
-  const db = await getDb();
+  await seedFirestoreIfEmpty();
 
   // Pick unique customer mobile
   const testPhone = '9766' + Math.floor(100000 + Math.random() * 900000);

@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { getDb } from './db.ts';
+import { usersRepo, auditLogsRepo } from './firestoreDb.ts';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fmp_karanja_lad_supermart_jwt_secure_secret_2026_xyz';
 
@@ -12,6 +12,7 @@ export interface AuthUser {
   address?: string;
   landmark?: string;
   pincode?: string;
+  is_active?: boolean;
 }
 
 export interface AuthenticatedRequest extends Request {
@@ -58,18 +59,27 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     const userId = parseInt(String(decoded.id), 10);
-    
-    // Fetch full user record to ensure current active state
-    const db = await getDb();
-    const userRes = await db.query(
-      'SELECT id, phone, name, role, address, landmark, pincode, is_active FROM users WHERE id = $1 OR (phone = $2 AND role = $3)',
-      [userId, decoded.phone, decoded.role]
-    );
-    if (userRes.rows.length === 0 || userRes.rows[0].is_active === false) {
+
+    // Fetch full user record from Firestore to ensure current active state
+    let user = await usersRepo.findById(userId);
+    if (!user && decoded.phone && decoded.role) {
+      user = await usersRepo.findByPhoneAndRole(decoded.phone, decoded.role);
+    }
+
+    if (!user || user.is_active === false) {
       return res.status(401).json({ error: 'User account not found or deactivated.' });
     }
-    
-    req.user = userRes.rows[0];
+
+    req.user = {
+      id: user.id,
+      phone: user.phone,
+      name: user.name,
+      role: user.role,
+      address: user.address || undefined,
+      landmark: user.landmark || undefined,
+      pincode: user.pincode,
+      is_active: user.is_active
+    };
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Session expired or invalid token. Please log in again.' });
@@ -98,12 +108,15 @@ export async function logAudit(
   ipAddress?: string
 ) {
   try {
-    const db = await getDb();
-    await db.query(
-      `INSERT INTO audit_logs (user_id, user_role, action, entity, entity_id, details, ip_address)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [userId, userRole, action, entity, entityId ? String(entityId) : null, details, ipAddress || 'internal']
-    );
+    await auditLogsRepo.create({
+      user_id: userId,
+      user_role: userRole,
+      action,
+      entity,
+      entity_id: entityId,
+      details,
+      ip_address: ipAddress || 'internal'
+    });
   } catch (err) {
     console.error('Failed to write audit log:', err);
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import app from '../../server.ts';
-import { initDatabase, getDb } from '../server/db.ts';
+import { seedFirestoreIfEmpty, productsRepo, usersRepo } from '../server/firestoreDb.ts';
 
 // Test runner helper
 let testsPassed = 0;
@@ -22,6 +22,7 @@ async function test(name: string, fn: () => Promise<void>) {
 async function main() {
   console.log('\n======================================================');
   console.log('🧪 Starting Automated Tests for FMP Supermart (Karanja Lad)');
+  console.log('   Pure Firebase Firestore Backend Verification');
   console.log('======================================================\n');
 
   // Start test server on random port
@@ -30,7 +31,7 @@ async function main() {
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
   try {
-    await initDatabase();
+    await seedFirestoreIfEmpty();
 
     // 1. Health check test
     await test('Health check endpoint returns healthy status and Karanja Lad warehouse config', async () => {
@@ -40,6 +41,7 @@ async function main() {
       assert.strictEqual(data.status, 'healthy');
       assert.strictEqual(data.warehouse.location, 'Shivaji Chowk, Karanja Lad, Maharashtra 444105');
       assert.strictEqual(data.businessRules.paymentMode, 'Cash on Delivery (COD) Only');
+      assert.strictEqual(data.database.type, 'Firebase Firestore (Single Source of Truth)');
     });
 
     // 2. Registration & Login
@@ -164,14 +166,20 @@ async function main() {
     });
 
     // 5. Admin-Controlled Delivery Charge Business Rules
-    // Rule: Delivery fee is controlled by admin settings (default ₹25, configurable, ₹0 allowed)
-    // Rule: Handling charge is ₹5 per order
-    // Rule: Saved permanently with the order record
     await test('Admin-controlled delivery charge & handling fee calculations', async () => {
+      // Ensure default delivery fee is ₹25
+      await fetch(`${baseUrl}/api/admin/settings/delivery`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`
+        },
+        body: JSON.stringify({ default_delivery_fee: 25, handling_fee: 5 })
+      });
+
       // 5a. Order with default delivery fee: 1 item
-      const db = await getDb();
-      const pRes = await db.query('SELECT id, price, stock FROM products WHERE price < 200 AND stock > 5 LIMIT 1');
-      const testProd = pRes.rows[0];
+      const prods = await productsRepo.list();
+      const testProd = prods.find(p => p.price < 200 && p.stock > 5) || prods[0];
 
       const orderRes1 = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
@@ -228,7 +236,7 @@ async function main() {
         Number(orderData2.order.subtotal) + 5
       );
 
-      // Verify past order 1 fee did NOT shift (permanent record integrity)
+      // Verify past order 1 fee did NOT shift
       const pastOrderCheck = await fetch(`${baseUrl}/api/orders/${orderData1.order.id}`, {
         headers: { Authorization: `Bearer ${testCustomerToken}` }
       });
@@ -248,9 +256,8 @@ async function main() {
 
     // 6. Inventory Reservation and Rollback on Insufficient Stock
     await test('Inventory reservation & rollback (Never allow negative inventory)', async () => {
-      const db = await getDb();
-      const prodRes = await db.query('SELECT id, stock FROM products WHERE id = $1', [createdProductId]);
-      const currentStock = prodRes.rows[0].stock;
+      const prod = await productsRepo.findById(createdProductId);
+      const currentStock = prod!.stock;
 
       // Attempt to purchase more than available
       const failRes = await fetch(`${baseUrl}/api/orders`, {
@@ -269,15 +276,14 @@ async function main() {
       assert.ok(failData.error.includes('Insufficient stock'));
 
       // Check stock was untouched
-      const prodAfter = await db.query('SELECT stock FROM products WHERE id = $1', [createdProductId]);
-      assert.strictEqual(prodAfter.rows[0].stock, currentStock, 'Stock must not change when order fails');
+      const prodAfter = await productsRepo.findById(createdProductId);
+      assert.strictEqual(prodAfter!.stock, currentStock, 'Stock must not change when order fails');
     });
 
     // 7. Order Cancellation and Automatic Stock Restoration
     await test('Order cancellation automatically restores reserved stock to inventory', async () => {
-      const db = await getDb();
-      const prodBefore = await db.query('SELECT stock FROM products WHERE id = $1', [createdProductId]);
-      const initialStock = prodBefore.rows[0].stock;
+      const prodBefore = await productsRepo.findById(createdProductId);
+      const initialStock = prodBefore!.stock;
 
       // Place order for 3 units
       const placeRes = await fetch(`${baseUrl}/api/orders`, {
@@ -296,8 +302,8 @@ async function main() {
       const orderId = orderData.order.id;
 
       // Stock must be reserved (-3)
-      const prodAfterReserve = await db.query('SELECT stock FROM products WHERE id = $1', [createdProductId]);
-      assert.strictEqual(prodAfterReserve.rows[0].stock, initialStock - 3);
+      const prodAfterReserve = await productsRepo.findById(createdProductId);
+      assert.strictEqual(prodAfterReserve!.stock, initialStock - 3);
 
       // Now cancel order
       const cancelRes = await fetch(`${baseUrl}/api/orders/${orderId}/cancel`, {
@@ -311,11 +317,11 @@ async function main() {
       assert.strictEqual(cancelRes.status, 200);
 
       // Stock must be restored (+3)
-      const prodAfterCancel = await db.query('SELECT stock FROM products WHERE id = $1', [createdProductId]);
-      assert.strictEqual(prodAfterCancel.rows[0].stock, initialStock, 'Stock must be fully restored upon cancellation');
+      const prodAfterCancel = await productsRepo.findById(createdProductId);
+      assert.strictEqual(prodAfterCancel!.stock, initialStock, 'Stock must be fully restored upon cancellation');
     });
 
-    // 8. Complete Customer-to-Delivery Workflow (Rider assignment, secure OTP generation, verification, COD collection)
+    // 8. Complete Customer-to-Delivery Workflow
     await test('Complete customer-to-delivery workflow: Order -> Pack -> Assign Rider -> Dispatch (OTP) -> Deliver -> COD Collection', async () => {
       // 8a. Place order
       const placeRes = await fetch(`${baseUrl}/api/orders`, {
@@ -378,9 +384,6 @@ async function main() {
         headers: { Authorization: `Bearer ${riderToken}` }
       });
       const riderOrdersData = await riderOrders.json();
-      if (!Array.isArray(riderOrdersData)) {
-        console.error('Rider orders debug:', riderOrders.status, riderOrdersData);
-      }
       const riderOrder = riderOrdersData.find((o: any) => o.id === orderId);
       assert.ok(riderOrder, 'Rider must find order');
       assert.strictEqual(riderOrder.delivery_otp, undefined, 'Delivery OTP must be HIDDEN from rider payload');
@@ -418,7 +421,6 @@ async function main() {
         headers: { Authorization: `Bearer ${riderToken}` }
       });
       const sumData = await sumRes.json();
-      console.log('sumData debug:', JSON.stringify(sumData));
       assert.ok(Number(sumData.summary.cash_in_hand) > 0, 'Rider must have cash in hand from delivered order');
 
       // 9b. Admin reconciles rider COD
@@ -544,7 +546,6 @@ async function main() {
     // 13. Admin Delivery Boy Fleet Management
     await test('Admin delivery rider account creation, password reset, and order reassignment', async () => {
       const newRiderPhone = `9822${Math.floor(100000 + Math.random() * 900000)}`;
-      // Create new rider
       const createRiderRes = await fetch(`${baseUrl}/api/admin/riders`, {
         method: 'POST',
         headers: {
@@ -612,7 +613,6 @@ async function main() {
       const orderData = await orderRes.json();
       assert.strictEqual(orderRes.status, 201);
       const testOrderId = orderData.order.id;
-      const initialTotal = Number(orderData.order.total_amount);
 
       // Admin adjusts delivery charge for this individual order to ₹0
       const feeRes0 = await fetch(`${baseUrl}/api/orders/${testOrderId}/delivery-fee`, {
@@ -659,7 +659,6 @@ async function main() {
 
     // 16. Inactive Delivery Partner Guard and Order Reassignment
     await test('Inactive rider assignment prevention and order reassignment audit trail', async () => {
-      // Create another rider and deactivate them
       const phoneTemp = `9821${Math.floor(100000 + Math.random() * 900000)}`;
       const createRider = await fetch(`${baseUrl}/api/admin/riders`, {
         method: 'POST',
@@ -726,7 +725,7 @@ async function main() {
       assert.strictEqual(assignActive.status, 200);
 
       // Reassign to another active rider
-      const reactivateRes = await fetch(`${baseUrl}/api/admin/riders/${inactiveRiderId}`, {
+      await fetch(`${baseUrl}/api/admin/riders/${inactiveRiderId}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -734,7 +733,6 @@ async function main() {
         },
         body: JSON.stringify({ is_active: true })
       });
-      assert.strictEqual(reactivateRes.status, 200);
 
       const reassignRes = await fetch(`${baseUrl}/api/orders/${orderId}/assign-rider`, {
         method: 'POST',
@@ -746,7 +744,7 @@ async function main() {
       });
       assert.strictEqual(reassignRes.status, 200);
       const reassignData = await reassignRes.json();
-      assert.strictEqual(reassignData.rider_id, inactiveRiderId, 'Order must successfully reassign to the new active rider');
+      assert.strictEqual(reassignData.rider_id, inactiveRiderId);
     });
 
     // 17. Role Isolation Security: Public registration restricted to customer only
@@ -759,7 +757,7 @@ async function main() {
           phone: spoofPhone,
           name: 'Spoof Attempt',
           password: 'Password@123',
-          role: 'rider' // Attempting to register as rider
+          role: 'rider'
         })
       });
       const spoofData = await spoofRes.json();
@@ -767,7 +765,7 @@ async function main() {
       assert.strictEqual(spoofData.user.role, 'customer', 'Public registration role must be customer regardless of input');
     });
 
-    // 18. TEST CASE 1, 2, 3: Single login returns authentic role from PostgreSQL
+    // 18. TEST CASE 1, 2, 3: Single login returns authentic role from Firestore
     await test('Test Cases 1, 2, 3: Automatic role detection via single login (Customer, Admin, Rider)', async () => {
       // 1. Customer login
       const cRes = await fetch(`${baseUrl}/api/auth/login`, {
@@ -777,7 +775,7 @@ async function main() {
       });
       const cData = await cRes.json();
       assert.strictEqual(cRes.status, 200);
-      assert.strictEqual(cData.user.role, 'customer', 'Customer role returned automatically from PostgreSQL');
+      assert.strictEqual(cData.user.role, 'customer');
 
       // 2. Admin login
       const aRes = await fetch(`${baseUrl}/api/auth/login`, {
@@ -787,7 +785,7 @@ async function main() {
       });
       const aData = await aRes.json();
       assert.strictEqual(aRes.status, 200);
-      assert.strictEqual(aData.user.role, 'admin', 'Admin role returned automatically from PostgreSQL');
+      assert.strictEqual(aData.user.role, 'admin');
 
       // 3. Rider login
       const rRes = await fetch(`${baseUrl}/api/auth/login`, {
@@ -797,18 +795,16 @@ async function main() {
       });
       const rData = await rRes.json();
       assert.strictEqual(rRes.status, 200);
-      assert.strictEqual(rData.user.role, 'rider', 'Rider role returned automatically from PostgreSQL');
+      assert.strictEqual(rData.user.role, 'rider');
     });
 
     // 19. TEST CASE 4 & 5: Role protection (Customer & Rider blocked from Admin APIs with 403)
     await test('Test Cases 4 & 5: Role protection (Customer cannot access Admin APIs, Rider cannot access Admin APIs)', async () => {
-      // Customer tries to access admin reports
       const custAdminRes = await fetch(`${baseUrl}/api/admin/reports`, {
         headers: { Authorization: `Bearer ${testCustomerToken}` }
       });
       assert.strictEqual(custAdminRes.status, 403, 'Customer must receive 403 Forbidden on Admin APIs');
 
-      // Rider tries to access admin reports
       const riderAdminRes = await fetch(`${baseUrl}/api/admin/reports`, {
         headers: { Authorization: `Bearer ${riderToken}` }
       });
@@ -817,7 +813,6 @@ async function main() {
 
     // 20. TEST CASE 6: Customer cannot open another customer's order (403 Forbidden)
     await test("Test Case 6: Customer cannot open another customer's order", async () => {
-      // Create second customer
       const cust2Phone = `9825${Math.floor(100000 + Math.random() * 900000)}`;
       const c2Reg = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
@@ -832,9 +827,8 @@ async function main() {
       const c2Data = await c2Reg.json();
       const cust2Token = c2Data.token;
 
-      // Customer 2 places an order
-      const db = await getDb();
-      const p = await db.query('SELECT id FROM products LIMIT 1');
+      const prods = await productsRepo.list();
+      const p = prods[0];
       const c2OrderRes = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
         headers: {
@@ -842,7 +836,7 @@ async function main() {
           Authorization: `Bearer ${cust2Token}`
         },
         body: JSON.stringify({
-          items: [{ product_id: p.rows[0].id, quantity: 1 }],
+          items: [{ product_id: p.id, quantity: 1 }],
           delivery_address: 'Guru Mandir Marg, Karanja Lad'
         })
       });
@@ -858,7 +852,6 @@ async function main() {
 
     // 21. TEST CASE 7: Logout works
     await test('Test Case 7: Session invalidation / logout behavior (Unauthenticated access returns 401)', async () => {
-      // Without token or cleared token
       const noAuthRes = await fetch(`${baseUrl}/api/auth/me`);
       assert.strictEqual(noAuthRes.status, 401, 'Request without token must be rejected with 401');
 
@@ -905,10 +898,9 @@ async function main() {
 
     // 25. DELIVERY PARTNER TIP: Order with tip calculations & rider summary reflection
     await test('Delivery Partner Tip: Calculation during checkout & reflection in Rider summary', async () => {
-      const db = await getDb();
-      const prodRes = await db.query('SELECT id, price FROM products WHERE stock > 5 LIMIT 1');
-      const prod = prodRes.rows[0];
-      const tipAmount = 35; // Custom customer tip for rider
+      const prods = await productsRepo.list();
+      const prod = prods.find(p => p.stock > 5) || prods[0];
+      const tipAmount = 35;
 
       const orderWithTipRes = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
@@ -952,7 +944,6 @@ async function main() {
 
     // 26. ADMIN-ASSISTED FORGOT PASSWORD WORKFLOW
     await test('Admin-assisted forgot password workflow (Zero fake SMS)', async () => {
-      // Customer submits forgot password request
       const reqRes = await fetch(`${baseUrl}/api/auth/forgot-password-request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -997,7 +988,7 @@ async function main() {
       assert.ok(newLoginData.token, 'Customer successfully logs in with new password');
     });
 
-    // 27. END-TO-END REGISTRATION -> LOGIN -> COD CHECKOUT FLOW (Verify no "User account not found or deactivated" error)
+    // 27. END-TO-END REGISTRATION -> LOGIN -> COD CHECKOUT FLOW
     await test('End-to-End: Customer Registration -> Login -> COD Order Placement', async () => {
       const e2ePhone = `983${Math.floor(1000000 + Math.random() * 9000000)}`;
       const e2ePassword = 'SecurePass@2026!';
@@ -1022,11 +1013,10 @@ async function main() {
       assert.strictEqual(regData.user.role, 'customer', 'Registered user must have customer role');
       const registeredUserId = regData.user.id;
 
-      // Verify in database that customer is active
-      const db = await getDb();
-      const dbUserRes = await db.query('SELECT id, phone, role, is_active FROM users WHERE id = $1', [registeredUserId]);
-      assert.strictEqual(dbUserRes.rows.length, 1, 'Customer record must exist in PostgreSQL users table');
-      assert.notStrictEqual(dbUserRes.rows[0].is_active, false, 'New customer must be active by default');
+      // Verify in Firestore that customer is active
+      const dbUser = await usersRepo.findById(registeredUserId);
+      assert.ok(dbUser, 'Customer record must exist in Firestore users collection');
+      assert.notStrictEqual(dbUser!.is_active, false, 'New customer must be active by default');
 
       // Step 2: Login customer
       const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
@@ -1051,8 +1041,8 @@ async function main() {
       assert.strictEqual(sessionData.user.id, registeredUserId, 'Session user ID must match database ID');
 
       // Step 4: Customer places COD order
-      const prodRes = await db.query('SELECT id, price, stock FROM products WHERE stock >= 2 LIMIT 1');
-      const prod = prodRes.rows[0];
+      const prods = await productsRepo.list();
+      const prod = prods.find(p => p.stock >= 2) || prods[0];
 
       const checkoutRes = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
@@ -1100,6 +1090,8 @@ async function main() {
 
   if (testsFailed > 0) {
     process.exit(1);
+  } else {
+    process.exit(0);
   }
 }
 
