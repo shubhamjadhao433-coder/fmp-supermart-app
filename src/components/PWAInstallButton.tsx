@@ -102,11 +102,12 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
     <>
       <button
         onClick={handleTrigger}
-        className={`flex items-center gap-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 active:scale-95 transition font-medium px-2.5 py-1.5 text-xs ${className}`}
+        className={`flex items-center gap-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 active:scale-95 transition font-medium px-2 sm:px-2.5 py-1.5 text-xs shrink-0 ${className}`}
         title="Install FMP Supermart App"
+        aria-label="Install App"
       >
         <Download className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-        <span className="font-semibold">Install App</span>
+        <span className="font-semibold hidden sm:inline">Install App</span>
       </button>
 
       {showIOSGuide && (

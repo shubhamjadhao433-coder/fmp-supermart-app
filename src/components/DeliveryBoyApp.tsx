@@ -207,7 +207,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               <PWAInstallButton className="bg-amber-700/80 text-white border-amber-400/50 hover:bg-amber-800" />
               
               {/* Rider Notifications */}
@@ -227,7 +227,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                 </button>
 
                 {showNotifications && (
-                  <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden z-50 text-gray-800">
+                  <div className="fixed inset-x-3 top-16 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full mt-2 w-auto sm:w-96 max-w-[calc(100vw-1.5rem)] bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden z-50 text-gray-800 animate-in fade-in zoom-in-95">
                     <div className="p-3 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Bell className="w-4 h-4 text-amber-700" />
@@ -298,7 +298,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                 <button
                   onClick={onLogout}
                   title="Logout from Delivery Portal"
-                  className="bg-amber-800/90 hover:bg-amber-900 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-amber-600"
+                  className="bg-amber-800/90 hover:bg-amber-900 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-amber-600"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">Logout</span>
@@ -308,12 +308,12 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
           </div>
         </div>
 
-        {/* 5 Navigation Tabs Required by Specification */}
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 border-t border-amber-500/60 overflow-x-auto scrollbar-none">
-          <nav className="flex space-x-1 sm:space-x-2 py-2 text-xs font-bold whitespace-nowrap">
+        {/* 5 Navigation Tabs Required by Specification with Mobile Scroll Affordance */}
+        <div className="relative max-w-5xl mx-auto border-t border-amber-500/60 overflow-hidden">
+          <nav className="flex space-x-1 sm:space-x-2 py-2 px-3 sm:px-6 text-xs font-bold whitespace-nowrap overflow-x-auto touch-pan-x scrollbar-none pr-8">
             <button
               onClick={() => setActiveTab('today')}
-              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 activeTab === 'today'
                   ? 'bg-white text-amber-900 shadow-xs'
                   : 'text-amber-100 hover:bg-amber-700/60'
@@ -327,7 +327,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
             <button
               onClick={() => setActiveTab('assigned')}
-              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 activeTab === 'assigned'
                   ? 'bg-white text-amber-900 shadow-xs'
                   : 'text-amber-100 hover:bg-amber-700/60'
@@ -341,7 +341,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
             <button
               onClick={() => setActiveTab('out_for_delivery')}
-              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 activeTab === 'out_for_delivery'
                   ? 'bg-white text-amber-900 shadow-xs'
                   : 'text-amber-100 hover:bg-amber-700/60'
@@ -358,7 +358,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
             <button
               onClick={() => setActiveTab('completed')}
-              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 activeTab === 'completed'
                   ? 'bg-white text-amber-900 shadow-xs'
                   : 'text-amber-100 hover:bg-amber-700/60'
@@ -373,7 +373,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
             <button
               onClick={() => setActiveTab('cash_in_hand')}
-              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                 activeTab === 'cash_in_hand'
                   ? 'bg-white text-amber-900 shadow-xs'
                   : 'text-amber-100 hover:bg-amber-700/60'
@@ -386,6 +386,8 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
               </span>
             </button>
           </nav>
+          {/* Visual right scroll fade indicator for mobile tabs affordance */}
+          <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-amber-700/95 to-transparent sm:hidden" />
         </div>
       </header>
 
@@ -393,24 +395,24 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
       <main className="max-w-5xl mx-auto px-4 sm:px-6 mt-4 space-y-4">
         {/* Cash-In-Hand Alert Banner */}
         {codSummary && codSummary.summary.cash_in_hand > 0 && (
-          <div className="bg-linear-to-r from-emerald-700 to-emerald-800 text-white rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="bg-white/20 p-2.5 rounded-xl shrink-0">
-                <DollarSign className="w-6 h-6 text-white" />
+          <div className="bg-linear-to-r from-emerald-700 to-emerald-800 text-white rounded-xl sm:rounded-2xl p-3.5 sm:p-4 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 min-w-0 overflow-hidden">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="bg-white/20 p-2 sm:p-2.5 rounded-xl shrink-0">
+                <DollarSign className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
               </div>
-              <div>
-                <p className="text-xs uppercase font-bold tracking-wider text-emerald-200">
+              <div className="min-w-0">
+                <p className="text-[10px] sm:text-xs uppercase font-bold tracking-wider text-emerald-200">
                   Current COD Cash Collected
                 </p>
-                <div className="text-2xl font-black">₹{codSummary.summary.cash_in_hand}</div>
-                <p className="text-xs text-emerald-100">
+                <div className="text-xl sm:text-2xl font-black">₹{codSummary.summary.cash_in_hand}</div>
+                <p className="text-[11px] sm:text-xs text-emerald-100 break-words">
                   {codSummary.summary.pending_reconcile_orders} order(s) ready to deposit at Karanja Central Counter
                 </p>
               </div>
             </div>
             <button
               onClick={() => setActiveTab('cash_in_hand')}
-              className="bg-white text-emerald-900 hover:bg-emerald-50 px-4 py-2 rounded-xl text-xs font-extrabold shadow-sm transition cursor-pointer self-stretch sm:self-auto text-center"
+              className="bg-white text-emerald-900 hover:bg-emerald-50 px-4 py-2 rounded-xl text-xs font-extrabold shadow-sm transition cursor-pointer self-stretch sm:self-auto text-center shrink-0"
             >
               View COD Breakdown →
             </button>
@@ -419,36 +421,36 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
         {/* Tab 5: Cash in Hand dedicated View */}
         {activeTab === 'cash_in_hand' && codSummary && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-              <div className="bg-white rounded-2xl p-4 border-2 border-emerald-500 shadow-sm">
-                <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider">Cash in Hand</div>
-                <div className="text-2xl font-black text-emerald-900 mt-1">₹{codSummary.summary.cash_in_hand}</div>
-                <div className="text-[10px] text-emerald-700 font-medium">To Handover to Admin</div>
+          <div className="space-y-4 min-w-0">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3">
+              <div className="bg-white rounded-xl sm:rounded-2xl p-3 sm:p-4 border-2 border-emerald-500 shadow-sm min-w-0">
+                <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider truncate">Cash in Hand</div>
+                <div className="text-xl sm:text-2xl font-black text-emerald-900 mt-1 truncate">₹{codSummary.summary.cash_in_hand}</div>
+                <div className="text-[10px] text-emerald-700 font-medium truncate">To Handover to Admin</div>
               </div>
 
-              <div className="bg-white rounded-2xl p-4 border border-amber-300 bg-amber-50/40 shadow-sm">
-                <div className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">Tips Earned</div>
-                <div className="text-2xl font-black text-amber-900 mt-1">₹{codSummary.summary.total_tips_collected || 0}</div>
-                <div className="text-[10px] text-amber-700 font-bold">100% Rider Earnings</div>
+              <div className="bg-white rounded-xl sm:rounded-2xl p-3 sm:p-4 border border-amber-300 bg-amber-50/40 shadow-sm min-w-0">
+                <div className="text-[10px] font-bold text-amber-800 uppercase tracking-wider truncate">Tips Earned</div>
+                <div className="text-xl sm:text-2xl font-black text-amber-900 mt-1 truncate">₹{codSummary.summary.total_tips_collected || 0}</div>
+                <div className="text-[10px] text-amber-700 font-bold truncate">100% Rider Earnings</div>
               </div>
 
-              <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm">
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Total Collected Today</div>
-                <div className="text-2xl font-black text-gray-900 mt-1">₹{codSummary.summary.total_cash_collected}</div>
-                <div className="text-[10px] text-emerald-600 font-semibold">{codSummary.summary.total_collected_orders} orders total</div>
+              <div className="bg-white rounded-xl sm:rounded-2xl p-3 sm:p-4 border border-gray-200 shadow-sm min-w-0">
+                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider truncate">Total Collected Today</div>
+                <div className="text-xl sm:text-2xl font-black text-gray-900 mt-1 truncate">₹{codSummary.summary.total_cash_collected}</div>
+                <div className="text-[10px] text-emerald-600 font-semibold truncate">{codSummary.summary.total_collected_orders} orders total</div>
               </div>
 
-              <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm">
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Reconciled Cash</div>
-                <div className="text-2xl font-black text-purple-700 mt-1">₹{codSummary.summary.reconciled_amount}</div>
-                <div className="text-[10px] text-purple-600 font-medium">{codSummary.summary.reconciled_orders} orders deposited</div>
+              <div className="bg-white rounded-xl sm:rounded-2xl p-3 sm:p-4 border border-gray-200 shadow-sm min-w-0">
+                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider truncate">Reconciled Cash</div>
+                <div className="text-xl sm:text-2xl font-black text-purple-700 mt-1 truncate">₹{codSummary.summary.reconciled_amount}</div>
+                <div className="text-[10px] text-purple-600 font-medium truncate">{codSummary.summary.reconciled_orders} deposited</div>
               </div>
 
-              <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-sm col-span-2 sm:col-span-1">
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Service Location</div>
-                <div className="text-sm font-bold text-gray-900 mt-1 truncate">Karanja Lad</div>
-                <div className="text-[10px] text-gray-500 font-medium">Maharashtra</div>
+              <div className="bg-white rounded-xl sm:rounded-2xl p-3 sm:p-4 border border-gray-200 shadow-sm col-span-2 sm:col-span-1 min-w-0">
+                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider truncate">Service Location</div>
+                <div className="text-xs sm:text-sm font-bold text-gray-900 mt-1 truncate">Karanja Lad</div>
+                <div className="text-[10px] text-gray-500 font-medium truncate">Maharashtra</div>
               </div>
             </div>
 
@@ -540,7 +542,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                 return (
                   <div
                     key={order.id}
-                    className={`bg-white rounded-2xl p-4 sm:p-5 border shadow-sm transition space-y-3 ${
+                    className={`bg-white rounded-2xl p-3.5 sm:p-5 border shadow-sm transition space-y-3 w-full min-w-0 overflow-hidden ${
                       isOutForDelivery
                         ? 'border-amber-300 ring-2 ring-amber-100'
                         : isDelivered
@@ -549,10 +551,10 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                     }`}
                   >
                     {/* Top Row: Order ID, Status, and Scheduled Slot */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-2.5">
-                      <div className="flex items-center gap-2">
-                        <span className="font-black text-gray-900 text-sm">{order.order_number}</span>
-                        <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
+                    <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-gray-100 pb-2.5 min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                        <span className="font-black text-gray-900 text-sm break-all">{order.order_number}</span>
+                        <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0 ${
                           order.status === 'delivered' ? 'bg-emerald-100 text-emerald-800' :
                           order.status === 'dispatched' ? 'bg-amber-100 text-amber-800 animate-pulse' :
                           order.status === 'cancelled' ? 'bg-red-100 text-red-800' :
@@ -562,38 +564,38 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                         </span>
                       </div>
 
-                      <div className="flex items-center gap-1.5 text-xs text-gray-500 font-medium">
-                        <Clock className="w-3.5 h-3.5 text-gray-400" />
-                        <span>{order.time_slot || 'Express (Immediate)'}</span>
+                      <div className="flex items-center gap-1 text-[11px] sm:text-xs text-gray-500 font-medium shrink-0">
+                        <Clock className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                        <span className="truncate">{order.time_slot || 'Express (Immediate)'}</span>
                       </div>
                     </div>
 
                     {/* Customer Info Card Required by Specification */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3 text-xs min-w-0">
                       {/* Customer Name & Phone */}
-                      <div className="space-y-1">
-                        <div className="text-[11px] text-gray-400 font-bold uppercase">Customer Details</div>
-                        <div className="font-extrabold text-gray-900 text-sm">{order.customer_name}</div>
-                        <div className="flex items-center gap-2 pt-1">
+                      <div className="space-y-1 min-w-0">
+                        <div className="text-[10px] sm:text-[11px] text-gray-400 font-bold uppercase">Customer Details</div>
+                        <div className="font-extrabold text-gray-900 text-sm break-words">{order.customer_name}</div>
+                        <div className="flex items-center gap-2 pt-0.5">
                           <a
                             href={`tel:${order.customer_phone}`}
-                            className="inline-flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-lg font-bold border border-emerald-200 transition"
+                            className="inline-flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-lg font-bold border border-emerald-200 transition break-all text-xs"
                           >
-                            <Phone className="w-3.5 h-3.5 text-emerald-600" />
+                            <Phone className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                             <span>{order.customer_phone}</span>
                           </a>
                         </div>
                       </div>
 
                       {/* Delivery Address & Navigation */}
-                      <div className="space-y-1">
-                        <div className="text-[11px] text-gray-400 font-bold uppercase">Delivery Address</div>
-                        <div className="flex items-start gap-1.5 text-gray-800 font-medium leading-snug">
+                      <div className="space-y-1 min-w-0">
+                        <div className="text-[10px] sm:text-[11px] text-gray-400 font-bold uppercase">Delivery Address</div>
+                        <div className="flex items-start gap-1.5 text-gray-800 font-medium leading-snug break-words">
                           <MapPin className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                          <div>
+                          <div className="min-w-0 break-words">
                             <span>{order.delivery_address}</span>
                             {order.landmark && (
-                              <span className="block text-[11px] text-gray-500 font-normal">
+                              <span className="block text-[11px] text-gray-500 font-normal break-words">
                                 Landmark: {order.landmark}
                               </span>
                             )}
@@ -607,7 +609,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                           rel="noopener noreferrer"
                           className="inline-flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 font-bold mt-1"
                         >
-                          <Navigation className="w-3 h-3" />
+                          <Navigation className="w-3 h-3 shrink-0" />
                           <span>Open in Navigation</span>
                         </a>
                       </div>
@@ -615,12 +617,12 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
                     {/* Items Preview */}
                     {order.items && order.items.length > 0 && (
-                      <div className="bg-gray-50 rounded-xl p-2.5 text-xs text-gray-700">
+                      <div className="bg-gray-50 rounded-xl p-2.5 text-xs text-gray-700 min-w-0">
                         <div className="text-[10px] font-bold uppercase text-gray-400 mb-1">Items to Deliver:</div>
                         <div className="space-y-1">
                           {order.items.map((item, idx) => (
-                            <div key={idx} className="flex justify-between">
-                              <span className="truncate pr-2">
+                            <div key={idx} className="flex justify-between items-center gap-2 min-w-0 text-[11px] sm:text-xs">
+                              <span className="truncate min-w-0">
                                 • {item.product_name} ({item.unit}) × {item.quantity}
                               </span>
                               <span className="font-semibold text-gray-900 shrink-0">₹{item.total ?? (Number(item.price) * item.quantity)}</span>
@@ -631,12 +633,12 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                     )}
 
                     {/* Pricing, COD Amount & Action Buttons Required by Specification */}
-                    <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-gray-100">
-                      <div>
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2.5 border-t border-gray-100 min-w-0">
+                      <div className="min-w-0">
                         <div className="text-[10px] text-gray-400 font-bold uppercase">COD Amount to Collect</div>
                         <div className="font-black text-lg text-emerald-800">₹{order.total_amount}</div>
                         {Number(order.tip_amount) > 0 ? (
-                          <div className="text-[10px] text-amber-800 font-bold bg-amber-50 px-2 py-0.5 rounded-md mt-0.5 border border-amber-200">
+                          <div className="text-[10px] text-amber-800 font-bold bg-amber-50 px-2 py-0.5 rounded-md mt-0.5 border border-amber-200 inline-block break-words">
                             Includes ₹{order.tip_amount} Customer Tip (100% yours! 💖)
                           </div>
                         ) : (
@@ -644,14 +646,14 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-col xs:flex-row items-stretch xs:items-center gap-2 w-full sm:w-auto min-w-0">
                         {isOutForDelivery && (
                           <>
                             <button
                               onClick={() => {
                                 setFailureModalOrder(order);
                               }}
-                              className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition cursor-pointer"
+                              className="px-3 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition cursor-pointer min-h-[44px] flex items-center justify-center w-full xs:w-auto text-center"
                             >
                               Report Issue
                             </button>
@@ -662,23 +664,23 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                                 setInputOtp('');
                                 setOtpError(null);
                               }}
-                              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-md transition flex items-center gap-1.5 cursor-pointer animate-bounce sm:animate-none"
+                              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white font-extrabold text-xs sm:text-sm rounded-xl shadow-md transition flex items-center justify-center gap-2 cursor-pointer w-full xs:w-auto min-h-[44px] text-center"
                             >
-                              <ShieldCheck className="w-4 h-4" />
-                              <span>Verify OTP & Mark Delivered</span>
+                              <ShieldCheck className="w-4 h-4 shrink-0" />
+                              <span className="whitespace-nowrap">Verify OTP & Mark Delivered</span>
                             </button>
                           </>
                         )}
 
                         {isDelivered && (
-                          <div className="flex items-center gap-1.5 bg-emerald-100 text-emerald-800 px-3 py-1.5 rounded-xl text-xs font-bold">
-                            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                          <div className="flex items-center justify-center gap-1.5 bg-emerald-100 text-emerald-800 px-3 py-2 rounded-xl text-xs font-bold w-full sm:w-auto text-center">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                             <span>Delivered • ₹{order.total_amount} COD Collected</span>
                           </div>
                         )}
 
                         {isPickupPending && (
-                          <div className="text-xs text-blue-700 bg-blue-50 px-3 py-1.5 rounded-xl font-semibold border border-blue-200">
+                          <div className="text-xs text-blue-700 bg-blue-50 px-3 py-2 rounded-xl font-semibold border border-blue-200 text-center w-full sm:w-auto">
                             Awaiting Dispatch (Karanja Lad)
                           </div>
                         )}

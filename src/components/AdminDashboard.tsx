@@ -560,7 +560,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             {/* Quick Actions */}
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               {/* Notification Bell */}
               <div className="relative">
                 <button
@@ -577,7 +577,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
 
                 {showNotifications && (
-                  <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white text-gray-900 rounded-2xl shadow-2xl border border-gray-100 py-2 z-50 animate-in fade-in zoom-in-95">
+                  <div className="fixed inset-x-3 top-16 sm:absolute sm:inset-x-auto sm:right-0 sm:top-full mt-2 w-auto sm:w-96 max-w-[calc(100vw-1.5rem)] bg-white text-gray-900 rounded-2xl shadow-2xl border border-gray-100 py-2 z-50 animate-in fade-in zoom-in-95">
                     <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between">
                       <span className="font-bold text-xs text-gray-900">Admin Alerts ({notifications.length})</span>
                       {notifications.filter(n => !n.is_read).length > 0 && (
@@ -624,7 +624,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {onSwitchToCustomerView && (
                 <button
                   onClick={onSwitchToCustomerView}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-800 hover:bg-purple-700 text-purple-100 rounded-xl text-xs font-semibold transition border border-purple-700 cursor-pointer"
+                  className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 bg-purple-800 hover:bg-purple-700 text-purple-100 rounded-xl text-xs font-semibold transition border border-purple-700 cursor-pointer"
+                  title="View Storefront"
                 >
                   <ShoppingBag className="w-3.5 h-3.5 text-emerald-300" />
                   <span className="hidden sm:inline">Storefront</span>
@@ -645,7 +646,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <button
                   onClick={onLogout}
                   title="Logout from Admin Dashboard"
-                  className="bg-purple-950 hover:bg-black text-purple-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-purple-800"
+                  className="bg-purple-950 hover:bg-black text-purple-200 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer border border-purple-800"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline">Logout</span>
@@ -656,15 +657,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
 
         {/* ======================================================== */}
-        {/* ESSENTIAL 3 TABS ONLY */}
+        {/* ESSENTIAL 7 TABS WITH MOBILE SCROLLING AFFORDANCE */}
         {/* ======================================================== */}
-        <div className="bg-purple-950/80 border-t border-purple-800/60 overflow-x-auto">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <nav className="flex space-x-2 py-2 text-xs font-semibold whitespace-nowrap scrollbar-none">
+        <div className="relative bg-purple-950/80 border-t border-purple-800/60 overflow-hidden">
+          <div className="max-w-7xl mx-auto">
+            <nav className="flex space-x-1.5 sm:space-x-2 py-2 px-3 sm:px-6 lg:px-8 text-xs font-semibold whitespace-nowrap overflow-x-auto touch-pan-x scrollbar-none pr-8">
               {/* Tab 1: Orders Dispatch */}
               <button
                 onClick={() => setActiveTab('orders')}
-                className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                   activeTab === 'orders'
                     ? 'bg-purple-600 text-white font-black shadow-xs'
                     : 'text-purple-200 hover:bg-purple-900/60'
@@ -763,7 +764,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {/* Tab 7: Inventory Logs */}
               <button
                 onClick={() => setActiveTab('inventory')}
-                className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
                   activeTab === 'inventory'
                     ? 'bg-purple-600 text-white font-black shadow-xs'
                     : 'text-purple-200 hover:bg-purple-900/60'
@@ -774,6 +775,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </button>
             </nav>
           </div>
+          {/* Visual right scroll fade indicator for mobile tabs affordance */}
+          <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-purple-950/95 to-transparent sm:hidden" />
         </div>
       </header>
 
@@ -787,60 +790,60 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         {/* ======================================================== */}
         {activeTab === 'orders' && (
           <div className="space-y-4">
-            {/* Orders Summary Row */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="bg-white p-3.5 rounded-2xl border border-gray-200 shadow-xs">
-                <div className="text-[11px] font-bold text-gray-500 uppercase">Pending Dispatch</div>
-                <div className="text-xl font-black text-amber-700 mt-1">
+            {/* Orders Summary Row - Responsive 2-col on mobile, 4-col on tablet/desktop */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+              <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Pending Dispatch</div>
+                <div className="text-lg sm:text-xl font-black text-amber-700 mt-0.5 sm:mt-1 truncate">
                   {orders.filter(o => ['placed', 'confirmed', 'packed'].includes(o.status)).length}
                 </div>
-                <div className="text-[10px] text-gray-400">Requires rider assign & OTP</div>
+                <div className="text-[10px] text-gray-400 truncate">Requires rider & OTP</div>
               </div>
 
-              <div className="bg-white p-3.5 rounded-2xl border border-gray-200 shadow-xs">
-                <div className="text-[11px] font-bold text-gray-500 uppercase">Out For Delivery</div>
-                <div className="text-xl font-black text-blue-700 mt-1">
+              <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Out For Delivery</div>
+                <div className="text-lg sm:text-xl font-black text-blue-700 mt-0.5 sm:mt-1 truncate">
                   {orders.filter(o => o.status === 'dispatched').length}
                 </div>
-                <div className="text-[10px] text-gray-400">Riders en route with OTP</div>
+                <div className="text-[10px] text-gray-400 truncate">Riders en route with OTP</div>
               </div>
 
-              <div className="bg-white p-3.5 rounded-2xl border border-gray-200 shadow-xs">
-                <div className="text-[11px] font-bold text-gray-500 uppercase">Completed Deliveries</div>
-                <div className="text-xl font-black text-emerald-700 mt-1">
+              <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Completed Deliveries</div>
+                <div className="text-lg sm:text-xl font-black text-emerald-700 mt-0.5 sm:mt-1 truncate">
                   {orders.filter(o => o.status === 'delivered').length}
                 </div>
-                <div className="text-[10px] text-gray-400">OTP verified on delivery</div>
+                <div className="text-[10px] text-gray-400 truncate">OTP verified on delivery</div>
               </div>
 
-              <div className="bg-white p-3.5 rounded-2xl border border-gray-200 shadow-xs">
-                <div className="text-[11px] font-bold text-gray-500 uppercase">Total Orders Today</div>
-                <div className="text-xl font-black text-purple-900 mt-1">
+              <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Total Orders Today</div>
+                <div className="text-lg sm:text-xl font-black text-purple-900 mt-0.5 sm:mt-1 truncate">
                   {orders.length}
                 </div>
-                <div className="text-[10px] text-gray-400">Cash on Delivery only</div>
+                <div className="text-[10px] text-gray-400 truncate">Cash on Delivery only</div>
               </div>
             </div>
 
             {/* Filter & Search Bar */}
-            <div className="bg-white p-3 rounded-2xl border border-gray-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex-1 min-w-[200px] relative">
+            <div className="bg-white p-2.5 sm:p-3 rounded-2xl border border-gray-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 sm:gap-3 text-xs min-w-0">
+              <div className="flex-1 min-w-0 relative">
                 <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
                   type="text"
                   value={orderSearch}
                   onChange={e => setOrderSearch(e.target.value)}
-                  placeholder="Search by order ID, customer name, mobile, address..."
+                  placeholder="Search order ID, customer, phone, address..."
                   className="w-full pl-9 pr-3 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-hidden focus:bg-white focus:border-purple-600"
                 />
               </div>
 
-              <div className="flex items-center gap-2 overflow-x-auto scrollbar-none">
+              <div className="w-full sm:w-auto flex items-center gap-1.5 overflow-x-auto touch-pan-x scrollbar-none pb-0.5">
                 {['all', 'placed', 'confirmed', 'packed', 'dispatched', 'delivered', 'cancelled'].map(status => (
                   <button
                     key={status}
                     onClick={() => setOrderStatusFilter(status)}
-                    className={`px-3 py-1.5 rounded-xl font-bold transition cursor-pointer capitalize whitespace-nowrap text-xs ${
+                    className={`px-2.5 sm:px-3 py-1.5 rounded-xl font-bold transition cursor-pointer capitalize whitespace-nowrap text-xs shrink-0 ${
                       orderStatusFilter === status
                         ? 'bg-purple-700 text-white'
                         : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
@@ -854,13 +857,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
             {/* Orders List */}
             {filteredOrders.length === 0 ? (
-              <div className="bg-white rounded-2xl p-12 text-center border border-gray-200 space-y-2 text-gray-500">
+              <div className="bg-white rounded-2xl p-8 sm:p-12 text-center border border-gray-200 space-y-2 text-gray-500 min-w-0">
                 <Package className="w-10 h-10 mx-auto text-gray-300" />
                 <div className="font-bold text-sm text-gray-800">No Orders Found</div>
                 <div className="text-xs">No customer orders matching the current filter or search.</div>
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-3 min-w-0">
                 {filteredOrders.map(order => {
                   const isPending = ['placed', 'confirmed', 'packed'].includes(order.status);
                   const isDispatched = order.status === 'dispatched';
@@ -870,16 +873,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   return (
                     <div
                       key={order.id}
-                      className="bg-white rounded-2xl border border-gray-200 p-4 sm:p-5 shadow-xs space-y-3"
+                      className="bg-white rounded-2xl border border-gray-200 p-3.5 sm:p-5 shadow-xs space-y-3 w-full min-w-0 overflow-hidden"
                     >
                       {/* Order Header */}
-                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-3">
-                        <div className="flex items-center gap-2">
-                          <span className="font-black text-gray-900 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-gray-100 pb-2.5 min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                          <span className="font-black text-gray-900 text-sm break-all">
                             #{order.order_number}
                           </span>
                           <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider shrink-0 ${
                               isDelivered
                                 ? 'bg-emerald-100 text-emerald-800'
                                 : isDispatched
@@ -893,18 +896,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </span>
 
                           {order.delivery_type === 'scheduled' ? (
-                            <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1">
+                            <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 shrink-0">
                               <Calendar className="w-3 h-3" />
                               <span>Scheduled: {order.scheduled_date}</span>
                             </span>
                           ) : (
-                            <span className="bg-teal-100 text-teal-800 px-2 py-0.5 rounded-full text-[10px] font-bold">
+                            <span className="bg-teal-100 text-teal-800 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0">
                               ⚡ Express (30-45m)
                             </span>
                           )}
                         </div>
 
-                        <div className="text-xs text-gray-500">
+                        <div className="text-[11px] sm:text-xs text-gray-500 shrink-0">
                           {new Date(order.created_at).toLocaleString([], {
                             dateStyle: 'medium',
                             timeStyle: 'short'
@@ -913,52 +916,52 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </div>
 
                       {/* Customer & Address Details */}
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs bg-gray-50 p-3 rounded-xl">
-                        <div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 sm:gap-3 text-xs bg-gray-50 p-2.5 sm:p-3 rounded-xl min-w-0">
+                        <div className="min-w-0">
                           <div className="text-[10px] font-bold uppercase text-gray-400">Customer</div>
-                          <div className="font-bold text-gray-900 mt-0.5">{order.customer_name}</div>
+                          <div className="font-bold text-gray-900 mt-0.5 break-words">{order.customer_name}</div>
                           <a
                             href={`tel:${order.customer_phone}`}
-                            className="text-purple-700 font-semibold hover:underline flex items-center gap-1 mt-0.5"
+                            className="text-purple-700 font-semibold hover:underline flex items-center gap-1 mt-0.5 break-all"
                           >
-                            <Phone className="w-3 h-3" />
+                            <Phone className="w-3 h-3 shrink-0" />
                             <span>{order.customer_phone}</span>
                           </a>
                         </div>
 
-                        <div>
+                        <div className="min-w-0">
                           <div className="text-[10px] font-bold uppercase text-gray-400">Delivery Address</div>
-                          <div className="text-gray-800 mt-0.5 font-medium leading-relaxed">
+                          <div className="text-gray-800 mt-0.5 font-medium leading-relaxed break-words">
                             {order.delivery_address}
                           </div>
                           {order.landmark && (
-                            <div className="text-gray-500 text-[11px] mt-0.5">
+                            <div className="text-gray-500 text-[11px] mt-0.5 break-words">
                               Landmark: {order.landmark}
                             </div>
                           )}
                         </div>
 
-                        <div>
+                        <div className="min-w-0">
                           <div className="text-[10px] font-bold uppercase text-gray-400">COD Total & Payment</div>
-                          <div className="font-black text-gray-900 text-base text-emerald-800 mt-0.5">
+                          <div className="font-black text-base text-emerald-800 mt-0.5">
                             ₹{order.total_amount}
                           </div>
                           <div className="text-[11px] text-gray-500 flex items-center flex-wrap gap-1 mt-0.5">
-                            <span>Items: ₹{order.subtotal} • Delivery: ₹{order.delivery_fee} • Handling: ₹{order.handling_fee}{Number(order.tip_amount) > 0 ? ` • Rider Tip: ₹${order.tip_amount}` : ''}</span>
+                            <span className="break-words">Items: ₹{order.subtotal} • Delivery: ₹{order.delivery_fee} • Handling: ₹{order.handling_fee}{Number(order.tip_amount) > 0 ? ` • Tip: ₹${order.tip_amount}` : ''}</span>
                             {!isDelivered && !isCancelled && (
                               <button
                                 onClick={() => {
                                   setEditingFeeOrderId(order.id);
                                   setOrderFeeInput(Number(order.delivery_fee));
                                 }}
-                                className="text-purple-700 hover:text-purple-900 font-bold underline cursor-pointer text-[10px] ml-1"
+                                className="text-purple-700 hover:text-purple-900 font-bold underline cursor-pointer text-[10px]"
                               >
                                 Adjust Fee
                               </button>
                             )}
                           </div>
                           {editingFeeOrderId === order.id && (
-                            <div className="mt-2 p-2 bg-purple-50 rounded-xl border border-purple-200 flex items-center gap-2">
+                            <div className="mt-2 p-2 bg-purple-50 rounded-xl border border-purple-200 flex flex-wrap items-center gap-2">
                               <span className="text-[11px] font-bold text-purple-900">Fee (₹):</span>
                               <input
                                 type="number"
@@ -990,13 +993,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                       {/* Items List */}
                       {order.items && order.items.length > 0 && (
-                        <div className="text-xs space-y-1">
+                        <div className="text-xs space-y-1 min-w-0">
                           <div className="text-[11px] font-bold text-gray-700">Order Items:</div>
-                          <div className="flex flex-wrap gap-2">
+                          <div className="flex flex-wrap gap-1.5 min-w-0">
                             {order.items.map(item => (
                               <span
                                 key={item.id}
-                                className="bg-white border border-gray-200 px-2.5 py-1 rounded-lg text-gray-800 font-medium text-[11px]"
+                                className="bg-white border border-gray-200 px-2 sm:px-2.5 py-1 rounded-lg text-gray-800 font-medium text-[11px] break-words max-w-full"
                               >
                                 {item.product_name} ({item.unit}) × <strong>{item.quantity}</strong> = ₹{item.total}
                               </span>
@@ -1007,11 +1010,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                       {/* Secure OTP Display (for dispatched orders) */}
                       {order.delivery_otp && (
-                        <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between text-xs">
+                        <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs min-w-0">
                           <div className="flex items-center gap-2">
-                            <Key className="w-4 h-4 text-emerald-700" />
-                            <span className="font-bold text-emerald-900">Secure Delivery OTP:</span>
-                            <span className="font-mono font-black text-sm text-emerald-800 bg-white px-2 py-0.5 rounded border border-emerald-300">
+                            <Key className="w-4 h-4 text-emerald-700 shrink-0" />
+                            <span className="font-bold text-emerald-900">Delivery OTP:</span>
+                            <span className="font-mono font-black text-sm text-emerald-800 bg-white px-2 py-0.5 rounded border border-emerald-300 tracking-wider">
                               {order.delivery_otp}
                             </span>
                           </div>
@@ -1022,14 +1025,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       )}
 
                       {/* Actions: Assign Partner, Dispatch, Cancel */}
-                      <div className="pt-2 border-t border-gray-100 flex flex-wrap items-center justify-between gap-3 text-xs">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-gray-600">Assigned Partner:</span>
+                      <div className="pt-2.5 border-t border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-2.5 text-xs min-w-0">
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0 w-full md:w-auto">
+                          <span className="font-bold text-gray-600 shrink-0">Assigned Partner:</span>
                           {order.rider_name && reassigningOrderId !== order.id ? (
-                            <div className="flex items-center gap-2">
-                              <span className="bg-purple-50 text-purple-900 font-bold px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5">
-                                <Truck className="w-3.5 h-3.5 text-purple-700" />
-                                <span>{order.rider_name} ({order.rider_phone})</span>
+                            <div className="flex flex-wrap items-center gap-2 min-w-0">
+                              <span className="bg-purple-50 text-purple-900 font-bold px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5 min-w-0 break-words">
+                                <Truck className="w-3.5 h-3.5 text-purple-700 shrink-0" />
+                                <span className="break-all">{order.rider_name} ({order.rider_phone})</span>
                               </span>
                               {!isDelivered && !isCancelled && (
                                 <button
@@ -1037,14 +1040,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                     setReassigningOrderId(order.id);
                                     setSelectedRiderByOrder(prev => ({ ...prev, [order.id]: order.rider_id || 0 }));
                                   }}
-                                  className="text-purple-700 hover:text-purple-900 underline text-xs font-bold cursor-pointer"
+                                  className="text-purple-700 hover:text-purple-900 underline text-xs font-bold cursor-pointer shrink-0"
                                 >
                                   Reassign
                                 </button>
                               )}
                             </div>
                           ) : (
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0 w-full sm:w-auto">
                               <select
                                 value={selectedRiderByOrder[order.id] || ''}
                                 onChange={e =>
@@ -1053,7 +1056,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                     [order.id]: Number(e.target.value)
                                   }))
                                 }
-                                className="bg-white border border-gray-300 rounded-xl px-2.5 py-1 text-xs font-medium"
+                                className="bg-white border border-gray-300 rounded-xl px-2.5 py-1.5 text-xs font-medium w-full sm:w-auto max-w-full sm:max-w-xs min-w-0 truncate"
                               >
                                 <option value="">Select Delivery Partner</option>
                                 {riders.filter(r => r.is_active !== false).map(r => (
@@ -1064,14 +1067,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               </select>
                               <button
                                 onClick={() => handleAssignRider(order.id)}
-                                className="bg-purple-700 hover:bg-purple-800 text-white font-bold px-3 py-1 rounded-xl transition cursor-pointer"
+                                className="bg-purple-700 hover:bg-purple-800 text-white font-bold px-3 py-1.5 rounded-xl transition cursor-pointer shrink-0"
                               >
                                 {reassigningOrderId === order.id ? 'Reassign' : 'Assign'}
                               </button>
                               {reassigningOrderId === order.id && (
                                 <button
                                   onClick={() => setReassigningOrderId(null)}
-                                  className="text-gray-500 hover:text-gray-700 text-xs px-1 cursor-pointer"
+                                  className="text-gray-500 hover:text-gray-700 text-xs px-1 cursor-pointer shrink-0"
                                 >
                                   Cancel
                                 </button>
@@ -1080,14 +1083,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           )}
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto">
                           {isPending && (
                             <button
                               onClick={() => handleDispatchOrder(order.id)}
                               disabled={dispatchingOrderId === order.id}
-                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-1.5 rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 sm:py-1.5 rounded-xl shadow-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 w-full sm:w-auto"
                             >
-                              <Truck className="w-3.5 h-3.5" />
+                              <Truck className="w-3.5 h-3.5 shrink-0" />
                               <span>Dispatch & Generate OTP</span>
                             </button>
                           )}
@@ -1095,7 +1098,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           {!isDelivered && !isCancelled && (
                             <button
                               onClick={() => handleCancelOrder(order.id)}
-                              className="bg-red-50 hover:bg-red-100 text-red-700 font-bold px-3 py-1.5 rounded-xl transition cursor-pointer"
+                              className="bg-red-50 hover:bg-red-100 text-red-700 font-bold px-3 py-2 sm:py-1.5 rounded-xl transition cursor-pointer text-center w-full sm:w-auto"
                             >
                               Cancel Order
                             </button>
@@ -1174,9 +1177,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             {/* Products Table */}
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs min-w-0">
+              <div className="overflow-x-auto touch-pan-x scrollbar-none">
+                <table className="w-full text-left text-xs min-w-[640px]">
                   <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase text-[10px] tracking-wider">
                     <tr>
                       <th className="py-3 px-4">Product</th>
@@ -1345,7 +1348,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             {/* Rider Wise Breakdown */}
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs">
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs min-w-0">
               <div className="p-4 border-b border-gray-200 flex items-center justify-between">
                 <div>
                   <h3 className="font-extrabold text-sm text-gray-900">Delivery Partner Cash Settlement</h3>
@@ -1353,8 +1356,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
+              <div className="overflow-x-auto touch-pan-x scrollbar-none">
+                <table className="w-full text-left text-xs min-w-[640px]">
                   <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase text-[10px] tracking-wider">
                     <tr>
                       <th className="py-3 px-4">Delivery Partner</th>
@@ -1490,9 +1493,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </button>
             </div>
 
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs min-w-0">
+              <div className="overflow-x-auto touch-pan-x scrollbar-none">
+                <table className="w-full text-left text-xs min-w-[640px]">
                   <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase text-[10px]">
                     <tr>
                       <th className="py-3 px-4">Partner Name</th>
