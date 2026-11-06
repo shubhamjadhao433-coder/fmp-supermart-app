@@ -489,7 +489,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const totalCodUnsettled = totalCodCollected - totalCodSettled;
 
   return (
-    <div className="min-h-screen bg-gray-100 flex flex-col font-sans w-full text-gray-900 pb-16">
+    <div className="min-h-screen bg-gray-100 flex flex-col font-sans w-full max-w-full overflow-x-clip text-gray-900 pb-16">
       {/* Toast Notification */}
       {toastMessage && (
         <div
@@ -783,7 +783,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* ======================================================== */}
       {/* MAIN CONTENT AREA */}
       {/* ======================================================== */}
-      <main className="max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex-1 space-y-6">
+      <main className="max-w-7xl w-full mx-auto px-3 py-4 sm:p-6 lg:p-8 flex-1 space-y-4 sm:space-y-6 min-w-0">
 
         {/* ======================================================== */}
         {/* TAB 1: ORDERS DISPATCH */}
@@ -1150,8 +1150,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             {/* Filter and Search */}
-            <div className="bg-white p-3 rounded-2xl border border-gray-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex-1 min-w-[200px] relative">
+            <div className="bg-white p-2.5 sm:p-3 rounded-2xl border border-gray-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 sm:gap-3 text-xs min-w-0">
+              <div className="flex-1 min-w-0 relative">
                 <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
                   type="text"
@@ -1165,7 +1165,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <select
                 value={productCategoryFilter}
                 onChange={e => setProductCategoryFilter(e.target.value)}
-                className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-semibold"
+                className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-semibold w-full sm:w-auto"
               >
                 <option value="all">All Categories ({categories.length})</option>
                 {categories.map(c => (

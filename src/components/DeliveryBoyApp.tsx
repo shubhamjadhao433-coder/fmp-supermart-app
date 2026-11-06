@@ -183,7 +183,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 pb-24 w-full overflow-x-hidden">
+    <div className="min-h-screen bg-gray-100 pb-24 w-full max-w-full overflow-x-clip">
       {/* Dedicated Delivery Partner Header Bar */}
       <header className="bg-amber-600 text-white sticky top-0 z-30 shadow-md">
         <div className="max-w-5xl mx-auto px-4 py-3.5 sm:px-6">
@@ -392,7 +392,7 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
       </header>
 
       {/* Main Content Area */}
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 mt-4 space-y-4">
+      <main className="max-w-5xl mx-auto px-3 sm:px-6 mt-4 space-y-4 w-full min-w-0">
         {/* Cash-In-Hand Alert Banner */}
         {codSummary && codSummary.summary.cash_in_hand > 0 && (
           <div className="bg-linear-to-r from-emerald-700 to-emerald-800 text-white rounded-xl sm:rounded-2xl p-3.5 sm:p-4 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 min-w-0 overflow-hidden">

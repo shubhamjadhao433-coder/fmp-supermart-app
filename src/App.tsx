@@ -189,13 +189,13 @@ export default function App() {
     // If not logged in, show unified login modal/screen
     if (!currentUser) {
       return (
-        <div className="min-h-screen bg-linear-to-br from-purple-950 via-gray-900 to-purple-900 flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-purple-100 text-center space-y-5">
-            <div className="w-16 h-16 bg-purple-100 text-purple-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-              <ShieldCheck className="w-8 h-8" />
+        <div className="min-h-screen bg-linear-to-br from-purple-950 via-gray-900 to-purple-900 flex items-center justify-center p-3 sm:p-4">
+          <div className="max-w-md w-full bg-white rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl border border-purple-100 text-center space-y-4 sm:space-y-5">
+            <div className="w-14 h-14 sm:w-16 sm:h-16 bg-purple-100 text-purple-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+              <ShieldCheck className="w-7 h-7 sm:w-8 sm:h-8" />
             </div>
             <div>
-              <h2 className="text-xl font-black text-gray-900">Admin Authentication Required</h2>
+              <h2 className="text-lg sm:text-xl font-black text-gray-900">Admin Authentication Required</h2>
               <p className="text-xs text-gray-500 mt-1">
                 Please sign in with your authorized administrator credentials for Karanja Lad central store.
               </p>
@@ -234,8 +234,8 @@ export default function App() {
     // Role-based Access Control: Customer or Rider attempting to view Admin
     if (currentUser.role !== 'admin') {
       return (
-        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-red-200 text-center space-y-4">
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-3 sm:p-4">
+          <div className="max-w-md w-full bg-white rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl border border-red-200 text-center space-y-4">
             <div className="w-16 h-16 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center mx-auto">
               <ShieldAlert className="w-8 h-8" />
             </div>
@@ -287,13 +287,13 @@ export default function App() {
     // If not logged in, prompt sign in via single login modal/screen
     if (!currentUser) {
       return (
-        <div className="min-h-screen bg-linear-to-br from-amber-950 via-gray-900 to-amber-900 flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-amber-100 text-center space-y-5">
-            <div className="w-16 h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-              <Truck className="w-8 h-8" />
+        <div className="min-h-screen bg-linear-to-br from-amber-950 via-gray-900 to-amber-900 flex items-center justify-center p-3 sm:p-4">
+          <div className="max-w-md w-full bg-white rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl border border-amber-100 text-center space-y-4 sm:space-y-5">
+            <div className="w-14 h-14 sm:w-16 sm:h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+              <Truck className="w-7 h-7 sm:w-8 sm:h-8" />
             </div>
             <div>
-              <h2 className="text-xl font-black text-gray-900">Delivery Partner Portal</h2>
+              <h2 className="text-lg sm:text-xl font-black text-gray-900">Delivery Partner Portal</h2>
               <p className="text-xs text-gray-500 mt-1">
                 Please sign in with your registered delivery partner account.
               </p>
@@ -332,8 +332,8 @@ export default function App() {
     // Role-based Access Control: Customers cannot view rider dashboard
     if (currentUser.role !== 'rider' && currentUser.role !== 'admin') {
       return (
-        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-          <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl border border-amber-200 text-center space-y-4">
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-3 sm:p-4">
+          <div className="max-w-md w-full bg-white rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl border border-amber-200 text-center space-y-4">
             <div className="w-16 h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto">
               <ShieldAlert className="w-8 h-8" />
             </div>

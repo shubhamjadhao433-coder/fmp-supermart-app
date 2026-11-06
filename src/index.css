@@ -2,8 +2,8 @@
 
 html, body, #root {
   width: 100%;
-  max-width: 100vw;
-  overflow-x: hidden;
+  max-width: 100%;
+  overflow-x: clip;
   margin: 0;
   padding: 0;
 }
@@ -11,3 +11,4 @@ html, body, #root {
 *, *::before, *::after {
   box-sizing: border-box;
 }
+
