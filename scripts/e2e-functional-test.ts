@@ -519,7 +519,12 @@ async function runE2ETests() {
         deliveryType: 'immediate',
         scheduledDate: 'Immediate',
         timeSlot: '30 mins',
-        tipAmount: 0
+        tipAmount: 0,
+        customerLat: 20.4839,
+        customerLng: 77.4877,
+        distanceKm: 0.5,
+        durationMins: 2,
+        distanceSource: 'osrm'
       },
       [{ product_id: targetProduct.id, quantity: 1 }],
       []

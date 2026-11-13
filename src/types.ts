@@ -18,6 +18,14 @@ export interface Category {
   display_order: number;
 }
 
+export interface ProductPriceSlab {
+  id?: string;
+  min_qty: number;
+  max_qty: number | null;
+  price_per_unit: number;
+  label?: string;
+}
+
 export interface Product {
   id: number;
   category_id: number;
@@ -32,9 +40,21 @@ export interface Product {
   image_url?: string;
   description?: string;
   is_active: boolean;
+  product_type?: 'loose' | 'packaged';
+  min_order_qty?: number;
+  max_order_qty?: number | null;
+  pricing_slabs?: ProductPriceSlab[];
   review_count?: number;
   average_rating?: number;
   is_favorite?: boolean;
+  // Admin-only wholesale pricing & supplier fields (never exposed to customers)
+  purchase_cost?: number | null;
+  gross_margin?: number | null;
+  margin_percent?: number | null;
+  supplier_id?: number | null;
+  supplier_name?: string | null;
+  supplier_phone?: string | null;
+  supplier_address?: string | null;
 }
 
 export interface CartItem {
@@ -48,9 +68,13 @@ export interface OrderItem {
   product_id: number;
   product_name: string;
   unit: string;
+  product_type?: 'loose' | 'packaged';
   price: number;
+  regular_unit_price?: number;
   quantity: number;
   total: number;
+  savings?: number;
+  applied_slab_label?: string | null;
   image_url?: string;
 }
 
@@ -64,10 +88,19 @@ export interface Order {
   landmark?: string;
   pincode?: string;
   subtotal: number | string;
+  regular_subtotal?: number | string;
+  total_savings?: number | string;
   delivery_fee: number | string;
   handling_fee: number | string;
   tip_amount?: number | string;
   total_amount: number | string;
+  distance_km?: number | null;
+  distance_source?: string | null;
+  customer_lat?: number | null;
+  customer_lng?: number | null;
+  warehouse_lat?: number | null;
+  warehouse_lng?: number | null;
+  delivery_fee_rule?: string | null;
   payment_mode: 'COD';
   status: 'placed' | 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled';
   delivery_type?: 'immediate' | 'scheduled';
@@ -185,13 +218,46 @@ export interface PasswordResetRequest {
   resolved_at?: string;
 }
 
+export interface DeliverySlab {
+  id?: string;
+  min_km: number;
+  max_km: number;
+  charge_type: 'free' | 'fixed' | 'per_km';
+  charge: number;
+  label?: string;
+}
+
 export interface DeliverySettings {
   id?: number;
   default_delivery_fee: number;
   handling_fee: number;
   min_order_amount?: number;
   delivery_areas?: string;
+  warehouse_lat: number;
+  warehouse_lng: number;
+  warehouse_address: string;
+  delivery_pricing_mode: 'slabs' | 'per_km';
+  per_km_rate: number;
+  free_delivery_up_to_km: number;
+  max_delivery_distance_km: number;
+  delivery_slabs: DeliverySlab[];
   updated_at?: string;
+}
+
+export interface DeliveryQuote {
+  deliverable: boolean;
+  distance_km: number;
+  duration_mins: number | null;
+  distance_source: 'osrm' | 'haversine_fallback';
+  delivery_fee: number;
+  handling_fee: number;
+  max_delivery_distance_km: number;
+  pricing_mode: 'slabs' | 'per_km';
+  matched_slab_label?: string;
+  warehouse_lat: number;
+  warehouse_lng: number;
+  warehouse_address?: string;
+  reason?: string;
 }
 
 export interface DeliverySlot {
@@ -217,3 +283,31 @@ export interface RiderUser {
   cash_in_hand: number;
 }
 
+export interface CartQuoteItem {
+  valid: boolean;
+  error?: string;
+  product_id: number;
+  product_name: string;
+  product_type: 'loose' | 'packaged';
+  unit: string;
+  quantity: number;
+  stock: number;
+  regular_unit_price: number;
+  applied_unit_price: number;
+  regular_total: number;
+  line_total: number;
+  savings: number;
+  savings_percent: number;
+  applied_slab: ProductPriceSlab | null;
+  applied_slab_label: string | null;
+  next_slab_hint: string | null;
+}
+
+export interface CartQuoteResponse {
+  all_valid: boolean;
+  errors: string[];
+  items: CartQuoteItem[];
+  subtotal: number;
+  regular_subtotal: number;
+  total_savings: number;
+}

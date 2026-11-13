@@ -34,16 +34,35 @@ import {
   Tag
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { Product, Category, CartItem, Order, User, ProductReview, NotificationItem } from '../types.ts';
+import {
+  Product,
+  Category,
+  CartItem,
+  Order,
+  User,
+  ProductReview,
+  NotificationItem,
+  DeliverySettings,
+  DeliveryQuote,
+  CartQuoteItem,
+  CartQuoteResponse
+} from '../types.ts';
 import { api, authStorage } from '../services/api.ts';
+import {
+  resolveProductQuantityPricing,
+  normalizeProductPriceSlabs,
+  normalizeProductType,
+  formatSlabRangeLabel
+} from '../shared/quantityPricing.ts';
 import { OrderLiveTrackingMap } from './OrderLiveTrackingMap.tsx';
+import { OsmMapPicker } from './OsmMapPicker.tsx';
 import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 interface CustomerAppProps {
   currentUser: User | null;
   onOpenAuth: () => void;
   cart: CartItem[];
-  onAddToCart: (product: Product) => void;
+  onAddToCart: (product: Product, qty?: number) => void;
   onUpdateCartQty: (productId: number, qty: number) => void;
   onRemoveFromCart: (productId: number) => void;
   onClearCart: () => void;
@@ -110,12 +129,15 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
   // Product Detail & Reviews Modal
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [detailQty, setDetailQty] = useState<number>(1);
+  const [detailQtyInput, setDetailQtyInput] = useState<string>('1');
   const [productReviews, setProductReviews] = useState<ProductReview[]>([]);
   const [reviewsLoading, setReviewsLoading] = useState<boolean>(false);
   const [newRating, setNewRating] = useState<number>(5);
   const [newReviewText, setNewReviewText] = useState<string>('');
   const [reviewSubmitting, setReviewSubmitting] = useState<boolean>(false);
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
+  const [cartNotice, setCartNotice] = useState<string | null>(null);
 
   // Checkout Form State
   const [deliveryType, setDeliveryType] = useState<'immediate' | 'scheduled'>('immediate');
@@ -133,10 +155,17 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [profileSaving, setProfileSaving] = useState<boolean>(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
 
-  // Delivery settings from backend
-  const [deliveryFeeConfig, setDeliveryFeeConfig] = useState<number>(25);
+  // Delivery settings & live backend OSRM quote
+  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings | null>(null);
   const [handlingFeeConfig, setHandlingFeeConfig] = useState<number>(5);
   const [deliverySlots, setDeliverySlots] = useState<{ id: number; name: string; time_window: string }[]>([]);
+  const [customerLat, setCustomerLat] = useState<number>(20.4839);
+  const [customerLng, setCustomerLng] = useState<number>(77.4877);
+  const [hasUserMovedPin, setHasUserMovedPin] = useState<boolean>(false);
+  const [deliveryQuote, setDeliveryQuote] = useState<DeliveryQuote | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState<boolean>(false);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [showMapPicker, setShowMapPicker] = useState<boolean>(true);
 
   // Default fallback slots if server loading
   const defaultSlots = [
@@ -165,12 +194,56 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [customTip, setCustomTip] = useState<string>('');
   const [isCustomTip, setIsCustomTip] = useState<boolean>(false);
 
-  // Calculate Cart Totals (Admin Controlled Fee, Handling Fee ₹5, Delivery Tip)
-  const cartSubtotal = cart.reduce((sum, item) => sum + Number(item.product.price) * item.quantity, 0);
-  const deliveryCharge = cartSubtotal === 0 ? 0 : deliveryFeeConfig;
-  const handlingCharge = cartSubtotal === 0 ? 0 : handlingFeeConfig;
-  const totalAmount = cartSubtotal + deliveryCharge + handlingCharge + (cartSubtotal === 0 ? 0 : tipAmount);
-  const cartItemCount = cart.reduce((sum, i) => sum + i.quantity, 0);
+  // Backend Authoritative Quantity-Based Pricing State
+  const [cartQuote, setCartQuote] = useState<CartQuoteResponse | null>(null);
+  const [cartQuoteLoading, setCartQuoteLoading] = useState<boolean>(false);
+
+  const showCartNotice = (msg: string) => {
+    setCartNotice(msg);
+    setTimeout(() => setCartNotice(null), 3500);
+  };
+
+  // Resolve local preview fallback while backend quote loads
+  const localResolvedItems = cart.map(item =>
+    resolveProductQuantityPricing(item.product, item.quantity)
+  );
+  const cartQuoteMap: Record<number, CartQuoteItem> = {};
+  if (cartQuote && Array.isArray(cartQuote.items)) {
+    cartQuote.items.forEach(qi => {
+      cartQuoteMap[qi.product_id] = qi;
+    });
+  } else {
+    localResolvedItems.forEach(li => {
+      cartQuoteMap[li.product_id] = li;
+    });
+  }
+
+  const cartSubtotal = cartQuote
+    ? cartQuote.subtotal
+    : Math.round(localResolvedItems.reduce((sum, i) => sum + i.line_total, 0) * 100) / 100;
+  const regularCartSubtotal = cartQuote
+    ? cartQuote.regular_subtotal
+    : Math.round(localResolvedItems.reduce((sum, i) => sum + i.regular_total, 0) * 100) / 100;
+  const cartTotalSavings = cartQuote
+    ? cartQuote.total_savings
+    : Math.round(localResolvedItems.reduce((sum, i) => sum + i.savings, 0) * 100) / 100;
+  const cartValidationErrors = cartQuote
+    ? cartQuote.errors
+    : localResolvedItems.filter(i => !i.valid && i.error).map(i => i.error as string);
+  const hasCartPricingError = cartQuote ? !cartQuote.all_valid : cartValidationErrors.length > 0;
+
+  const deliveryCharge = cartSubtotal === 0
+    ? 0
+    : deliveryQuote && deliveryQuote.deliverable
+    ? deliveryQuote.delivery_fee
+    : 0;
+  const handlingCharge = cartSubtotal === 0
+    ? 0
+    : deliveryQuote
+    ? deliveryQuote.handling_fee
+    : handlingFeeConfig;
+  const totalAmount = Math.round((cartSubtotal + deliveryCharge + handlingCharge + (cartSubtotal === 0 ? 0 : tipAmount)) * 100) / 100;
+  const cartItemCount = cart.length;
 
   // Load Catalog & Customer Data
   const loadCatalogData = async () => {
@@ -185,8 +258,12 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       if (cats && cats.length > 0) setCategories(cats);
       if (prods && prods.length > 0) setProducts(prods);
       if (feeRes) {
-        if (typeof feeRes.default_delivery_fee === 'number') setDeliveryFeeConfig(feeRes.default_delivery_fee);
+        setDeliverySettings(feeRes);
         if (typeof feeRes.handling_fee === 'number') setHandlingFeeConfig(feeRes.handling_fee);
+        if (!hasUserMovedPin && typeof feeRes.warehouse_lat === 'number' && typeof feeRes.warehouse_lng === 'number') {
+          setCustomerLat(feeRes.warehouse_lat);
+          setCustomerLng(feeRes.warehouse_lng);
+        }
       }
       if (slotsRes && slotsRes.length > 0) setDeliverySlots(slotsRes);
 
@@ -227,6 +304,77 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   useEffect(() => {
     loadCatalogData();
   }, []);
+
+  // Backend OSRM Distance & Fee Calculation
+  useEffect(() => {
+    if (cart.length === 0) {
+      setDeliveryQuote(null);
+      setQuoteError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setQuoteLoading(true);
+    setQuoteError(null);
+
+    const timer = setTimeout(async () => {
+      try {
+        const quote = await api.calculateDeliveryFee(customerLat, customerLng);
+        if (!cancelled) {
+          setDeliveryQuote(quote);
+          setQuoteError(null);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setQuoteError(err?.message || 'Unable to calculate road distance right now.');
+        }
+      } finally {
+        if (!cancelled) {
+          setQuoteLoading(false);
+        }
+      }
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [cart.length, isCartOpen, customerLat, customerLng]);
+
+  // Authoritative Backend Cart Pricing Calculation (Quantity Slabs + Stock Validation)
+  const cartSignature = cart.map(i => `${i.product.id}:${i.quantity}`).join('|');
+  useEffect(() => {
+    if (cart.length === 0) {
+      setCartQuote(null);
+      setCartQuoteLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setCartQuoteLoading(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api.calculateCartPricing(
+          cart.map(i => ({ product_id: i.product.id, quantity: i.quantity }))
+        );
+        if (!cancelled) {
+          setCartQuote(res);
+        }
+      } catch {
+        // Fallback smoothly to shared pricing rules if offline
+      } finally {
+        if (!cancelled) {
+          setCartQuoteLoading(false);
+        }
+      }
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [cartSignature, isCartOpen]);
 
   useEffect(() => {
     if (currentUser) {
@@ -298,9 +446,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     }
   };
 
-  // Open Reviews Modal for a Product
+  // Open Product Details, Quantity Slabs & Reviews Modal
   const handleOpenReviewsModal = async (product: Product) => {
+    const inCart = cart.find(i => i.product.id === product.id);
+    const minOrder = Math.max(Number(product.min_order_qty) || 1, 0.1);
+    const initialQty = inCart ? inCart.quantity : minOrder;
     setSelectedProduct(product);
+    setDetailQty(initialQty);
+    setDetailQtyInput(String(initialQty));
     setReviewsLoading(true);
     setReviewMessage(null);
     setNewReviewText('');
@@ -391,6 +544,16 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       return;
     }
 
+    if (hasCartPricingError) {
+      setCheckoutError(cartValidationErrors[0] || 'Please fix quantity or stock errors in your cart before checkout.');
+      return;
+    }
+
+    if (deliveryQuote && !deliveryQuote.deliverable) {
+      setCheckoutError(deliveryQuote.reason || 'Delivery is unavailable at your selected location.');
+      return;
+    }
+
     setCheckoutSubmitting(true);
     setCheckoutError(null);
 
@@ -405,7 +568,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         delivery_type: deliveryType,
         scheduled_date: deliveryType === 'scheduled' ? scheduledDate : 'Immediate Express',
         time_slot: deliveryType === 'scheduled' ? scheduledSlot : 'Within 30-45 mins',
-        tip_amount: tipAmount
+        tip_amount: tipAmount,
+        customer_lat: customerLat,
+        customer_lng: customerLng
       };
 
       const res = await api.createOrder(payload);
@@ -826,18 +991,24 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               const inCart = cart.find(i => i.product.id === product.id);
               const isFavorite = favoriteIds.has(product.id);
               const isOutOfStock = product.stock <= 0;
+              const pType = normalizeProductType(product.product_type, product.unit);
+              const slabs = normalizeProductPriceSlabs(product.pricing_slabs, pType === 'loose' ? 'kg' : '');
+              const lowestSlabPrice = slabs.length > 0 ? Math.min(...slabs.map(s => s.price_per_unit)) : null;
+              const inCartResolved = inCart ? resolveProductQuantityPricing(product, inCart.quantity) : null;
+              const minQty = Math.max(Number(product.min_order_qty) || 1, pType === 'loose' ? 0.1 : 1);
+              const stepQty = pType === 'loose' && minQty < 1 ? 0.5 : 1;
               const hasDiscount = Number(product.mrp) > Number(product.price);
-              const discountPercent = hasDiscount
-                ? Math.round(((Number(product.mrp) - Number(product.price)) / Number(product.mrp)) * 100)
-                : 0;
 
               return (
                 <div
                   key={product.id || `prod-${product.name || idx}`}
                   className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs hover:shadow-md transition flex flex-col justify-between group relative w-full min-w-0"
                 >
-                  {/* Top Image Box */}
-                  <div className="relative aspect-square bg-gray-50 overflow-hidden">
+                  {/* Top Image Box (Click to view Product Details & Quantity Slabs) */}
+                  <div
+                    onClick={() => handleOpenReviewsModal(product)}
+                    className="relative aspect-square bg-gray-50 overflow-hidden cursor-pointer"
+                  >
                     <img
                       src={product.image_url}
                       alt={product.name}
@@ -858,6 +1029,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       />
                     </button>
 
+                    {/* Bulk Slab Pricing Tag */}
+                    {lowestSlabPrice !== null && lowestSlabPrice < Number(product.price) && !isOutOfStock && (
+                      <div className="absolute bottom-2 left-2 bg-emerald-700/95 text-white text-[9px] font-extrabold px-2 py-0.5 rounded-lg shadow-xs flex items-center gap-1">
+                        <Tag className="w-2.5 h-2.5 shrink-0" />
+                        <span>Bulk from ₹{lowestSlabPrice}/{pType === 'loose' ? 'kg' : 'unit'}</span>
+                      </div>
+                    )}
+
                     {/* Out of stock overlay */}
                     {isOutOfStock && (
                       <div className="absolute inset-0 bg-white/85 backdrop-blur-2xs flex items-center justify-center">
@@ -870,21 +1049,39 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                   {/* Clean Card Content: Name, Unit, Price, Add Button */}
                   <div className="p-2 sm:p-3 flex-1 flex flex-col justify-between space-y-1.5 sm:space-y-2 min-w-0">
-                    <div className="min-w-0">
-                      <h3 className="font-bold text-gray-900 text-xs sm:text-sm line-clamp-2 leading-snug break-words">
+                    <div
+                      onClick={() => handleOpenReviewsModal(product)}
+                      className="min-w-0 cursor-pointer"
+                    >
+                      <h3 className="font-bold text-gray-900 text-xs sm:text-sm line-clamp-2 leading-snug break-words hover:text-emerald-700 transition">
                         {product.name}
                       </h3>
-                      <p className="text-[10px] sm:text-[11px] text-gray-500 font-medium mt-0.5 truncate">
-                        {product.unit}
-                      </p>
+                      <div className="flex items-center justify-between gap-1 mt-0.5">
+                        <p className="text-[10px] sm:text-[11px] text-gray-500 font-medium truncate">
+                          {product.unit} {pType === 'loose' ? '• Loose' : ''}
+                        </p>
+                        {slabs.length > 0 && (
+                          <span className="text-[9px] font-bold text-emerald-700 shrink-0 underline">
+                            {slabs.length} qty rates
+                          </span>
+                        )}
+                      </div>
                     </div>
+
+                    {/* In-Cart Slab Savings Chip */}
+                    {inCartResolved && inCartResolved.savings > 0 && (
+                      <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-0.5 text-[10px] font-bold text-emerald-800 flex items-center justify-between">
+                        <span>@₹{inCartResolved.applied_unit_price}/{pType === 'loose' ? 'kg' : 'u'}</span>
+                        <span>Saved ₹{inCartResolved.savings}</span>
+                      </div>
+                    )}
 
                     {/* Pricing & Add Stepper */}
                     <div className="pt-1.5 sm:pt-2 border-t border-gray-100 flex items-center justify-between gap-1 min-w-0">
                       <div className="min-w-0">
                         <div className="flex items-baseline gap-1">
                           <span className="text-xs sm:text-sm md:text-base font-black text-gray-900">
-                            ₹{product.price}
+                            ₹{inCartResolved ? inCartResolved.applied_unit_price : product.price}
                           </span>
                           {hasDiscount && (
                             <span className="text-[9px] sm:text-[10px] text-gray-400 line-through">
@@ -906,19 +1103,36 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         ) : inCart ? (
                           <div className="flex items-center bg-emerald-50 border border-emerald-300 rounded-xl overflow-hidden text-emerald-800">
                             <button
-                              onClick={() => onUpdateCartQty(product.id, inCart.quantity - 1)}
+                              onClick={() => {
+                                const nextQty = Math.round((inCart.quantity - stepQty) * 100) / 100;
+                                if (nextQty < minQty) {
+                                  onRemoveFromCart(product.id);
+                                } else {
+                                  onUpdateCartQty(product.id, nextQty);
+                                }
+                              }}
                               className="px-2 py-1 hover:bg-emerald-100 text-xs font-bold transition cursor-pointer"
                               title="Decrease"
                             >
                               <Minus className="w-3 h-3" />
                             </button>
-                            <span className="px-1.5 text-xs font-black">{inCart.quantity}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenReviewsModal(product)}
+                              className="px-1.5 text-xs font-black cursor-pointer hover:underline"
+                              title="Tap to select bulk kg or units"
+                            >
+                              {inCart.quantity}{pType === 'loose' ? 'kg' : ''}
+                            </button>
                             <button
                               onClick={() => {
-                                if (inCart.quantity < product.stock) {
-                                  onUpdateCartQty(product.id, inCart.quantity + 1);
+                                const nextQty = Math.round((inCart.quantity + stepQty) * 100) / 100;
+                                if (product.max_order_qty && nextQty > product.max_order_qty) {
+                                  showCartNotice(`Max ${product.max_order_qty} allowed per order for ${product.name}.`);
+                                } else if (nextQty <= product.stock) {
+                                  onUpdateCartQty(product.id, nextQty);
                                 } else {
-                                  alert(`Only ${product.stock} units available in stock.`);
+                                  showCartNotice(`Only ${product.stock} ${pType === 'loose' ? 'kg' : 'units'} available in stock.`);
                                 }
                               }}
                               className="px-2 py-1 hover:bg-emerald-100 text-xs font-bold transition cursor-pointer"
@@ -929,7 +1143,13 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                           </div>
                         ) : (
                           <button
-                            onClick={() => onAddToCart(product)}
+                            onClick={() => {
+                              if (minQty > product.stock) {
+                                showCartNotice(`Insufficient stock for minimum order qty (${minQty}).`);
+                                return;
+                              }
+                              onAddToCart(product, minQty);
+                            }}
                             className="bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-xl text-xs font-bold shadow-xs transition flex items-center gap-1 cursor-pointer"
                           >
                             <Plus className="w-3 h-3" />
@@ -971,9 +1191,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             <div>
               <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Delivery & Charges</h4>
               <ul className="space-y-2 text-gray-500">
-                <li>• Standard Delivery: ₹{deliveryFeeConfig} (Admin Configurable)</li>
+                <li>
+                  • Distance-based Delivery:{' '}
+                  {deliverySettings?.delivery_pricing_mode === 'per_km'
+                    ? `Free up to ${deliverySettings.free_delivery_up_to_km} km, then ₹${deliverySettings.per_km_rate}/km`
+                    : '0–2 km FREE • Slab-based (Admin Configurable)'}
+                </li>
+                <li>• Max Delivery Radius: {deliverySettings?.max_delivery_distance_km || 8} km from Central Warehouse</li>
                 <li>• Packaging & Handling: ₹{handlingFeeConfig}</li>
-                <li>• Service Area: Karanja Lad</li>
                 <li>• Payment Mode: Cash on Delivery (COD) only</li>
               </ul>
             </div>
@@ -1027,7 +1252,13 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   {cartItemCount} {cartItemCount === 1 ? 'item' : 'items'} • ₹{totalAmount}
                 </div>
                 <div className="text-[10px] text-emerald-200">
-                  {deliveryCharge === 0 ? '🎉 Free Delivery' : `Delivery: ₹${deliveryCharge} • Cash on Delivery`}
+                  {deliveryQuote
+                    ? !deliveryQuote.deliverable
+                      ? `Out of delivery range (${deliveryQuote.distance_km} km)`
+                      : deliveryQuote.delivery_fee === 0
+                      ? `🎉 Free Delivery (${deliveryQuote.distance_km} km) • Cash on Delivery`
+                      : `Delivery: ₹${deliveryQuote.delivery_fee} (${deliveryQuote.distance_km} km) • Cash on Delivery`
+                    : 'Distance-based Delivery • Cash on Delivery'}
                 </div>
               </div>
             </div>
@@ -1260,48 +1491,268 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         </div>
       )}
 
+      {/* Toast Banner for Stock/Limit Notices */}
+      {cartNotice && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white px-4 py-2.5 rounded-2xl shadow-xl text-xs font-bold flex items-center gap-2 max-w-[90vw]">
+          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>{cartNotice}</span>
+        </div>
+      )}
+
       {/* ======================================================== */}
-      {/* PRODUCT DETAILS & REVIEWS MODAL */}
+      {/* PRODUCT DETAILS, QUANTITY SLABS & REVIEWS MODAL */}
       {/* ======================================================== */}
-      {selectedProduct && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-gray-100 space-y-4 my-8">
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-3">
-                <img
-                  src={selectedProduct.image_url}
-                  alt={selectedProduct.name}
-                  className="w-16 h-16 rounded-2xl object-cover border border-gray-200 shrink-0"
-                />
-                <div>
-                  <h3 className="font-extrabold text-gray-900 text-base leading-snug">
-                    {selectedProduct.name}
-                  </h3>
-                  <div className="flex items-center gap-2 text-xs mt-1">
-                    <span className="font-bold text-emerald-700">₹{selectedProduct.price}</span>
-                    {Number(selectedProduct.mrp) > Number(selectedProduct.price) && (
-                      <span className="text-gray-400 line-through text-[11px]">
-                        ₹{selectedProduct.mrp}
+      {selectedProduct && (() => {
+        const pType = normalizeProductType(selectedProduct.product_type, selectedProduct.unit);
+        const unitSuffix = pType === 'loose' ? 'kg' : 'units';
+        const slabs = normalizeProductPriceSlabs(selectedProduct.pricing_slabs, pType === 'loose' ? 'kg' : '');
+        const resolved = resolveProductQuantityPricing(selectedProduct, detailQty);
+        const existingInCart = cart.find(i => i.product.id === selectedProduct.id);
+        const stepSize = pType === 'loose' ? 0.5 : 1;
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+            <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-gray-100 space-y-4 my-6 max-h-[92vh] overflow-y-auto">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <img
+                    src={selectedProduct.image_url}
+                    alt={selectedProduct.name}
+                    className="w-16 h-16 rounded-2xl object-cover border border-gray-200 shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <h3 className="font-extrabold text-gray-900 text-base leading-snug">
+                        {selectedProduct.name}
+                      </h3>
+                      <span className={`text-[9px] font-extrabold uppercase px-2 py-0.5 rounded-full ${
+                        pType === 'loose' ? 'bg-amber-100 text-amber-900' : 'bg-gray-100 text-gray-700'
+                      }`}>
+                        {pType === 'loose' ? 'Loose Weight' : 'Packaged'}
                       </span>
-                    )}
-                    <span className="text-gray-500">• {selectedProduct.unit}</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs mt-1">
+                      <span className="font-bold text-emerald-700">Regular: ₹{selectedProduct.price}</span>
+                      {Number(selectedProduct.mrp) > Number(selectedProduct.price) && (
+                        <span className="text-gray-400 line-through text-[11px]">
+                          ₹{selectedProduct.mrp}
+                        </span>
+                      )}
+                      <span className="text-gray-500">• {selectedProduct.unit}</span>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        selectedProduct.stock > 0 ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'
+                      }`}>
+                        {selectedProduct.stock > 0 ? `${selectedProduct.stock} ${unitSuffix} in stock` : 'Out of Stock'}
+                      </span>
+                    </div>
                   </div>
                 </div>
+
+                <button
+                  onClick={() => setSelectedProduct(null)}
+                  className="text-gray-400 hover:text-gray-600 p-1 shrink-0 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
-              <button
-                onClick={() => setSelectedProduct(null)}
-                className="text-gray-400 hover:text-gray-600 p-1"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+              {selectedProduct.description && (
+                <p className="text-xs text-gray-600 bg-gray-50 p-3 rounded-2xl leading-relaxed">
+                  {selectedProduct.description}
+                </p>
+              )}
 
-            {selectedProduct.description && (
-              <p className="text-xs text-gray-600 bg-gray-50 p-3 rounded-2xl leading-relaxed">
-                {selectedProduct.description}
-              </p>
-            )}
+              {/* Quantity-Based Wholesale Price Slabs */}
+              {slabs.length > 0 && (
+                <div className="bg-emerald-50/50 border border-emerald-200 rounded-2xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-extrabold text-xs text-emerald-950 flex items-center gap-1.5">
+                      <Tag className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Quantity-Based Wholesale Price Slabs</span>
+                    </span>
+                    <span className="text-[10px] text-emerald-700 font-semibold">Tap a slab to select</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {slabs.map((slab, sIdx) => {
+                      const isActiveSlab =
+                        resolved.applied_slab?.min_qty === slab.min_qty &&
+                        resolved.applied_slab?.max_qty === slab.max_qty;
+                      const regPrice = Number(selectedProduct.price) || 0;
+                      const unitSave = Math.round((regPrice - slab.price_per_unit) * 100) / 100;
+
+                      return (
+                        <button
+                          type="button"
+                          key={slab.id || `slab-opt-${sIdx}`}
+                          onClick={() => {
+                            setDetailQty(slab.min_qty);
+                            setDetailQtyInput(String(slab.min_qty));
+                          }}
+                          className={`w-full px-3 py-2 rounded-xl border text-left flex items-center justify-between gap-2 transition cursor-pointer ${
+                            isActiveSlab
+                              ? 'bg-emerald-700 text-white border-emerald-700 shadow-xs'
+                              : 'bg-white text-gray-800 border-gray-200 hover:border-emerald-400'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className={`font-extrabold text-xs ${isActiveSlab ? 'text-white' : 'text-gray-900'}`}>
+                              {formatSlabRangeLabel(slab, unitSuffix)}
+                            </span>
+                            {isActiveSlab && (
+                              <span className="text-[9px] bg-white/20 text-white font-bold px-1.5 py-0.5 rounded-full">
+                                Applied
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {unitSave > 0 && (
+                              <span className={`text-[10px] font-bold ${isActiveSlab ? 'text-emerald-100' : 'text-emerald-700'}`}>
+                                Save ₹{unitSave}/{pType === 'loose' ? 'kg' : 'u'}
+                              </span>
+                            )}
+                            <span className={`font-black text-xs sm:text-sm ${isActiveSlab ? 'text-white' : 'text-emerald-800'}`}>
+                              ₹{slab.price_per_unit}/{pType === 'loose' ? 'kg' : 'unit'}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Interactive Quantity Selector & Live Price Calculator */}
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-3.5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="font-extrabold text-xs text-gray-900">
+                      Select Quantity ({pType === 'loose' ? 'in kg / L' : 'in units'})
+                    </div>
+                    {(selectedProduct.min_order_qty || selectedProduct.max_order_qty) && (
+                      <div className="text-[10px] text-gray-500">
+                        Min: {selectedProduct.min_order_qty || 1} {unitSuffix}
+                        {selectedProduct.max_order_qty ? ` • Max: ${selectedProduct.max_order_qty} ${unitSuffix}` : ''}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center bg-white border border-gray-300 rounded-xl overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = Math.max(0.1, Math.round((detailQty - stepSize) * 100) / 100);
+                        setDetailQty(next);
+                        setDetailQtyInput(String(next));
+                      }}
+                      className="px-3 py-2 hover:bg-gray-100 font-bold text-gray-700 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      min={pType === 'loose' ? '0.1' : '1'}
+                      step={pType === 'loose' ? '0.5' : '1'}
+                      value={detailQtyInput}
+                      onChange={e => {
+                        setDetailQtyInput(e.target.value);
+                        const num = Number(e.target.value);
+                        if (Number.isFinite(num) && num > 0) {
+                          setDetailQty(Math.round(num * 100) / 100);
+                        }
+                      }}
+                      className="w-16 text-center font-black text-sm text-gray-900 outline-hidden py-1.5"
+                    />
+                    <span className="pr-2 text-[11px] font-bold text-gray-500">
+                      {pType === 'loose' ? 'kg' : 'u'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = Math.round((detailQty + stepSize) * 100) / 100;
+                        setDetailQty(next);
+                        setDetailQtyInput(String(next));
+                      }}
+                      className="px-3 py-2 hover:bg-gray-100 font-bold text-gray-700 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Live Calculation Breakdown */}
+                <div className="bg-white rounded-xl border border-gray-200 p-3 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between text-gray-600">
+                    <span>Applied Rate ({resolved.applied_slab_label || 'Regular Price'}):</span>
+                    <div className="flex items-center gap-1.5">
+                      {resolved.applied_unit_price < resolved.regular_unit_price && (
+                        <span className="text-[11px] text-gray-400 line-through">
+                          ₹{resolved.regular_unit_price}
+                        </span>
+                      )}
+                      <span className="font-black text-emerald-800">
+                        ₹{resolved.applied_unit_price}/{pType === 'loose' ? 'kg' : 'unit'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between font-black text-sm text-gray-900 pt-1 border-t border-gray-100">
+                    <span>Final Applicable Price ({resolved.quantity} {unitSuffix}):</span>
+                    <div className="flex items-center gap-2">
+                      {resolved.savings > 0 && (
+                        <span className="text-xs text-gray-400 line-through font-semibold">
+                          ₹{resolved.regular_total}
+                        </span>
+                      )}
+                      <span className="text-emerald-700 text-base">₹{resolved.line_total}</span>
+                    </div>
+                  </div>
+
+                  {resolved.savings > 0 && (
+                    <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg px-2.5 py-1.5 text-[11px] font-extrabold flex items-center justify-between">
+                      <span>You save vs regular price:</span>
+                      <span>₹{resolved.savings} ({resolved.savings_percent}% OFF)</span>
+                    </div>
+                  )}
+
+                  {resolved.next_slab_hint && resolved.valid && (
+                    <div className="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1">
+                      💡 {resolved.next_slab_hint}
+                    </div>
+                  )}
+
+                  {!resolved.valid && resolved.error && (
+                    <div className="text-[11px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{resolved.error}</span>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={!resolved.valid}
+                  onClick={() => {
+                    if (!resolved.valid) return;
+                    if (existingInCart) {
+                      onUpdateCartQty(selectedProduct.id, resolved.quantity);
+                      showCartNotice(`Updated ${selectedProduct.name} quantity to ${resolved.quantity} ${unitSuffix}`);
+                    } else {
+                      onAddToCart(selectedProduct, resolved.quantity);
+                      showCartNotice(`Added ${resolved.quantity} ${unitSuffix} of ${selectedProduct.name} to cart`);
+                    }
+                    setSelectedProduct(null);
+                  }}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-sm transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  <ShoppingCart className="w-4 h-4" />
+                  <span>
+                    {existingInCart
+                      ? `Update Cart Qty (${resolved.quantity} ${unitSuffix}) • ₹${resolved.line_total}`
+                      : `Add ${resolved.quantity} ${unitSuffix} to Cart • ₹${resolved.line_total}`}
+                  </span>
+                </button>
+              </div>
 
             {/* Customer Reviews Section */}
             <div className="space-y-3 pt-2 border-t border-gray-100">
@@ -1390,7 +1841,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* ======================================================== */}
       {/* CART & CHECKOUT DRAWER */}
@@ -1399,7 +1851,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex justify-end">
           <div className="bg-white w-full max-w-md h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-200">
             {/* Drawer Header */}
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between bg-emerald-50">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between bg-emerald-50 shrink-0">
               <div className="flex items-center gap-2">
                 <ShoppingCart className="w-5 h-5 text-emerald-700" />
                 <h3 className="font-extrabold text-gray-900 text-base">My Grocery Cart</h3>
@@ -1409,14 +1861,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               </div>
               <button
                 onClick={onCloseCart}
-                className="text-gray-500 hover:text-gray-700 p-1 rounded-xl"
+                className="text-gray-500 hover:text-gray-700 p-1 rounded-xl cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Cart Items List */}
-            <div className="flex-1 overflow-y-auto p-4 divide-y divide-gray-100">
+            {/* Scrollable Body (Cart Items + Map Pin + Checkout Details + Zomato-Style Bill) */}
+            <div className="flex-1 overflow-y-auto">
               {cart.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-3">
                   <ShoppingBag className="w-16 h-16 text-gray-300" />
@@ -1426,299 +1878,492 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </p>
                   <button
                     onClick={onCloseCart}
-                    className="mt-2 bg-emerald-600 text-white font-bold px-5 py-2 rounded-xl text-xs hover:bg-emerald-700 transition"
+                    className="mt-2 bg-emerald-600 text-white font-bold px-5 py-2 rounded-xl text-xs hover:bg-emerald-700 transition cursor-pointer"
                   >
                     Start Shopping
                   </button>
                 </div>
               ) : (
-                cart.map((item, idx) => (
-                  <div key={item.product?.id || `cart-${idx}`} className="py-3 flex items-center gap-3 text-xs">
-                    <img
-                      src={item.product.image_url}
-                      alt={item.product.name}
-                      className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-bold text-gray-900 truncate">{item.product.name}</div>
-                      <div className="text-gray-500 text-[11px]">{item.product.unit}</div>
-                      <div className="font-extrabold text-emerald-700 mt-0.5">
-                        ₹{item.product.price} × {item.quantity} = ₹{Number(item.product.price) * item.quantity}
+                <>
+                  {/* Cart Items List (With Dynamic Slab Pricing & Direct Qty Input) */}
+                  <div className="p-4 divide-y divide-gray-100">
+                    {cart.map((item, idx) => {
+                      const pType = normalizeProductType(item.product.product_type, item.product.unit);
+                      const unitSuffix = pType === 'loose' ? 'kg' : 'u';
+                      const qItem = cartQuoteMap[item.product.id] || resolveProductQuantityPricing(item.product, item.quantity);
+                      const stepSize = pType === 'loose' && (item.product.min_order_qty || 1) < 1 ? 0.5 : 1;
+
+                      return (
+                        <div key={item.product?.id || `cart-${idx}`} className="py-3 space-y-1.5 text-xs">
+                          <div className="flex items-start gap-3">
+                            <img
+                              src={item.product.image_url}
+                              alt={item.product.name}
+                              className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="font-bold text-gray-900 truncate">{item.product.name}</div>
+                              <div className="text-gray-500 text-[11px] flex items-center gap-1.5 flex-wrap">
+                                <span>{item.product.unit}</span>
+                                {qItem.applied_slab_label && (
+                                  <span className="bg-emerald-100 text-emerald-800 text-[9px] font-extrabold px-1.5 py-0.2 rounded">
+                                    Slab: {qItem.applied_slab_label}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                <span className="font-extrabold text-emerald-700">
+                                  ₹{qItem.applied_unit_price} × {item.quantity}{pType === 'loose' ? 'kg' : ''} = ₹{qItem.line_total}
+                                </span>
+                                {qItem.savings > 0 && (
+                                  <>
+                                    <span className="text-[10px] text-gray-400 line-through">
+                                      ₹{qItem.regular_total}
+                                    </span>
+                                    <span className="text-[10px] font-extrabold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded">
+                                      Saved ₹{qItem.savings}
+                                    </span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Stepper with editable qty input */}
+                            <div className="flex items-center bg-gray-100 rounded-xl overflow-hidden font-bold shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => onUpdateCartQty(item.product.id, item.quantity - stepSize)}
+                                className="px-2 py-1.5 hover:bg-gray-200 transition cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <input
+                                type="number"
+                                min={pType === 'loose' ? '0.1' : '1'}
+                                step={pType === 'loose' ? '0.5' : '1'}
+                                value={item.quantity}
+                                onChange={e => {
+                                  const v = Number(e.target.value);
+                                  if (Number.isFinite(v) && v > 0) {
+                                    onUpdateCartQty(item.product.id, v);
+                                  }
+                                }}
+                                aria-label={`Quantity for ${item.product.name}`}
+                                className="w-11 text-center bg-transparent text-xs font-black outline-hidden"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => onUpdateCartQty(item.product.id, item.quantity + stepSize)}
+                                className="px-2 py-1.5 hover:bg-gray-200 transition cursor-pointer"
+                              >
+                                +
+                              </button>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => onRemoveFromCart(item.product.id)}
+                              className="text-gray-400 hover:text-red-500 p-1 cursor-pointer shrink-0"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          {qItem.next_slab_hint && qItem.valid && (
+                            <div className="text-[10px] text-amber-800 bg-amber-50/70 px-2.5 py-1 rounded-lg font-semibold">
+                              💡 {qItem.next_slab_hint}
+                            </div>
+                          )}
+
+                          {!qItem.valid && qItem.error && (
+                            <div className="text-[10px] text-red-700 bg-red-50 border border-red-200 px-2.5 py-1 rounded-lg font-bold flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3 shrink-0" />
+                              <span>{qItem.error}</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Checkout Form Section */}
+                  <div className="border-t border-gray-200 p-4 bg-gray-50 space-y-3">
+                    {/* Delivery Preference */}
+                    <div className="space-y-1 text-xs">
+                      <div className="font-bold text-gray-900 text-[11px]">Select Delivery Timing:</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setDeliveryType('immediate')}
+                          className={`p-2 rounded-xl text-left border text-xs font-bold transition cursor-pointer ${
+                            deliveryType === 'immediate'
+                              ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                              : 'bg-white text-gray-700 border-gray-200'
+                          }`}
+                        >
+                          ⚡ Immediate (30-45m)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeliveryType('scheduled')}
+                          className={`p-2 rounded-xl text-left border text-xs font-bold transition cursor-pointer ${
+                            deliveryType === 'scheduled'
+                              ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                              : 'bg-white text-gray-700 border-gray-200'
+                          }`}
+                        >
+                          📅 Schedule a Slot
+                        </button>
+                      </div>
+
+                      {deliveryType === 'scheduled' && (
+                        <div className="space-y-1.5 pt-1">
+                          <select
+                            value={scheduledDate}
+                            onChange={e => setScheduledDate(e.target.value)}
+                            className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
+                          >
+                            {next7Days.map((d, i) => (
+                              <option key={i} value={d}>
+                                {d}
+                              </option>
+                            ))}
+                          </select>
+
+                          <select
+                            value={scheduledSlot}
+                            onChange={e => setScheduledSlot(e.target.value)}
+                            className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
+                          >
+                            {availableSlotOptions.map((s, i) => (
+                              <option key={i} value={s}>
+                                {s}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Interactive OpenStreetMap Pin Picker */}
+                    <div className="bg-white border border-emerald-200 rounded-2xl p-3 space-y-2 shadow-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="font-extrabold text-gray-900 text-xs">
+                              Pin Delivery Location (OpenStreetMap)
+                            </div>
+                            <div className="text-[10px] text-gray-500 truncate">
+                              {quoteLoading
+                                ? 'Calculating road distance via OSRM...'
+                                : deliveryQuote
+                                ? `${deliveryQuote.distance_km} km from Central Warehouse`
+                                : `${customerLat.toFixed(4)}, ${customerLng.toFixed(4)}`}
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowMapPicker(!showMapPicker)}
+                          className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 px-2 py-1 rounded-lg bg-emerald-50 shrink-0 cursor-pointer"
+                        >
+                          {showMapPicker ? 'Hide Map' : 'Adjust Pin'}
+                        </button>
+                      </div>
+
+                      {showMapPicker && (
+                        <OsmMapPicker
+                          lat={customerLat}
+                          lng={customerLng}
+                          warehouseLat={deliverySettings?.warehouse_lat ?? 20.4839}
+                          warehouseLng={deliverySettings?.warehouse_lng ?? 77.4877}
+                          warehouseLabel="FMP Warehouse"
+                          pinLabel="Your Location"
+                          pinColor="emerald"
+                          heightClass="h-44"
+                          onChange={(newLat, newLng, displayAddress) => {
+                            setHasUserMovedPin(true);
+                            setCustomerLat(newLat);
+                            setCustomerLng(newLng);
+                            if (
+                              displayAddress &&
+                              (!deliveryAddress.trim() || deliveryAddress.trim() === 'Karanja Lad, Maharashtra')
+                            ) {
+                              setDeliveryAddress(displayAddress.split(',').slice(0, 3).join(', '));
+                            }
+                          }}
+                        />
+                      )}
+                    </div>
+
+                    {/* Delivery Address fields */}
+                    <div className="space-y-2 text-xs">
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Customer Name</label>
+                        <input
+                          type="text"
+                          required
+                          value={customerName}
+                          onChange={e => setCustomerName(e.target.value)}
+                          placeholder="Your full name"
+                          className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Mobile Number</label>
+                          <input
+                            type="tel"
+                            required
+                            value={customerPhone}
+                            onChange={e => setCustomerPhone(e.target.value)}
+                            placeholder="10-digit mobile"
+                            className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Landmark</label>
+                          <input
+                            type="text"
+                            value={landmark}
+                            onChange={e => setLandmark(e.target.value)}
+                            placeholder="e.g. Area or Landmark in Karanja Lad"
+                            className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-gray-600 mb-0.5">
+                          Delivery Address in Karanja Lad
+                        </label>
+                        <textarea
+                          rows={2}
+                          required
+                          value={deliveryAddress}
+                          onChange={e => setDeliveryAddress(e.target.value)}
+                          placeholder="House/Plot no., Street name, Karanja Lad (444105)"
+                          className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
+                        />
                       </div>
                     </div>
 
-                    {/* Stepper */}
-                    <div className="flex items-center bg-gray-100 rounded-xl overflow-hidden font-bold">
-                      <button
-                        onClick={() => onUpdateCartQty(item.product.id, item.quantity - 1)}
-                        className="px-2 py-1 hover:bg-gray-200 transition"
-                      >
-                        -
-                      </button>
-                      <span className="px-2">{item.quantity}</span>
-                      <button
-                        onClick={() => onUpdateCartQty(item.product.id, item.quantity + 1)}
-                        className="px-2 py-1 hover:bg-gray-200 transition"
-                      >
-                        +
-                      </button>
-                    </div>
+                    {/* Delivery Partner Tip Selection */}
+                    <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3 space-y-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 font-bold text-amber-900 text-xs">
+                          <Heart className="w-4 h-4 text-red-500 fill-red-500" />
+                          <span>Delivery Partner Tip</span>
+                        </div>
+                        {tipAmount > 0 && (
+                          <span className="text-[10px] font-black text-amber-800 bg-amber-200/60 px-2 py-0.5 rounded-full">
+                            +₹{tipAmount} Added
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-amber-800 leading-snug">
+                        Say thanks to your Karanja Lad delivery partner. 100% of this tip goes directly to them.
+                      </p>
 
-                    <button
-                      onClick={() => onRemoveFromCart(item.product.id)}
-                      className="text-gray-400 hover:text-red-500 p-1"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                        {[
+                          { label: 'No Tip', value: 0 },
+                          { label: '₹10', value: 10 },
+                          { label: '₹20', value: 20 },
+                          { label: '₹30', value: 30 },
+                          { label: '₹50', value: 50 },
+                        ].map(opt => {
+                          const isSelected = !isCustomTip && tipAmount === opt.value;
+                          return (
+                            <button
+                              type="button"
+                              key={opt.label}
+                              onClick={() => {
+                                setIsCustomTip(false);
+                                setTipAmount(opt.value);
+                                setCustomTip('');
+                              }}
+                              className={`px-2.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer border ${
+                                isSelected
+                                  ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                                  : 'bg-white text-gray-700 border-gray-200 hover:bg-amber-50'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
 
-            {/* Checkout Section */}
-            {cart.length > 0 && (
-              <div className="border-t border-gray-200 p-4 bg-gray-50 space-y-3">
-                {/* Delivery Preference */}
-                <div className="space-y-1 text-xs">
-                  <div className="font-bold text-gray-900 text-[11px]">Select Delivery Timing:</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setDeliveryType('immediate')}
-                      className={`p-2 rounded-xl text-left border text-xs font-bold transition cursor-pointer ${
-                        deliveryType === 'immediate'
-                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
-                          : 'bg-white text-gray-700 border-gray-200'
-                      }`}
-                    >
-                      ⚡ Immediate (30-45m)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDeliveryType('scheduled')}
-                      className={`p-2 rounded-xl text-left border text-xs font-bold transition cursor-pointer ${
-                        deliveryType === 'scheduled'
-                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
-                          : 'bg-white text-gray-700 border-gray-200'
-                      }`}
-                    >
-                      📅 Schedule a Slot
-                    </button>
-                  </div>
-
-                  {deliveryType === 'scheduled' && (
-                    <div className="space-y-1.5 pt-1">
-                      <select
-                        value={scheduledDate}
-                        onChange={e => setScheduledDate(e.target.value)}
-                        className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
-                      >
-                        {next7Days.map((d, i) => (
-                          <option key={i} value={d}>
-                            {d}
-                          </option>
-                        ))}
-                      </select>
-
-                      <select
-                        value={scheduledSlot}
-                        onChange={e => setScheduledSlot(e.target.value)}
-                        className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
-                      >
-                        {availableSlotOptions.map((s, i) => (
-                          <option key={i} value={s}>
-                            {s}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                </div>
-
-                {/* Delivery Address fields */}
-                <div className="space-y-2 text-xs">
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Customer Name</label>
-                    <input
-                      type="text"
-                      required
-                      value={customerName}
-                      onChange={e => setCustomerName(e.target.value)}
-                      placeholder="Your full name"
-                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Mobile Number</label>
-                      <input
-                        type="tel"
-                        required
-                        value={customerPhone}
-                        onChange={e => setCustomerPhone(e.target.value)}
-                        placeholder="10-digit mobile"
-                        className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Landmark</label>
-                      <input
-                        type="text"
-                        value={landmark}
-                        onChange={e => setLandmark(e.target.value)}
-                        placeholder="e.g. Area or Landmark in Karanja Lad"
-                        className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-600 mb-0.5">
-                      Delivery Address in Karanja Lad
-                    </label>
-                    <textarea
-                      rows={2}
-                      required
-                      value={deliveryAddress}
-                      onChange={e => setDeliveryAddress(e.target.value)}
-                      placeholder="House/Plot no., Street name, Karanja Lad (444105)"
-                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
-                    />
-                  </div>
-                </div>
-
-                {/* Delivery Partner Tip Selection */}
-                <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3 space-y-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 font-bold text-amber-900 text-xs">
-                      <Heart className="w-4 h-4 text-red-500 fill-red-500" />
-                      <span>Delivery Partner Tip</span>
-                    </div>
-                    {tipAmount > 0 && (
-                      <span className="text-[10px] font-black text-amber-800 bg-amber-200/60 px-2 py-0.5 rounded-full">
-                        +₹{tipAmount} Added
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-amber-800 leading-snug">
-                    Say thanks to your Karanja Lad delivery partner. 100% of this tip goes directly to them.
-                  </p>
-
-                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                    {[
-                      { label: 'No Tip', value: 0 },
-                      { label: '₹10', value: 10 },
-                      { label: '₹20', value: 20 },
-                      { label: '₹30', value: 30 },
-                      { label: '₹50', value: 50 },
-                    ].map(opt => {
-                      const isSelected = !isCustomTip && tipAmount === opt.value;
-                      return (
                         <button
                           type="button"
-                          key={opt.label}
                           onClick={() => {
-                            setIsCustomTip(false);
-                            setTipAmount(opt.value);
-                            setCustomTip('');
+                            setIsCustomTip(true);
                           }}
                           className={`px-2.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer border ${
-                            isSelected
+                            isCustomTip
                               ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
                               : 'bg-white text-gray-700 border-gray-200 hover:bg-amber-50'
                           }`}
                         >
-                          {opt.label}
+                          Custom
                         </button>
-                      );
-                    })}
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCustomTip(true);
-                      }}
-                      className={`px-2.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer border ${
-                        isCustomTip
-                          ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                          : 'bg-white text-gray-700 border-gray-200 hover:bg-amber-50'
-                      }`}
-                    >
-                      Custom
-                    </button>
-                  </div>
-
-                  {isCustomTip && (
-                    <div className="flex items-center gap-2 pt-1">
-                      <div className="relative flex-1">
-                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 font-bold">₹</span>
-                        <input
-                          type="number"
-                          min="0"
-                          max="500"
-                          value={customTip}
-                          onChange={e => {
-                            const val = e.target.value.replace(/\D/g, '');
-                            setCustomTip(val);
-                            setTipAmount(Math.max(0, parseInt(val, 10) || 0));
-                          }}
-                          placeholder="Enter tip (e.g. 25)"
-                          className="w-full pl-6 pr-2 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold text-gray-900 outline-hidden focus:ring-1 focus:ring-amber-500"
-                        />
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsCustomTip(false);
-                          setTipAmount(0);
-                          setCustomTip('');
-                        }}
-                        className="text-[11px] text-gray-500 hover:text-gray-800 font-semibold px-2 py-1 cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  )}
-                </div>
 
-                {/* Delivery Charge Calculation & Bill Breakdown (Admin Controlled) */}
-                <div className="p-3.5 bg-white rounded-2xl border border-gray-200 text-xs space-y-2 shadow-xs">
-                  <div className="flex justify-between text-gray-600">
-                    <span>Items Subtotal:</span>
-                    <span className="font-semibold text-gray-900">₹{cartSubtotal}</span>
-                  </div>
-                  <div className="flex justify-between text-gray-600">
-                    <span>Delivery Charge:</span>
-                    <span>
-                      {deliveryCharge === 0 ? (
-                        <span className="text-emerald-700 font-bold">FREE Delivery</span>
-                      ) : (
-                        <span className="text-gray-900 font-semibold">₹{deliveryCharge}</span>
+                      {isCustomTip && (
+                        <div className="flex items-center gap-2 pt-1">
+                          <div className="relative flex-1">
+                            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 font-bold">₹</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="500"
+                              value={customTip}
+                              onChange={e => {
+                                const val = e.target.value.replace(/\D/g, '');
+                                setCustomTip(val);
+                                setTipAmount(Math.max(0, parseInt(val, 10) || 0));
+                              }}
+                              placeholder="Enter tip (e.g. 25)"
+                              className="w-full pl-6 pr-2 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold text-gray-900 outline-hidden focus:ring-1 focus:ring-amber-500"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsCustomTip(false);
+                              setTipAmount(0);
+                              setCustomTip('');
+                            }}
+                            className="text-[11px] text-gray-500 hover:text-gray-800 font-semibold px-2 py-1 cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       )}
+                    </div>
+
+                    {/* Zomato-Style Bill Summary Breakdown (Backend Distance & Fee Calculated) */}
+                    <div className="p-3.5 bg-white rounded-2xl border border-gray-200 text-xs space-y-2 shadow-xs">
+                      <div className="flex items-center justify-between pb-2 border-b border-gray-100">
+                        <span className="font-extrabold text-gray-900 flex items-center gap-1.5">
+                          <Truck className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Bill Summary</span>
+                        </span>
+                        {quoteLoading ? (
+                          <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                            Calculating route...
+                          </span>
+                        ) : deliveryQuote ? (
+                          <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                            {deliveryQuote.distance_km} km • ~{deliveryQuote.duration_mins} mins
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {deliveryQuote && (
+                        <div className="flex justify-between items-center text-[11px] text-gray-500">
+                          <span>Warehouse to Pin Road Distance:</span>
+                          <span className="font-bold text-gray-800">
+                            {deliveryQuote.distance_km} km ({deliveryQuote.distance_source === 'osrm' ? 'OSRM Road' : 'Estimated'})
+                          </span>
+                        </div>
+                      )}
+
+                      {cartTotalSavings > 0 && (
+                        <>
+                          <div className="flex justify-between text-gray-500 text-[11px]">
+                            <span>Regular Items Total:</span>
+                            <span className="line-through">₹{regularCartSubtotal}</span>
+                          </div>
+                          <div className="flex justify-between text-emerald-700 font-bold text-[11px]">
+                            <span>Wholesale Quantity Savings:</span>
+                            <span>-₹{cartTotalSavings}</span>
+                          </div>
+                        </>
+                      )}
+
+                      <div className="flex justify-between text-gray-600">
+                        <span>Final Items Subtotal {cartQuoteLoading ? '(updating...)' : ''}:</span>
+                        <span className="font-semibold text-gray-900">₹{cartSubtotal}</span>
+                      </div>
+
+                      <div className="flex justify-between items-start text-gray-600 gap-2">
+                        <div>
+                          <div>Delivery Charge:</div>
+                          {deliveryQuote?.matched_slab_label && (
+                            <div className="text-[10px] text-gray-400">{deliveryQuote.matched_slab_label}</div>
+                          )}
+                        </div>
+                        <span className="shrink-0">
+                          {quoteLoading ? (
+                            <span className="text-gray-400 font-medium">Calculating...</span>
+                          ) : deliveryQuote && !deliveryQuote.deliverable ? (
+                            <span className="text-red-600 font-bold">Unavailable</span>
+                          ) : deliveryCharge === 0 ? (
+                            <span className="text-emerald-700 font-bold">FREE</span>
+                          ) : (
+                            <span className="text-gray-900 font-semibold">₹{deliveryCharge}</span>
+                          )}
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between text-gray-600">
+                        <span>Handling Fee:</span>
+                        <span className="text-gray-900 font-semibold">₹{handlingCharge}</span>
+                      </div>
+
+                      {tipAmount > 0 && (
+                        <div className="flex justify-between text-amber-800 font-semibold">
+                          <span className="flex items-center gap-1">
+                            <Heart className="w-3.5 h-3.5 text-red-500 fill-red-500" />
+                            <span>Delivery Partner Tip:</span>
+                          </span>
+                          <span>₹{tipAmount}</span>
+                        </div>
+                      )}
+
+                      <div className="flex justify-between font-black text-gray-900 text-sm pt-2 border-t border-gray-100">
+                        <span>Final COD Amount:</span>
+                        <span className="text-emerald-700 text-base">₹{totalAmount}</span>
+                      </div>
+
+                      <div className="text-[10px] text-gray-400 font-medium pt-0.5">
+                        • Calculated securely on server • Pay cash upon delivery
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Sticky Checkout Footer */}
+            {cart.length > 0 && (
+              <div className="border-t border-gray-200 p-4 bg-white space-y-2.5 shrink-0">
+                {hasCartPricingError && (
+                  <div className="text-xs text-red-700 bg-red-50 p-2.5 rounded-xl border border-red-200 flex items-start gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                    <span>{cartValidationErrors[0] || 'Please fix item stock or quantity limits in cart.'}</span>
+                  </div>
+                )}
+
+                {deliveryQuote && !deliveryQuote.deliverable && (
+                  <div className="text-xs text-red-700 bg-red-50 p-2.5 rounded-xl border border-red-200 flex items-start gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                    <span>
+                      {deliveryQuote.reason ||
+                        `Your pinned location (${deliveryQuote.distance_km} km) is outside our ${deliveryQuote.max_delivery_distance_km} km delivery zone. Move the map pin closer to Karanja Lad.`}
                     </span>
                   </div>
-                  <div className="flex justify-between text-gray-600">
-                    <span>Handling Fee:</span>
-                    <span className="text-gray-900 font-semibold">₹{handlingCharge}</span>
+                )}
+
+                {quoteError && (
+                  <div className="text-xs text-amber-800 bg-amber-50 p-2.5 rounded-xl border border-amber-200">
+                    {quoteError}
                   </div>
-                  {tipAmount > 0 && (
-                    <div className="flex justify-between text-amber-800 font-semibold">
-                      <span className="flex items-center gap-1">
-                        <Heart className="w-3.5 h-3.5 text-red-500 fill-red-500" />
-                        <span>Delivery Partner Tip:</span>
-                      </span>
-                      <span>₹{tipAmount}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between font-black text-gray-900 text-sm pt-2 border-t border-gray-100">
-                    <span>Total Cash on Delivery:</span>
-                    <span className="text-emerald-700 text-base">₹{totalAmount}</span>
-                  </div>
-                  <div className="text-[10px] text-gray-400 font-medium pt-0.5">
-                    • Central warehouse dispatch • Pay cash to delivery partner
-                  </div>
-                </div>
+                )}
 
                 {checkoutError && (
                   <div className="text-xs text-red-600 bg-red-50 p-2.5 rounded-xl border border-red-200">
@@ -1728,10 +2373,26 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                 <button
                   onClick={handleCheckoutSubmit}
-                  disabled={checkoutSubmitting}
-                  className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  disabled={
+                    checkoutSubmitting ||
+                    quoteLoading ||
+                    cartQuoteLoading ||
+                    hasCartPricingError ||
+                    (deliveryQuote !== null && !deliveryQuote.deliverable)
+                  }
+                  className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <span>{checkoutSubmitting ? 'Placing Order...' : `Place COD Order (₹${totalAmount})`}</span>
+                  <span>
+                    {checkoutSubmitting
+                      ? 'Placing Order...'
+                      : hasCartPricingError
+                      ? 'Fix Quantity / Stock Errors'
+                      : cartQuoteLoading || quoteLoading
+                      ? 'Calculating Prices & Delivery...'
+                      : deliveryQuote && !deliveryQuote.deliverable
+                      ? 'Outside Delivery Zone'
+                      : `Place COD Order (₹${totalAmount})`}
+                  </span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
@@ -1810,10 +2471,20 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         </span>
                       </div>
 
-                      {/* Scheduled slot info */}
-                      <div className="text-[11px] text-gray-600 bg-white p-2.5 rounded-xl border border-gray-100">
-                        <span className="font-bold">Delivery Slot: </span>
-                        <span>{order.time_slot || 'Express Delivery'}</span>
+                      {/* Scheduled slot & saved road distance info */}
+                      <div className="text-[11px] text-gray-600 bg-white p-2.5 rounded-xl border border-gray-100 space-y-1">
+                        <div>
+                          <span className="font-bold">Delivery Slot: </span>
+                          <span>{order.time_slot || 'Express Delivery'}</span>
+                        </div>
+                        {typeof order.distance_km === 'number' && (
+                          <div className="flex items-center justify-between text-[10px] text-emerald-800 font-semibold pt-0.5 border-t border-gray-100">
+                            <span>📍 Road Distance: {order.distance_km} km</span>
+                            <span>
+                              Delivery Fee: {order.delivery_fee === 0 ? 'FREE' : `₹${order.delivery_fee}`}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       {/* CUSTOMER-ONLY DELIVERY OTP CARD */}
@@ -1844,11 +2515,45 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         </div>
                       )}
 
+                      {/* Ordered Items Snapshot (Historical Applied Slab Prices) */}
+                      {order.items && order.items.length > 0 && (
+                        <div className="bg-white p-2.5 rounded-xl border border-gray-100 space-y-1 text-[11px]">
+                          {order.items.map((oi, oIdx) => (
+                            <div key={oi.id || `oi-${oIdx}`} className="flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <span className="font-bold text-gray-800">{oi.product_name}</span>
+                                <span className="text-gray-500 ml-1">
+                                  ({oi.quantity}{oi.product_type === 'loose' ? ' kg' : ' u'} × ₹{oi.price})
+                                </span>
+                                {oi.applied_slab_label && (
+                                  <span className="ml-1 text-[9px] bg-emerald-100 text-emerald-800 px-1 py-0.2 rounded font-bold">
+                                    {oi.applied_slab_label}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="font-bold text-gray-900 shrink-0">
+                                ₹{oi.total}
+                                {Number(oi.savings || 0) > 0 && (
+                                  <span className="ml-1 text-[9px] text-emerald-700 font-bold">
+                                    (Saved ₹{oi.savings})
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       {/* Summary and Cancel action */}
                       <div className="flex items-center justify-between pt-2 border-t border-gray-100 text-xs">
                         <div>
                           <span className="text-gray-500">COD Total: </span>
                           <span className="font-black text-gray-900 text-sm">₹{order.total_amount}</span>
+                          {Number(order.total_savings || 0) > 0 && (
+                            <span className="block text-[10px] text-emerald-700 font-bold">
+                              Wholesale Slab Savings: ₹{order.total_savings}
+                            </span>
+                          )}
                           {Number(order.tip_amount) > 0 && (
                             <span className="block text-[10px] text-amber-700 font-semibold">
                               (Includes ₹{order.tip_amount} tip for delivery partner 💖)

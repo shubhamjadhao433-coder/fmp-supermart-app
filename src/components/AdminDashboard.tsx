@@ -28,16 +28,25 @@ import {
   Settings,
   UserCheck,
   ClipboardList,
-  Bell
+  Bell,
+  Navigation,
+  Building2,
+  Percent
 } from 'lucide-react';
 import {
   AdminStats,
   Order,
   Product,
   Category,
-  User
+  User,
+  Supplier,
+  DeliverySettings,
+  DeliverySlab,
+  ProductPriceSlab
 } from '../types.ts';
 import { api } from '../services/api.ts';
+import { normalizeProductType } from '../shared/quantityPricing.ts';
+import { OsmMapPicker } from './OsmMapPicker.tsx';
 
 interface AdminDashboardProps {
   currentUser?: User | null;
@@ -93,16 +102,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [stockAdjustProduct, setStockAdjustProduct] = useState<Product | null>(null);
   const [newStockValue, setNewStockValue] = useState<number>(0);
 
-  // Product Form state
+  // Product Form state (includes wholesale cost, margin, and private supplier details)
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [productForm, setProductForm] = useState({
     name: '',
     category_id: 1,
     unit: '1 kg',
     price: '',
     mrp: '',
+    purchase_cost: '',
     stock: '50',
     image_url: '',
-    description: ''
+    description: '',
+    supplier_id: '',
+    supplier_name: '',
+    supplier_phone: '',
+    supplier_address: '',
+    product_type: 'packaged' as 'loose' | 'packaged',
+    min_order_qty: '1',
+    max_order_qty: '',
+    pricing_slabs: [] as Array<{ id: string; min_qty: string; max_qty: string; price_per_unit: string }>
   });
 
   // Tab 3: Rider Cash Settlement state
@@ -118,7 +137,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [submittingRider, setSubmittingRider] = useState<boolean>(false);
 
   // Tab 5: Delivery Settings & Slots
-  const [deliverySettings, setDeliverySettings] = useState<any>({ default_delivery_fee: 25, handling_fee: 5, min_order_amount: 0 });
+  const defaultSlabs: DeliverySlab[] = [
+    { id: 'slab-1', min_km: 0, max_km: 2, charge_type: 'free', charge: 0, label: '0–2 km' },
+    { id: 'slab-2', min_km: 2, max_km: 4, charge_type: 'fixed', charge: 10, label: '2–4 km' },
+    { id: 'slab-3', min_km: 4, max_km: 6, charge_type: 'fixed', charge: 20, label: '4–6 km' },
+    { id: 'slab-4', min_km: 6, max_km: 8, charge_type: 'fixed', charge: 30, label: '6–8 km' }
+  ];
+  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>({
+    default_delivery_fee: 0,
+    handling_fee: 5,
+    min_order_amount: 0,
+    warehouse_lat: 20.4839,
+    warehouse_lng: 77.4877,
+    warehouse_address: 'FMP Supermart Central Hub, Shivaji Chowk, Karanja Lad 444105',
+    delivery_pricing_mode: 'slabs',
+    per_km_rate: 8,
+    free_delivery_up_to_km: 0,
+    max_delivery_distance_km: 8,
+    delivery_slabs: defaultSlabs
+  });
   const [deliverySlots, setDeliverySlots] = useState<any[]>([]);
   const [savingSettings, setSavingSettings] = useState<boolean>(false);
   const [isAddSlotOpen, setIsAddSlotOpen] = useState<boolean>(false);
@@ -134,10 +171,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const loadAdminData = async () => {
     setLoading(true);
     try {
-      const [statsData, ordersData, prodsData, catsData, ridersData, auditData, feeSettings, slotsData, reviewsData, reportsData, notifsData] = await Promise.all([
+      const [statsData, ordersData, prodsData, catsData, ridersData, auditData, feeSettings, slotsData, reviewsData, reportsData, notifsData, suppliersData] = await Promise.all([
         api.getAdminStats(),
         api.getOrders(),
-        api.getProducts(),
+        api.getAdminProducts(),
         api.getCategories(),
         api.getAdminRiders(),
         api.getAdminAuditLogs().catch(() => []),
@@ -145,7 +182,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         api.getDeliverySlots().catch(() => []),
         api.getAdminReviews().catch(() => []),
         api.getAdminReports().catch(() => ({ categorySales: [], inventoryLogs: [] })),
-        api.getNotifications().catch(() => [])
+        api.getNotifications().catch(() => []),
+        api.getSuppliers().catch(() => [])
       ]);
       setStats(statsData);
       setOrders(ordersData);
@@ -154,7 +192,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setRiders(ridersData);
       setAuditLogs(auditData);
       setNotifications(notifsData);
-      if (feeSettings) setDeliverySettings(feeSettings);
+      setSuppliers(suppliersData);
+      if (feeSettings) {
+        setDeliverySettings({
+          ...feeSettings,
+          warehouse_lat: Number(feeSettings.warehouse_lat ?? 20.4839),
+          warehouse_lng: Number(feeSettings.warehouse_lng ?? 77.4877),
+          warehouse_address: feeSettings.warehouse_address || 'FMP Supermart Central Hub, Shivaji Chowk, Karanja Lad 444105',
+          delivery_pricing_mode: feeSettings.delivery_pricing_mode === 'per_km' ? 'per_km' : 'slabs',
+          per_km_rate: Number(feeSettings.per_km_rate ?? 8),
+          free_delivery_up_to_km: Number(feeSettings.free_delivery_up_to_km ?? 0),
+          max_delivery_distance_km: Number(feeSettings.max_delivery_distance_km ?? 8),
+          delivery_slabs: Array.isArray(feeSettings.delivery_slabs) && feeSettings.delivery_slabs.length > 0 ? feeSettings.delivery_slabs : defaultSlabs
+        });
+      }
       if (slotsData) setDeliverySlots(slotsData);
       if (reviewsData) setReviews(reviewsData);
       if (reportsData?.inventoryLogs) setInventoryLogs(reportsData.inventoryLogs);
@@ -248,24 +299,125 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     });
   };
 
+  // Quantity Slab Helpers inside Product Form
+  const handleAddProductSlab = () => {
+    setProductForm(prev => {
+      const existing = prev.pricing_slabs;
+      const last = existing[existing.length - 1];
+      let nextMin = '1';
+      if (last) {
+        const lastMaxNum = Number(last.max_qty);
+        const lastMinNum = Number(last.min_qty);
+        if (last.max_qty && Number.isFinite(lastMaxNum)) {
+          nextMin = String(lastMaxNum + 1);
+        } else if (Number.isFinite(lastMinNum)) {
+          nextMin = String(lastMinNum + 5);
+        }
+      }
+      return {
+        ...prev,
+        pricing_slabs: [
+          ...existing,
+          {
+            id: `slab-${Date.now()}-${existing.length + 1}`,
+            min_qty: nextMin,
+            max_qty: '',
+            price_per_unit: prev.price || ''
+          }
+        ]
+      };
+    });
+  };
+
+  const handleUpdateProductSlab = (
+    idx: number,
+    patch: Partial<{ min_qty: string; max_qty: string; price_per_unit: string }>
+  ) => {
+    setProductForm(prev => ({
+      ...prev,
+      pricing_slabs: prev.pricing_slabs.map((s, i) => (i === idx ? { ...s, ...patch } : s))
+    }));
+  };
+
+  const handleRemoveProductSlab = (idx: number) => {
+    setProductForm(prev => ({
+      ...prev,
+      pricing_slabs: prev.pricing_slabs.filter((_, i) => i !== idx)
+    }));
+  };
+
+  const openEditProductModal = (product: Product) => {
+    const pType = normalizeProductType(product.product_type, product.unit);
+    setEditingProduct(product);
+    setProductForm({
+      name: product.name,
+      category_id: product.category_id,
+      unit: product.unit,
+      price: String(product.price),
+      mrp: String(product.mrp),
+      purchase_cost:
+        product.purchase_cost !== null && product.purchase_cost !== undefined
+          ? String(product.purchase_cost)
+          : '',
+      stock: String(product.stock),
+      image_url: product.image_url || '',
+      description: product.description || '',
+      supplier_id: product.supplier_id ? String(product.supplier_id) : '',
+      supplier_name: product.supplier_name || '',
+      supplier_phone: product.supplier_phone || '',
+      supplier_address: product.supplier_address || '',
+      product_type: pType,
+      min_order_qty: product.min_order_qty ? String(product.min_order_qty) : '1',
+      max_order_qty:
+        product.max_order_qty !== null && product.max_order_qty !== undefined
+          ? String(product.max_order_qty)
+          : '',
+      pricing_slabs: Array.isArray(product.pricing_slabs)
+        ? product.pricing_slabs.map((s, idx) => ({
+            id: s.id || `slab-${idx + 1}`,
+            min_qty: String(s.min_qty),
+            max_qty: s.max_qty !== null && s.max_qty !== undefined ? String(s.max_qty) : '',
+            price_per_unit: String(s.price_per_unit)
+          }))
+        : []
+    });
+    setIsAddProductOpen(true);
+  };
+
   // Product Actions
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const normalizedSlabs: ProductPriceSlab[] = productForm.pricing_slabs.map((s, idx) => ({
+        id: s.id || `qslab-${idx + 1}`,
+        min_qty: Number(s.min_qty),
+        max_qty: s.max_qty.trim() === '' ? null : Number(s.max_qty),
+        price_per_unit: Number(s.price_per_unit)
+      }));
+
       const payload = {
         name: productForm.name.trim(),
         category_id: Number(productForm.category_id),
         unit: productForm.unit.trim(),
         price: Number(productForm.price),
         mrp: Number(productForm.mrp || productForm.price),
+        purchase_cost: productForm.purchase_cost !== '' ? Number(productForm.purchase_cost) : null,
         stock: Number(productForm.stock),
         image_url: productForm.image_url || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=500&q=80',
-        description: productForm.description.trim()
+        description: productForm.description.trim(),
+        supplier_id: productForm.supplier_id ? Number(productForm.supplier_id) : null,
+        supplier_name: productForm.supplier_name.trim() || null,
+        supplier_phone: productForm.supplier_phone.trim() || null,
+        supplier_address: productForm.supplier_address.trim() || null,
+        product_type: productForm.product_type,
+        min_order_qty: Number(productForm.min_order_qty || 1),
+        max_order_qty: productForm.max_order_qty.trim() === '' ? null : Number(productForm.max_order_qty),
+        pricing_slabs: normalizedSlabs
       };
 
       if (editingProduct) {
         await api.updateProduct(editingProduct.id, payload);
-        showToast('Daily price and product details updated.');
+        showToast('Wholesale cost, quantity slabs & product details updated.');
       } else {
         await api.createProduct(payload);
         showToast('New product added to FMP Supermart catalog.');
@@ -279,9 +431,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         unit: '1 kg',
         price: '',
         mrp: '',
+        purchase_cost: '',
         stock: '50',
         image_url: '',
-        description: ''
+        description: '',
+        supplier_id: '',
+        supplier_name: '',
+        supplier_phone: '',
+        supplier_address: '',
+        product_type: 'packaged',
+        min_order_qty: '1',
+        max_order_qty: '',
+        pricing_slabs: []
       });
       loadAdminData();
     } catch (err: any) {
@@ -388,23 +549,75 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  // Settings: Save Delivery Charges
+  // Settings: Save Distance-Based Delivery & Warehouse Settings
   const handleSaveDeliverySettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingSettings(true);
     try {
       const res = await api.updateDeliverySettings({
-        default_delivery_fee: Number(deliverySettings.default_delivery_fee),
-        handling_fee: Number(deliverySettings.handling_fee),
-        min_order_amount: Number(deliverySettings.min_order_amount || 0)
+        default_delivery_fee: Number(deliverySettings.default_delivery_fee || 0),
+        handling_fee: Number(deliverySettings.handling_fee || 0),
+        min_order_amount: Number(deliverySettings.min_order_amount || 0),
+        warehouse_lat: Number(deliverySettings.warehouse_lat),
+        warehouse_lng: Number(deliverySettings.warehouse_lng),
+        warehouse_address: deliverySettings.warehouse_address,
+        delivery_pricing_mode: deliverySettings.delivery_pricing_mode,
+        per_km_rate: Number(deliverySettings.per_km_rate || 0),
+        free_delivery_up_to_km: Number(deliverySettings.free_delivery_up_to_km || 0),
+        max_delivery_distance_km: Number(deliverySettings.max_delivery_distance_km || 8),
+        delivery_slabs: deliverySettings.delivery_slabs
       });
-      showToast(res.message || 'Delivery settings updated successfully.');
+      showToast(res.message || 'Warehouse & distance delivery settings saved.');
       loadAdminData();
     } catch (err: any) {
       showToast(err.message || 'Failed to save delivery settings', 'error');
     } finally {
       setSavingSettings(false);
     }
+  };
+
+  const handleAddDeliverySlab = () => {
+    const slabs = deliverySettings.delivery_slabs || [];
+    const lastMax = slabs.length > 0 ? Number(slabs[slabs.length - 1].max_km) : 0;
+    const nextSlab: DeliverySlab = {
+      id: `slab-${Date.now()}`,
+      min_km: lastMax,
+      max_km: lastMax + 2,
+      charge_type: 'fixed',
+      charge: 10,
+      label: `${lastMax}–${lastMax + 2} km`
+    };
+    setDeliverySettings({
+      ...deliverySettings,
+      delivery_slabs: [...slabs, nextSlab],
+      max_delivery_distance_km: Math.max(Number(deliverySettings.max_delivery_distance_km || 8), nextSlab.max_km)
+    });
+  };
+
+  const handleUpdateDeliverySlab = (idx: number, patch: Partial<DeliverySlab>) => {
+    const nextSlabs = [...(deliverySettings.delivery_slabs || [])];
+    const updated = { ...nextSlabs[idx], ...patch };
+    if (updated.charge_type === 'free') {
+      updated.charge = 0;
+    }
+    updated.label = `${updated.min_km}–${updated.max_km} km`;
+    nextSlabs[idx] = updated;
+    setDeliverySettings({ ...deliverySettings, delivery_slabs: nextSlabs });
+  };
+
+  const handleRemoveDeliverySlab = (idx: number) => {
+    const nextSlabs = (deliverySettings.delivery_slabs || []).filter((_, i) => i !== idx);
+    setDeliverySettings({ ...deliverySettings, delivery_slabs: nextSlabs });
+  };
+
+  const handleResetDefaultSlabs = () => {
+    setDeliverySettings({
+      ...deliverySettings,
+      delivery_pricing_mode: 'slabs',
+      max_delivery_distance_km: 8,
+      delivery_slabs: defaultSlabs
+    });
+    showToast('Suggested default slabs loaded (0–2 FREE, 2–4 ₹10, 4–6 ₹20, 6–8 ₹30). Click Save to apply.');
   };
 
   // Slots: Add new Delivery Slot
@@ -942,9 +1155,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </div>
 
                         <div className="min-w-0">
-                          <div className="text-[10px] font-bold uppercase text-gray-400">COD Total & Payment</div>
-                          <div className="font-black text-base text-emerald-800 mt-0.5">
-                            ₹{order.total_amount}
+                          <div className="text-[10px] font-bold uppercase text-gray-400">COD Total & Distance</div>
+                          <div className="flex items-center gap-2 flex-wrap mt-0.5">
+                            <span className="font-black text-base text-emerald-800">₹{order.total_amount}</span>
+                            {order.distance_km !== undefined && order.distance_km !== null && (
+                              <span className="inline-flex items-center gap-1 bg-purple-100 text-purple-900 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                <Navigation className="w-2.5 h-2.5" />
+                                <span>{Number(order.distance_km).toFixed(2)} km</span>
+                              </span>
+                            )}
                           </div>
                           <div className="text-[11px] text-gray-500 flex items-center flex-wrap gap-1 mt-0.5">
                             <span className="break-words">Items: ₹{order.subtotal} • Delivery: ₹{order.delivery_fee} • Handling: ₹{order.handling_fee}{Number(order.tip_amount) > 0 ? ` • Tip: ₹${order.tip_amount}` : ''}</span>
@@ -1121,9 +1340,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {/* Top Bar: Add Product & Search */}
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-base font-extrabold text-gray-900">Daily Store Pricing & Inventory</h2>
+                <h2 className="text-base font-extrabold text-gray-900">Wholesale Cost, Gross Margin & Daily Pricing</h2>
                 <p className="text-xs text-gray-500">
-                  Update wholesale & retail selling prices for FMP Supermart Karanja Lad
+                  Manage purchase cost, market price (MRP), FMP selling price, stock & private supplier details (customers only see FMP selling prices)
                 </p>
               </div>
 
@@ -1136,9 +1355,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     unit: '1 kg',
                     price: '',
                     mrp: '',
+                    purchase_cost: '',
                     stock: '50',
                     image_url: '',
-                    description: ''
+                    description: '',
+                    supplier_id: '',
+                    supplier_name: '',
+                    supplier_phone: '',
+                    supplier_address: '',
+                    product_type: 'packaged',
+                    min_order_qty: '1',
+                    max_order_qty: '',
+                    pricing_slabs: []
                   });
                   setIsAddProductOpen(true);
                 }}
@@ -1148,6 +1376,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <span>Add New Product</span>
               </button>
             </div>
+
+            {/* Wholesale Margin KPI Strip */}
+            {(() => {
+              const costed = products.filter(p => p.purchase_cost !== null && p.purchase_cost !== undefined && Number(p.purchase_cost) > 0);
+              const avgMarginPct = costed.length > 0
+                ? (costed.reduce((sum, p) => sum + Number(p.margin_percent || 0), 0) / costed.length).toFixed(1)
+                : '0.0';
+              const lowOrNegMargin = costed.filter(p => Number(p.gross_margin || 0) <= 0).length;
+              return (
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
+                  <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-xs min-w-0">
+                    <div className="text-[10px] font-bold text-gray-500 uppercase truncate">Products With Cost</div>
+                    <div className="text-lg font-black text-purple-900 mt-0.5">{costed.length} / {products.length}</div>
+                    <div className="text-[10px] text-gray-400 truncate">Wholesale tracked SKUs</div>
+                  </div>
+                  <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-xs min-w-0">
+                    <div className="text-[10px] font-bold text-gray-500 uppercase truncate">Avg Gross Margin</div>
+                    <div className="text-lg font-black text-emerald-700 mt-0.5">{avgMarginPct}%</div>
+                    <div className="text-[10px] text-gray-400 truncate">Across costed items</div>
+                  </div>
+                  <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-xs col-span-2 sm:col-span-1 min-w-0">
+                    <div className="text-[10px] font-bold text-gray-500 uppercase truncate">Zero / Negative Margin</div>
+                    <div className={`text-lg font-black mt-0.5 ${lowOrNegMargin > 0 ? 'text-red-600' : 'text-gray-800'}`}>{lowOrNegMargin}</div>
+                    <div className="text-[10px] text-gray-400 truncate">Selling ≤ Purchase Cost</div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Filter and Search */}
             <div className="bg-white p-2.5 sm:p-3 rounded-2xl border border-gray-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 sm:gap-3 text-xs min-w-0">
@@ -1179,15 +1435,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {/* Products Table */}
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs min-w-0">
               <div className="overflow-x-auto touch-pan-x scrollbar-none">
-                <table className="w-full text-left text-xs min-w-[640px]">
+                <table className="w-full text-left text-xs min-w-[820px]">
                   <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase text-[10px] tracking-wider">
                     <tr>
                       <th className="py-3 px-4">Product</th>
-                      <th className="py-3 px-3">Category</th>
-                      <th className="py-3 px-3">Daily Price (₹)</th>
-                      <th className="py-3 px-3">MRP (₹)</th>
-                      <th className="py-3 px-3">Available Stock</th>
-                      <th className="py-3 px-3">Status</th>
+                      <th className="py-3 px-3">Purchase Cost</th>
+                      <th className="py-3 px-3">FMP Price (₹)</th>
+                      <th className="py-3 px-3">Market MRP</th>
+                      <th className="py-3 px-3">Gross Margin</th>
+                      <th className="py-3 px-3">Supplier (Private)</th>
+                      <th className="py-3 px-3">Stock</th>
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -1195,6 +1452,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     {filteredProducts.map(product => {
                       const isLowStock = product.stock > 0 && product.stock < 10;
                       const isOut = product.stock <= 0;
+                      const hasCost = product.purchase_cost !== null && product.purchase_cost !== undefined;
+                      const sellPrice = Number(product.price);
+                      const costPrice = hasCost ? Number(product.purchase_cost) : null;
+                      const marginAmt = costPrice !== null ? Number((sellPrice - costPrice).toFixed(2)) : null;
+                      const marginPct = costPrice !== null && sellPrice > 0
+                        ? Number((((sellPrice - costPrice) / sellPrice) * 100).toFixed(1))
+                        : null;
 
                       return (
                         <tr key={product.id} className="hover:bg-gray-50/70 transition">
@@ -1208,17 +1472,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               />
                               <div>
                                 <div className="font-bold text-gray-900 leading-tight">{product.name}</div>
-                                <div className="text-gray-500 text-[11px]">{product.unit}</div>
+                                <div className="text-gray-500 text-[11px]">{product.unit} • {product.category_name}</div>
+                                <div className="flex flex-wrap items-center gap-1 mt-1">
+                                  <span className={`text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded ${
+                                    normalizeProductType(product.product_type, product.unit) === 'loose'
+                                      ? 'bg-amber-100 text-amber-900'
+                                      : 'bg-gray-100 text-gray-700'
+                                  }`}>
+                                    {normalizeProductType(product.product_type, product.unit)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditProductModal(product)}
+                                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded border cursor-pointer transition ${
+                                      product.pricing_slabs && product.pricing_slabs.length > 0
+                                        ? 'bg-purple-50 text-purple-800 border-purple-200 hover:bg-purple-100'
+                                        : 'bg-white text-gray-500 border-gray-200 hover:border-purple-300'
+                                    }`}
+                                  >
+                                    {product.pricing_slabs && product.pricing_slabs.length > 0
+                                      ? `${product.pricing_slabs.length} qty slabs`
+                                      : '+ Qty Slabs'}
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           </td>
 
-                          {/* Category */}
-                          <td className="py-3 px-3 text-gray-600 font-medium">
-                            {product.category_name}
+                          {/* Purchase Cost */}
+                          <td className="py-3 px-3">
+                            {costPrice !== null ? (
+                              <span className="font-bold text-gray-800">₹{costPrice}</span>
+                            ) : (
+                              <span className="text-gray-400 italic text-[11px]">Not set</span>
+                            )}
                           </td>
 
-                          {/* Daily Price */}
+                          {/* FMP Selling Price */}
                           <td className="py-3 px-3">
                             <div className="flex items-center gap-1.5">
                               <span className="font-black text-gray-900 text-sm">₹{product.price}</span>
@@ -1242,11 +1532,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             ₹{product.mrp}
                           </td>
 
+                          {/* Gross Margin */}
+                          <td className="py-3 px-3">
+                            {marginAmt !== null ? (
+                              <div className="space-y-0.5">
+                                <span className={`font-black text-xs ${marginAmt > 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                                  {marginAmt >= 0 ? `+₹${marginAmt}` : `-₹${Math.abs(marginAmt)}`}
+                                </span>
+                                <span className={`block text-[10px] font-bold ${marginAmt > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                                  {marginPct}% margin
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-gray-400 text-[11px]">—</span>
+                            )}
+                          </td>
+
+                          {/* Supplier (Private Admin Only) */}
+                          <td className="py-3 px-3 max-w-[170px]">
+                            {product.supplier_name ? (
+                              <div className="text-[11px]">
+                                <div className="font-bold text-gray-800 truncate">{product.supplier_name}</div>
+                                {product.supplier_address && (
+                                  <div className="text-[10px] text-gray-500 truncate" title={product.supplier_address}>
+                                    {product.supplier_address}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-gray-400 italic text-[11px]">No supplier</span>
+                            )}
+                          </td>
+
                           {/* Stock Units */}
                           <td className="py-3 px-3">
                             <div className="flex items-center gap-1.5">
                               <span className={`font-bold ${isOut ? 'text-red-600' : isLowStock ? 'text-amber-700' : 'text-gray-900'}`}>
-                                {product.stock} units
+                                {product.stock}
                               </span>
                               <button
                                 onClick={() => {
@@ -1261,43 +1583,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             </div>
                           </td>
 
-                          {/* Status */}
-                          <td className="py-3 px-3">
-                            {isOut ? (
-                              <span className="bg-red-100 text-red-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
-                                Sold Out
-                              </span>
-                            ) : isLowStock ? (
-                              <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
-                                Low Stock
-                              </span>
-                            ) : (
-                              <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
-                                In Stock
-                              </span>
-                            )}
-                          </td>
-
                           {/* Actions */}
                           <td className="py-3 px-4 text-right">
                             <div className="flex items-center justify-end gap-1.5">
                               <button
-                                onClick={() => {
-                                  setEditingProduct(product);
-                                  setProductForm({
-                                    name: product.name,
-                                    category_id: product.category_id,
-                                    unit: product.unit,
-                                    price: String(product.price),
-                                    mrp: String(product.mrp),
-                                    stock: String(product.stock),
-                                    image_url: product.image_url || '',
-                                    description: product.description || ''
-                                  });
-                                  setIsAddProductOpen(true);
-                                }}
+                                onClick={() => openEditProductModal(product)}
                                 className="p-1.5 text-gray-500 hover:text-purple-700 hover:bg-purple-50 rounded-lg transition cursor-pointer"
-                                title="Edit Product Details"
+                                title="Edit Wholesale Cost, Slabs & Product Details"
                               >
                                 <Edit2 className="w-4 h-4" />
                               </button>
@@ -1590,109 +1882,325 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         )}
 
         {/* ======================================================== */}
-        {/* TAB 5: DELIVERY SETTINGS & DELIVERY SLOTS */}
+        {/* TAB 5: DELIVERY SETTINGS, WAREHOUSE COORDS & SLOTS */}
         {/* ======================================================== */}
         {activeTab === 'settings' && (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Delivery Fee Configuration Card */}
-              <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
-                    <Settings className="w-4 h-4" />
+            <form onSubmit={handleSaveDeliverySettings} className="space-y-6">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Central Warehouse Coordinates Card */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
+                      <MapPin className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="font-extrabold text-sm text-gray-900">Central Warehouse Location (OpenStreetMap)</h3>
+                      <p className="text-[11px] text-gray-500">All OSRM road distances are calculated from this pin</p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="font-extrabold text-sm text-gray-900">Delivery Fee Control</h3>
-                    <p className="text-[11px] text-gray-500">Configure central warehouse delivery charges & handling fees</p>
+
+                  <OsmMapPicker
+                    lat={Number(deliverySettings.warehouse_lat || 20.4839)}
+                    lng={Number(deliverySettings.warehouse_lng || 77.4877)}
+                    pinColor="purple"
+                    pinLabel="Warehouse"
+                    heightClass="h-52"
+                    onChange={(newLat, newLng, addr) =>
+                      setDeliverySettings(prev => ({
+                        ...prev,
+                        warehouse_lat: newLat,
+                        warehouse_lng: newLng,
+                        ...(addr ? { warehouse_address: addr } : {})
+                      }))
+                    }
+                  />
+
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-600 mb-1">Warehouse Latitude</label>
+                      <input
+                        type="number"
+                        step="0.000001"
+                        required
+                        value={deliverySettings.warehouse_lat ?? 20.4839}
+                        onChange={e => setDeliverySettings({ ...deliverySettings, warehouse_lat: Number(e.target.value) })}
+                        className="w-full p-2 bg-gray-50 border border-gray-200 rounded-xl font-mono text-xs font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-600 mb-1">Warehouse Longitude</label>
+                      <input
+                        type="number"
+                        step="0.000001"
+                        required
+                        value={deliverySettings.warehouse_lng ?? 77.4877}
+                        onChange={e => setDeliverySettings({ ...deliverySettings, warehouse_lng: Number(e.target.value) })}
+                        className="w-full p-2 bg-gray-50 border border-gray-200 rounded-xl font-mono text-xs font-bold"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-xs">
+                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Warehouse Address Label</label>
+                    <input
+                      type="text"
+                      required
+                      value={deliverySettings.warehouse_address || ''}
+                      onChange={e => setDeliverySettings({ ...deliverySettings, warehouse_address: e.target.value })}
+                      className="w-full p-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-medium"
+                    />
                   </div>
                 </div>
 
-                <form onSubmit={handleSaveDeliverySettings} className="space-y-3 text-xs">
-                  <div>
-                    <label className="block text-[11px] font-bold text-gray-700 mb-1">
-                      Default Delivery Fee (₹)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      required
-                      value={deliverySettings.default_delivery_fee ?? 25}
-                      onChange={e => setDeliverySettings({ ...deliverySettings, default_delivery_fee: Number(e.target.value) })}
-                      className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900"
-                    />
-                    <span className="text-[10px] text-gray-400 mt-0.5 block">
-                      Set to 0 if offering Free Delivery across Karanja Lad.
-                    </span>
+                {/* Distance-Based Delivery Charge Rules Card */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4 min-w-0">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
+                        <Settings className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="font-extrabold text-sm text-gray-900">Distance-Based Delivery Charges</h3>
+                        <p className="text-[11px] text-gray-500">Backend-enforced pricing by road km (no ₹299 threshold)</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleResetDefaultSlabs}
+                      className="text-[11px] font-bold text-purple-700 hover:text-purple-900 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg cursor-pointer"
+                    >
+                      Load Default Slabs
+                    </button>
                   </div>
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-gray-700 mb-1">
-                      Packaging & Handling Fee (₹)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      required
-                      value={deliverySettings.handling_fee ?? 5}
-                      onChange={e => setDeliverySettings({ ...deliverySettings, handling_fee: Number(e.target.value) })}
-                      className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900"
-                    />
-                    <span className="text-[10px] text-gray-400 mt-0.5 block">
-                      Charged per order for secure packaging and bagging.
-                    </span>
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        Handling & Packaging Fee (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        required
+                        value={deliverySettings.handling_fee ?? 5}
+                        onChange={e => setDeliverySettings({ ...deliverySettings, handling_fee: Number(e.target.value) })}
+                        className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        Max Delivery Radius (km)
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.5"
+                        required
+                        value={deliverySettings.max_delivery_distance_km ?? 8}
+                        onChange={e => setDeliverySettings({ ...deliverySettings, max_delivery_distance_km: Number(e.target.value) })}
+                        className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900"
+                      />
+                      <span className="text-[10px] text-gray-400">Orders above this are unavailable</span>
+                    </div>
                   </div>
+
+                  {/* Pricing Mode Selector */}
+                  <div className="space-y-1.5 text-xs">
+                    <label className="block text-[11px] font-bold text-gray-700">Delivery Charge Calculation Mode</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDeliverySettings({ ...deliverySettings, delivery_pricing_mode: 'slabs' })}
+                        className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                          deliverySettings.delivery_pricing_mode !== 'per_km'
+                            ? 'bg-purple-700 text-white border-purple-700 font-bold shadow-xs'
+                            : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                        }`}
+                      >
+                        <div className="text-xs font-extrabold">Distance Slabs</div>
+                        <div className={`text-[10px] ${deliverySettings.delivery_pricing_mode !== 'per_km' ? 'text-purple-100' : 'text-gray-500'}`}>
+                          Custom ranges, Free / Fixed / Per-km
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setDeliverySettings({ ...deliverySettings, delivery_pricing_mode: 'per_km' })}
+                        className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                          deliverySettings.delivery_pricing_mode === 'per_km'
+                            ? 'bg-purple-700 text-white border-purple-700 font-bold shadow-xs'
+                            : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                        }`}
+                      >
+                        <div className="text-xs font-extrabold">Per-Kilometre Rate</div>
+                        <div className={`text-[10px] ${deliverySettings.delivery_pricing_mode === 'per_km' ? 'text-purple-100' : 'text-gray-500'}`}>
+                          Free base km + ₹/km charge
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {deliverySettings.delivery_pricing_mode === 'per_km' ? (
+                    <div className="p-3 bg-purple-50/70 border border-purple-200 rounded-2xl space-y-3 text-xs">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-bold text-purple-900 mb-1">Free Delivery Up To (km)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.5"
+                            value={deliverySettings.free_delivery_up_to_km ?? 0}
+                            onChange={e => setDeliverySettings({ ...deliverySettings, free_delivery_up_to_km: Number(e.target.value) })}
+                            className="w-full p-2 bg-white border border-purple-200 rounded-xl font-bold"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-purple-900 mb-1">Rate Per Kilometre (₹/km)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={deliverySettings.per_km_rate ?? 8}
+                            onChange={e => setDeliverySettings({ ...deliverySettings, per_km_rate: Number(e.target.value) })}
+                            className="w-full p-2 bg-white border border-purple-200 rounded-xl font-bold"
+                          />
+                          <span className="text-[10px] text-purple-700">Set ₹0 for completely free delivery</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-gray-700">Editable Distance Slabs (km)</span>
+                        <button
+                          type="button"
+                          onClick={handleAddDeliverySlab}
+                          className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-1 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Add Slab</span>
+                        </button>
+                      </div>
+
+                      <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                        {(deliverySettings.delivery_slabs || []).map((slab, idx) => (
+                          <div key={slab.id || idx} className="p-2.5 bg-gray-50 border border-gray-200 rounded-xl grid grid-cols-12 gap-1.5 items-end">
+                            <div className="col-span-3">
+                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Min km</label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.5"
+                                value={slab.min_km}
+                                onChange={e => handleUpdateDeliverySlab(idx, { min_km: Number(e.target.value) })}
+                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold"
+                              />
+                            </div>
+                            <div className="col-span-3">
+                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Max km</label>
+                              <input
+                                type="number"
+                                min="0.5"
+                                step="0.5"
+                                value={slab.max_km}
+                                onChange={e => handleUpdateDeliverySlab(idx, { max_km: Number(e.target.value) })}
+                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold"
+                              />
+                            </div>
+                            <div className="col-span-3">
+                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Type</label>
+                              <select
+                                value={slab.charge_type}
+                                onChange={e => handleUpdateDeliverySlab(idx, { charge_type: e.target.value as any })}
+                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-[11px] font-semibold"
+                              >
+                                <option value="free">FREE</option>
+                                <option value="fixed">Fixed ₹</option>
+                                <option value="per_km">₹ / km</option>
+                              </select>
+                            </div>
+                            <div className="col-span-2">
+                              <label className="block text-[9px] font-bold text-gray-500 uppercase">₹</label>
+                              <input
+                                type="number"
+                                min="0"
+                                disabled={slab.charge_type === 'free'}
+                                value={slab.charge_type === 'free' ? 0 : slab.charge}
+                                onChange={e => handleUpdateDeliverySlab(idx, { charge: Number(e.target.value) })}
+                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold disabled:bg-gray-100 disabled:text-gray-400"
+                              />
+                            </div>
+                            <div className="col-span-1 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveDeliverySlab(idx)}
+                                className="p-1.5 text-gray-400 hover:text-red-600 cursor-pointer"
+                                title="Remove slab"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-1.5">
+                        Distances above <strong>{deliverySettings.max_delivery_distance_km} km</strong> are automatically blocked as unavailable at checkout.
+                      </div>
+                    </div>
+                  )}
 
                   <button
                     type="submit"
                     disabled={savingSettings}
-                    className="w-full py-2.5 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50"
+                    className="w-full py-2.5 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50 text-xs"
                   >
-                    {savingSettings ? 'Saving Settings...' : 'Save Delivery Charges'}
+                    {savingSettings ? 'Saving Settings...' : 'Save Warehouse & Delivery Settings'}
                   </button>
-                </form>
+                </div>
+              </div>
+            </form>
+
+            {/* Delivery Slots Management Card */}
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-sm text-gray-900">Scheduled Delivery Slots</h3>
+                    <p className="text-[11px] text-gray-500">Time windows for customer checkout</p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setIsAddSlotOpen(true)}
+                  className="bg-purple-100 hover:bg-purple-200 text-purple-900 px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 transition cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Slot</span>
+                </button>
               </div>
 
-              {/* Delivery Slots Management Card */}
-              <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
-                      <Clock className="w-4 h-4" />
-                    </div>
+              <div className="divide-y divide-gray-100 text-xs">
+                {deliverySlots.map(slot => (
+                  <div key={slot.id} className="py-2.5 flex items-center justify-between">
                     <div>
-                      <h3 className="font-extrabold text-sm text-gray-900">Scheduled Delivery Slots</h3>
-                      <p className="text-[11px] text-gray-500">Time windows for customer checkout</p>
+                      <div className="font-bold text-gray-900">{slot.name}</div>
+                      <div className="text-[11px] text-purple-700 font-semibold">{slot.time_window}</div>
+                      <div className="text-[10px] text-gray-400">Max Capacity: {slot.max_orders_per_slot || 25} orders</div>
                     </div>
+
+                    <button
+                      onClick={() => handleDeleteSlot(slot.id)}
+                      className="text-gray-400 hover:text-red-600 p-1.5 rounded-lg transition cursor-pointer"
+                      title="Deactivate Slot"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
-
-                  <button
-                    onClick={() => setIsAddSlotOpen(true)}
-                    className="bg-purple-100 hover:bg-purple-200 text-purple-900 px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 transition cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Slot</span>
-                  </button>
-                </div>
-
-                <div className="divide-y divide-gray-100 text-xs">
-                  {deliverySlots.map(slot => (
-                    <div key={slot.id} className="py-2.5 flex items-center justify-between">
-                      <div>
-                        <div className="font-bold text-gray-900">{slot.name}</div>
-                        <div className="text-[11px] text-purple-700 font-semibold">{slot.time_window}</div>
-                        <div className="text-[10px] text-gray-400">Max Capacity: {slot.max_orders_per_slot || 25} orders</div>
-                      </div>
-
-                      <button
-                        onClick={() => handleDeleteSlot(slot.id)}
-                        className="text-gray-400 hover:text-red-600 p-1.5 rounded-lg transition cursor-pointer"
-                        title="Deactivate Slot"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
+                ))}
               </div>
             </div>
           </div>
@@ -2016,14 +2524,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       )}
 
       {/* ======================================================== */}
-      {/* MODAL: ADD / EDIT PRODUCT */}
+      {/* MODAL: ADD / EDIT PRODUCT WITH WHOLESALE & SUPPLIER */}
       {/* ======================================================== */}
       {isAddProductOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-gray-100 space-y-4 my-8">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-gray-100 space-y-4 my-8 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between">
               <h3 className="font-extrabold text-gray-900 text-base">
-                {editingProduct ? 'Edit Product Daily Price' : 'Add New Grocery Product'}
+                {editingProduct ? 'Edit Wholesale & Selling Price' : 'Add New Product (Wholesale & Retail)'}
               </h3>
               <button
                 onClick={() => setIsAddProductOpen(false)}
@@ -2075,23 +2583,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
+              {/* Wholesale & Selling Prices */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <div>
-                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Selling Price (₹)</label>
+                  <label className="block text-[11px] font-bold text-purple-900 mb-1">Purchase Cost (₹)</label>
                   <input
                     type="number"
-                    required
-                    value={productForm.price}
-                    onChange={e => setProductForm({ ...productForm, price: e.target.value })}
-                    placeholder="45"
-                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-emerald-800"
+                    min="0"
+                    step="0.01"
+                    value={productForm.purchase_cost}
+                    onChange={e => setProductForm({ ...productForm, purchase_cost: e.target.value })}
+                    placeholder="36"
+                    className="w-full p-2.5 bg-purple-50/70 border border-purple-200 rounded-xl text-xs font-bold text-purple-900"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold text-gray-700 mb-1">MRP (₹)</label>
+                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Market MRP (₹)</label>
                   <input
                     type="number"
+                    min="0"
+                    step="0.01"
                     value={productForm.mrp}
                     onChange={e => setProductForm({ ...productForm, mrp: e.target.value })}
                     placeholder="50"
@@ -2100,14 +2612,307 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Stock Count</label>
+                  <label className="block text-[11px] font-bold text-emerald-800 mb-1">FMP Selling Price (₹)</label>
                   <input
                     type="number"
+                    min="0"
+                    step="0.01"
+                    required
+                    value={productForm.price}
+                    onChange={e => setProductForm({ ...productForm, price: e.target.value })}
+                    placeholder="45"
+                    className="w-full p-2.5 bg-emerald-50 border border-emerald-300 rounded-xl text-xs font-black text-emerald-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Stock Qty</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
                     required
                     value={productForm.stock}
                     onChange={e => setProductForm({ ...productForm, stock: e.target.value })}
                     placeholder="50"
-                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
+                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold"
+                  />
+                </div>
+              </div>
+
+              {/* Automatic Gross Margin Calculator */}
+              {productForm.price !== '' && productForm.purchase_cost !== '' && (
+                (() => {
+                  const sell = Number(productForm.price) || 0;
+                  const cost = Number(productForm.purchase_cost) || 0;
+                  const margin = Number((sell - cost).toFixed(2));
+                  const pct = sell > 0 ? Number((((sell - cost) / sell) * 100).toFixed(1)) : 0;
+                  const positive = margin >= 0;
+                  return (
+                    <div className={`p-2.5 rounded-xl border flex items-center justify-between text-xs ${
+                      positive ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'
+                    }`}>
+                      <div className="flex items-center gap-1.5 font-bold">
+                        <Percent className="w-4 h-4 shrink-0" />
+                        <span>Auto Gross Margin (Admin Only):</span>
+                      </div>
+                      <div className="font-black">
+                        {positive ? `+₹${margin}` : `-₹${Math.abs(margin)}`} ({pct}%)
+                      </div>
+                    </div>
+                  );
+                })()
+              )}
+
+              {/* Packaging Type (Loose vs Packaged) & Order Qty Limits */}
+              <div className="p-3 bg-purple-50/50 border border-purple-200 rounded-2xl space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-bold text-purple-950 text-[11px]">
+                    <Layers className="w-3.5 h-3.5 text-purple-700" />
+                    <span>Packaging Type & Order Limits</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setProductForm(prev => ({ ...prev, product_type: 'packaged' }))}
+                    className={`p-2 rounded-xl border text-left transition cursor-pointer ${
+                      productForm.product_type === 'packaged'
+                        ? 'bg-purple-700 text-white border-purple-700 shadow-xs'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="text-[11px] font-extrabold">Packaged Units</div>
+                    <div className={`text-[10px] ${productForm.product_type === 'packaged' ? 'text-purple-100' : 'text-gray-500'}`}>
+                      Whole integer packs (1, 2, 5...)
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setProductForm(prev => ({ ...prev, product_type: 'loose' }))}
+                    className={`p-2 rounded-xl border text-left transition cursor-pointer ${
+                      productForm.product_type === 'loose'
+                        ? 'bg-purple-700 text-white border-purple-700 shadow-xs'
+                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="text-[11px] font-extrabold">Loose Weight / Bulk</div>
+                    <div className={`text-[10px] ${productForm.product_type === 'loose' ? 'text-purple-100' : 'text-gray-500'}`}>
+                      Weight in kg/L (e.g. 0.5, 1, 5, 10, 50)
+                    </div>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-600 mb-1">
+                      Min Order Qty ({productForm.product_type === 'loose' ? 'kg / L' : 'units'})
+                    </label>
+                    <input
+                      type="number"
+                      min={productForm.product_type === 'loose' ? '0.1' : '1'}
+                      step={productForm.product_type === 'loose' ? '0.1' : '1'}
+                      value={productForm.min_order_qty}
+                      onChange={e => setProductForm({ ...productForm, min_order_qty: e.target.value })}
+                      placeholder="1"
+                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-600 mb-1">
+                      Max Order Qty (Blank = No Limit)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      step={productForm.product_type === 'loose' ? '0.5' : '1'}
+                      value={productForm.max_order_qty}
+                      onChange={e => setProductForm({ ...productForm, max_order_qty: e.target.value })}
+                      placeholder="Unlimited"
+                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-bold"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Quantity-Based Wholesale Pricing Slabs */}
+              <div className="p-3 bg-emerald-50/40 border border-emerald-200 rounded-2xl space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-extrabold text-emerald-950 text-[11px]">
+                      Dynamic Quantity Price Slabs ({productForm.product_type === 'loose' ? 'per kg/L' : 'per unit'})
+                    </div>
+                    <div className="text-[10px] text-emerald-800">
+                      Set bulk rates by qty range. Leave Max Qty blank for open-ended (e.g. 50+).
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleAddProductSlab}
+                    className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold px-2.5 py-1.5 rounded-xl text-[11px] flex items-center gap-1 shrink-0 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Slab</span>
+                  </button>
+                </div>
+
+                {productForm.pricing_slabs.length === 0 ? (
+                  <div className="bg-white/80 border border-dashed border-emerald-300 rounded-xl p-2.5 text-center text-[11px] text-gray-500">
+                    No quantity slabs set. Customers will pay regular FMP price (₹{productForm.price || 0}). Click "Add Slab" to configure tiered pricing.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {productForm.pricing_slabs.map((slab, idx) => {
+                      const basePrice = Number(productForm.price) || 0;
+                      const slabPrice = Number(slab.price_per_unit) || 0;
+                      const costPrice = productForm.purchase_cost !== '' ? Number(productForm.purchase_cost) : null;
+                      const belowCost = costPrice !== null && slabPrice > 0 && slabPrice < costPrice;
+                      const pctOff = basePrice > 0 && slabPrice > 0 && slabPrice < basePrice
+                        ? Math.round(((basePrice - slabPrice) / basePrice) * 100)
+                        : 0;
+
+                      return (
+                        <div key={slab.id || idx} className="bg-white p-2 rounded-xl border border-gray-200 space-y-1.5">
+                          <div className="grid grid-cols-12 gap-1.5 items-end">
+                            <div className="col-span-4">
+                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Min Qty</label>
+                              <input
+                                type="number"
+                                min={productForm.product_type === 'loose' ? '0.1' : '1'}
+                                step={productForm.product_type === 'loose' ? '0.1' : '1'}
+                                required
+                                value={slab.min_qty}
+                                onChange={e => handleUpdateProductSlab(idx, { min_qty: e.target.value })}
+                                className="w-full p-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold"
+                              />
+                            </div>
+                            <div className="col-span-4">
+                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Max Qty</label>
+                              <input
+                                type="number"
+                                min={productForm.product_type === 'loose' ? '0.1' : '1'}
+                                step={productForm.product_type === 'loose' ? '0.1' : '1'}
+                                value={slab.max_qty}
+                                onChange={e => handleUpdateProductSlab(idx, { max_qty: e.target.value })}
+                                placeholder="Unlimited"
+                                className="w-full p-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold"
+                              />
+                            </div>
+                            <div className="col-span-3">
+                              <label className="block text-[9px] font-bold text-emerald-700 uppercase">₹ / Unit</label>
+                              <input
+                                type="number"
+                                min="0.01"
+                                step="0.01"
+                                required
+                                value={slab.price_per_unit}
+                                onChange={e => handleUpdateProductSlab(idx, { price_per_unit: e.target.value })}
+                                className="w-full p-1.5 bg-emerald-50 border border-emerald-300 rounded-lg text-xs font-black text-emerald-900"
+                              />
+                            </div>
+                            <div className="col-span-1 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveProductSlab(idx)}
+                                className="p-1.5 text-gray-400 hover:text-red-600 cursor-pointer"
+                                title="Delete Slab"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {(pctOff > 0 || belowCost) && (
+                            <div className="flex items-center justify-between text-[10px] px-0.5">
+                              {pctOff > 0 ? (
+                                <span className="text-emerald-700 font-bold">
+                                  Saves {pctOff}% vs regular price (₹{basePrice})
+                                </span>
+                              ) : <span />}
+                              {belowCost && (
+                                <span className="text-red-600 font-bold">
+                                  Warning: Below cost (₹{costPrice})
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Private Supplier Details (Never visible to customers) */}
+              <div className="p-3 bg-gray-50 border border-gray-200 rounded-2xl space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 font-bold text-gray-800 text-[11px]">
+                    <Building2 className="w-3.5 h-3.5 text-purple-700" />
+                    <span>Supplier Details (Hidden from Customers)</span>
+                  </div>
+                </div>
+
+                {suppliers.length > 0 && (
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Select Registered Supplier (Optional)</label>
+                    <select
+                      value={productForm.supplier_id}
+                      onChange={e => {
+                        const supId = e.target.value;
+                        const matched = suppliers.find(s => String(s.id) === supId);
+                        setProductForm({
+                          ...productForm,
+                          supplier_id: supId,
+                          supplier_name: matched ? matched.name : productForm.supplier_name,
+                          supplier_phone: matched ? matched.phone : productForm.supplier_phone,
+                          supplier_address: matched ? (matched.address || '') : productForm.supplier_address
+                        });
+                      }}
+                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
+                    >
+                      <option value="">-- Enter manually or choose supplier --</option>
+                      {suppliers.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.phone})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Supplier Shop / Name</label>
+                    <input
+                      type="text"
+                      value={productForm.supplier_name}
+                      onChange={e => setProductForm({ ...productForm, supplier_name: e.target.value })}
+                      placeholder="e.g. Vidarbha Agro Mart"
+                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Supplier Phone</label>
+                    <input
+                      type="tel"
+                      value={productForm.supplier_phone}
+                      onChange={e => setProductForm({ ...productForm, supplier_phone: e.target.value })}
+                      placeholder="9422XXXXXX"
+                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-gray-600 mb-1">Supplier Shop Address</label>
+                  <input
+                    type="text"
+                    value={productForm.supplier_address}
+                    onChange={e => setProductForm({ ...productForm, supplier_address: e.target.value })}
+                    placeholder="e.g. Shop 12, APMC Market Yard, Karanja Lad"
+                    className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
                   />
                 </div>
               </div>
@@ -2171,6 +2976,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <input
                   type="number"
                   min="0"
+                  step="0.01"
                   required
                   value={newStockValue}
                   onChange={e => setNewStockValue(Number(e.target.value))}

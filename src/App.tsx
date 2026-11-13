@@ -117,25 +117,29 @@ export default function App() {
   }, []);
 
   // Cart operations
-  const handleAddToCart = (product: Product) => {
+  const handleAddToCart = (product: Product, qty: number = 1) => {
+    const cleanQty = Math.round(Number(qty) * 100) / 100;
+    if (!Number.isFinite(cleanQty) || cleanQty <= 0) return;
     setCart(prev => {
       const existing = prev.find(i => i.product.id === product.id);
       if (existing) {
+        const nextQty = Math.round((existing.quantity + cleanQty) * 100) / 100;
         return prev.map(i =>
-          i.product.id === product.id ? { ...i, quantity: i.quantity + 1 } : i
+          i.product.id === product.id ? { ...i, product, quantity: nextQty } : i
         );
       }
-      return [...prev, { product, quantity: 1 }];
+      return [...prev, { product, quantity: cleanQty }];
     });
   };
 
   const handleUpdateCartQty = (productId: number, qty: number) => {
-    if (qty <= 0) {
+    const cleanQty = Math.round(Number(qty) * 100) / 100;
+    if (!Number.isFinite(cleanQty) || cleanQty <= 0) {
       handleRemoveFromCart(productId);
       return;
     }
     setCart(prev =>
-      prev.map(i => (i.product.id === productId ? { ...i, quantity: qty } : i))
+      prev.map(i => (i.product.id === productId ? { ...i, quantity: cleanQty } : i))
     );
   };
 

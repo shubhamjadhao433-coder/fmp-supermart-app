@@ -8,7 +8,10 @@ import {
   RiderSummary,
   Supplier,
   PurchaseOrder,
-  NotificationItem
+  NotificationItem,
+  DeliverySettings,
+  DeliveryQuote,
+  CartQuoteResponse
 } from '../types.ts';
 
 const TOKEN_KEY = 'fmp_supermart_token';
@@ -204,6 +207,26 @@ export const api = {
     return fetchWithAuth(`/api/products?${q.toString()}`);
   },
 
+  getAdminProducts: (params?: { category?: string; search?: string; in_stock?: boolean }): Promise<Product[]> => {
+    const q = new URLSearchParams();
+    if (params?.category) q.set('category', params.category);
+    if (params?.search) q.set('search', params.search);
+    if (params?.in_stock) q.set('in_stock', 'true');
+    return fetchWithAuth(`/api/admin/products?${q.toString()}`);
+  },
+
+  calculateDeliveryFee: (customer_lat: number, customer_lng: number): Promise<DeliveryQuote> =>
+    fetchWithAuth('/api/delivery/calculate-fee', {
+      method: 'POST',
+      body: JSON.stringify({ customer_lat, customer_lng })
+    }),
+
+  calculateCartPricing: (items: { product_id: number; quantity: number }[]): Promise<CartQuoteResponse> =>
+    fetchWithAuth('/api/pricing/calculate-cart', {
+      method: 'POST',
+      body: JSON.stringify({ items })
+    }),
+
   // Favorites
   getFavorites: (): Promise<Product[]> =>
     fetchWithAuth('/api/favorites'),
@@ -233,6 +256,8 @@ export const api = {
     scheduled_date?: string;
     time_slot?: string;
     tip_amount?: number;
+    customer_lat: number;
+    customer_lng: number;
   }): Promise<{ message: string; order: Order }> =>
     fetchWithAuth('/api/orders', { method: 'POST', body: JSON.stringify(payload) }),
 
@@ -287,10 +312,10 @@ export const api = {
     }),
 
   // Delivery Settings & Slots
-  getDeliverySettings: (): Promise<any> =>
+  getDeliverySettings: (): Promise<DeliverySettings> =>
     fetchWithAuth('/api/settings/delivery'),
 
-  updateDeliverySettings: (payload: any): Promise<{ message: string; settings: any }> =>
+  updateDeliverySettings: (payload: Partial<DeliverySettings>): Promise<{ message: string; settings: DeliverySettings }> =>
     fetchWithAuth('/api/admin/settings/delivery', { method: 'PUT', body: JSON.stringify(payload) }),
 
   getDeliverySlots: (): Promise<any[]> =>

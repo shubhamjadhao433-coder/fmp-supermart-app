@@ -589,7 +589,14 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
 
                       {/* Delivery Address & Navigation */}
                       <div className="space-y-1 min-w-0">
-                        <div className="text-[10px] sm:text-[11px] text-gray-400 font-bold uppercase">Delivery Address</div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] sm:text-[11px] text-gray-400 font-bold uppercase">Delivery Address</span>
+                          {typeof order.distance_km === 'number' && (
+                            <span className="text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.5 rounded-md shrink-0">
+                              {order.distance_km} km
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-start gap-1.5 text-gray-800 font-medium leading-snug break-words">
                           <MapPin className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                           <div className="min-w-0 break-words">
@@ -602,15 +609,19 @@ export const DeliveryBoyApp: React.FC<DeliveryBoyAppProps> = ({
                           </div>
                         </div>
                         <a
-                          href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                            order.delivery_address + ', Karanja Lad, Maharashtra'
-                          )}`}
+                          href={
+                            typeof order.customer_lat === 'number' && typeof order.customer_lng === 'number'
+                              ? `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${order.warehouse_lat ?? 20.4839}%2C${order.warehouse_lng ?? 77.4877}%3B${order.customer_lat}%2C${order.customer_lng}`
+                              : `https://www.openstreetmap.org/search?query=${encodeURIComponent(
+                                  order.delivery_address + ', Karanja Lad, Maharashtra'
+                                )}`
+                          }
                           target="_blank"
                           rel="noopener noreferrer"
                           className="inline-flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 font-bold mt-1"
                         >
                           <Navigation className="w-3 h-3 shrink-0" />
-                          <span>Open in Navigation</span>
+                          <span>Open in OpenStreetMap Navigation</span>
                         </a>
                       </div>
                     </div>

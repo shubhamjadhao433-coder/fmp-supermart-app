@@ -20,6 +20,23 @@ import {
 import fs from 'fs';
 import path from 'path';
 import bcrypt from 'bcryptjs';
+import {
+  DEFAULT_WAREHOUSE_LAT,
+  DEFAULT_WAREHOUSE_LNG,
+  DEFAULT_WAREHOUSE_ADDRESS,
+  DEFAULT_MAX_DELIVERY_DISTANCE_KM,
+  DEFAULT_DELIVERY_SLABS,
+  DeliverySlab,
+  normalizeDeliverySlabs,
+  calculateDeliveryFeeFromDistance
+} from './deliveryDistance.ts';
+import {
+  QuantityPriceSlab,
+  ProductPackagingType,
+  normalizeProductType,
+  normalizeProductPriceSlabs,
+  resolveProductQuantityPricing
+} from '../shared/quantityPricing.ts';
 
 // Load config safely
 let firebaseConfig: any = null;
@@ -212,12 +229,66 @@ export interface ProductDoc {
   image_url: string | null;
   description: string | null;
   is_active: boolean;
+  product_type?: ProductPackagingType;
+  min_order_qty?: number;
+  max_order_qty?: number | null;
+  pricing_slabs?: QuantityPriceSlab[];
+  // Admin-only wholesale pricing & supplier details (NEVER returned to customers)
+  purchase_cost?: number | null;
+  gross_margin?: number | null;
+  margin_percent?: number | null;
+  supplier_id?: number | null;
+  supplier_name?: string | null;
+  supplier_phone?: string | null;
+  supplier_address?: string | null;
   created_at: string;
   updated_at?: string;
 }
 
+export function computeWholesaleMetrics(price: number, purchaseCost?: number | null): {
+  purchase_cost: number | null;
+  gross_margin: number | null;
+  margin_percent: number | null;
+} {
+  if (purchaseCost === undefined || purchaseCost === null || purchaseCost === ('' as any)) {
+    return { purchase_cost: null, gross_margin: null, margin_percent: null };
+  }
+  const cost = Number(purchaseCost);
+  if (!Number.isFinite(cost) || cost < 0) {
+    return { purchase_cost: null, gross_margin: null, margin_percent: null };
+  }
+  const sellPrice = Number(price) || 0;
+  const gross_margin = Number((sellPrice - cost).toFixed(2));
+  const margin_percent = sellPrice > 0 ? Number((((sellPrice - cost) / sellPrice) * 100).toFixed(1)) : 0;
+  return { purchase_cost: cost, gross_margin, margin_percent };
+}
+
+export function sanitizeProductForCustomer<T extends Record<string, any>>(product: T): Omit<
+  T,
+  | 'purchase_cost'
+  | 'gross_margin'
+  | 'margin_percent'
+  | 'supplier_id'
+  | 'supplier_name'
+  | 'supplier_phone'
+  | 'supplier_address'
+> {
+  if (!product) return product;
+  const {
+    purchase_cost: _pc,
+    gross_margin: _gm,
+    margin_percent: _mp,
+    supplier_id: _sid,
+    supplier_name: _sn,
+    supplier_phone: _sp,
+    supplier_address: _sa,
+    ...publicFields
+  } = product;
+  return publicFields;
+}
+
 export const productsRepo = {
-  async list(filters?: { category?: string; search?: string; in_stock?: boolean }): Promise<any[]> {
+  async list(filters?: { category?: string; search?: string; in_stock?: boolean; includeWholesale?: boolean }): Promise<any[]> {
     const snap = await getDocs(collection(firestoreDb, 'products'));
     let products = snap.docs
       .map(d => {
@@ -269,25 +340,51 @@ export const productsRepo = {
       products = products.filter(p => p.stock > 0);
     }
 
+    const includeWholesale = Boolean(filters?.includeWholesale);
+
     return products.map(p => {
       const cat = catMap.get(p.category_id);
       const r = ratingMap[p.id];
       const count = r ? r.count : 0;
       const avg = count > 0 ? Number((r.sum / count).toFixed(1)) : (p.id % 2 === 0 ? 4.8 : 4.9);
-      return {
+      const metrics = computeWholesaleMetrics(Number(p.price), p.purchase_cost);
+      const productType = normalizeProductType(p.product_type, p.unit);
+      const pricingSlabs = normalizeProductPriceSlabs(p.pricing_slabs, productType === 'loose' ? 'kg' : '');
+      const enriched = {
         ...p,
+        product_type: productType,
+        min_order_qty: p.min_order_qty && Number(p.min_order_qty) > 0 ? Number(p.min_order_qty) : 1,
+        max_order_qty: p.max_order_qty && Number(p.max_order_qty) > 0 ? Number(p.max_order_qty) : null,
+        pricing_slabs: pricingSlabs,
+        ...(includeWholesale
+          ? {
+              purchase_cost: metrics.purchase_cost,
+              gross_margin: metrics.gross_margin,
+              margin_percent: metrics.margin_percent
+            }
+          : {}),
         category_name: cat?.name || 'Grocery',
         category_slug: cat?.slug || 'grocery',
         review_count: count,
         average_rating: avg
       };
+      return includeWholesale ? enriched : sanitizeProductForCustomer(enriched);
     });
   },
 
   async findById(id: number): Promise<ProductDoc | null> {
     const ref = doc(firestoreDb, 'products', String(id));
     const snap = await getDoc(ref);
-    return snap.exists() ? (snap.data() as ProductDoc) : null;
+    if (!snap.exists()) return null;
+    const p = snap.data() as ProductDoc;
+    const productType = normalizeProductType(p.product_type, p.unit);
+    return {
+      ...p,
+      product_type: productType,
+      min_order_qty: p.min_order_qty && Number(p.min_order_qty) > 0 ? Number(p.min_order_qty) : 1,
+      max_order_qty: p.max_order_qty && Number(p.max_order_qty) > 0 ? Number(p.max_order_qty) : null,
+      pricing_slabs: normalizeProductPriceSlabs(p.pricing_slabs, productType === 'loose' ? 'kg' : '')
+    };
   },
 
   async create(data: Omit<ProductDoc, 'id'>, customId?: number): Promise<ProductDoc> {
@@ -361,10 +458,19 @@ export interface OrderDoc {
   landmark: string;
   pincode: string;
   subtotal: number;
+  regular_subtotal?: number;
+  total_savings?: number;
   delivery_fee: number;
   handling_fee: number;
   tip_amount: number;
   total_amount: number;
+  distance_km?: number | null;
+  distance_source?: string | null;
+  customer_lat?: number | null;
+  customer_lng?: number | null;
+  warehouse_lat?: number | null;
+  warehouse_lng?: number | null;
+  delivery_fee_rule?: string | null;
   payment_mode: string;
   status: 'placed' | 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled';
   delivery_type: string;
@@ -391,9 +497,13 @@ export interface OrderItemDoc {
   product_id: number;
   product_name: string;
   unit: string;
+  product_type?: ProductPackagingType;
   price: number;
+  regular_unit_price?: number;
   quantity: number;
   total: number;
+  savings?: number;
+  applied_slab_label?: string | null;
   image_url: string | null;
 }
 
@@ -410,7 +520,11 @@ export const ordersRepo = {
       scheduledDate: string;
       timeSlot: string;
       tipAmount: number;
-      deliveryFeeOverride?: number;
+      customerLat: number;
+      customerLng: number;
+      distanceKm: number;
+      durationMins: number | null;
+      distanceSource: 'osrm' | 'haversine_fallback';
     },
     items: { product_id: number; quantity: number }[],
     adminUsers: UserDoc[]
@@ -418,9 +532,20 @@ export const ordersRepo = {
     const orderNumber = `FMP-KL-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
 
     return await runTransaction(firestoreDb, async (tx) => {
-      // 1. Fetch & validate all items atomically
+      // 1. Fetch & validate all items atomically (backend quantity-slab pricing + stock/min/max check)
       let subtotal = 0;
-      const validatedItems: { product: ProductDoc; requestedQty: number; itemTotal: number }[] = [];
+      let regularSubtotal = 0;
+      let totalSavings = 0;
+      const validatedItems: {
+        product: ProductDoc;
+        requestedQty: number;
+        appliedUnitPrice: number;
+        regularUnitPrice: number;
+        itemTotal: number;
+        savings: number;
+        appliedSlabLabel: string | null;
+        productType: ProductPackagingType;
+      }[] = [];
 
       for (const it of items) {
         const prodRef = doc(firestoreDb, 'products', String(it.product_id));
@@ -429,52 +554,50 @@ export const ordersRepo = {
           throw new Error(`Product #${it.product_id} is no longer available.`);
         }
         const product = prodSnap.data() as ProductDoc;
-        if (product.is_active === false) {
-          throw new Error(`Product "${product.name}" is no longer active.`);
-        }
-        const qty = parseInt(String(it.quantity), 10);
-        if (qty <= 0) {
-          throw new Error(`Invalid quantity for "${product.name}".`);
-        }
-        if (product.stock < qty) {
-          throw new Error(`Insufficient stock for "${product.name}". Only ${product.stock} units remaining.`);
+        const resolved = resolveProductQuantityPricing(product, Number(it.quantity));
+        if (!resolved.valid) {
+          throw new Error(resolved.error || `Invalid order quantity for "${product.name}".`);
         }
 
-        const itemTotal = Number(product.price) * qty;
-        subtotal += itemTotal;
-        validatedItems.push({ product, requestedQty: qty, itemTotal });
+        subtotal = Math.round((subtotal + resolved.line_total) * 100) / 100;
+        regularSubtotal = Math.round((regularSubtotal + resolved.regular_total) * 100) / 100;
+        totalSavings = Math.round((totalSavings + resolved.savings) * 100) / 100;
+
+        validatedItems.push({
+          product,
+          requestedQty: resolved.quantity,
+          appliedUnitPrice: resolved.applied_unit_price,
+          regularUnitPrice: resolved.regular_unit_price,
+          itemTotal: resolved.line_total,
+          savings: resolved.savings,
+          appliedSlabLabel: resolved.applied_slab_label,
+          productType: resolved.product_type
+        });
       }
 
-      // 2. Fetch delivery settings
+      // 2. Fetch delivery settings & compute authoritative backend delivery fee from road distance
       const settingsRef = doc(firestoreDb, 'settings', 'delivery');
       const settingsSnap = await tx.get(settingsRef);
-      const settings = settingsSnap.exists()
-        ? settingsSnap.data()
-        : { default_delivery_fee: 25, handling_fee: 5, delivery_areas: [] };
+      const rawSettings = settingsSnap.exists() ? settingsSnap.data() : {};
+      const quote = calculateDeliveryFeeFromDistance(
+        orderPayload.distanceKm,
+        orderPayload.durationMins,
+        orderPayload.distanceSource,
+        rawSettings
+      );
 
-      let deliveryFee = (settings.default_delivery_fee !== undefined && !isNaN(Number(settings.default_delivery_fee)))
-        ? Number(settings.default_delivery_fee)
-        : 25;
-      if (typeof orderPayload.deliveryFeeOverride === 'number' && orderPayload.deliveryFeeOverride >= 0) {
-        deliveryFee = orderPayload.deliveryFeeOverride;
-      } else if (settings.delivery_areas && (orderPayload.landmark || orderPayload.address)) {
-        try {
-          const areas = typeof settings.delivery_areas === 'string'
-            ? JSON.parse(settings.delivery_areas)
-            : settings.delivery_areas;
-          const searchStr = `${orderPayload.landmark} ${orderPayload.address}`.toLowerCase();
-          const match = areas.find((a: any) => searchStr.includes(a.area.toLowerCase()));
-          if (match && typeof match.fee === 'number') deliveryFee = match.fee;
-        } catch {}
+      if (!quote.deliverable) {
+        throw new Error(quote.reason || 'Delivery is unavailable at your selected location.');
       }
 
-      const handlingFee = Number(settings.handling_fee) !== undefined ? Number(settings.handling_fee) : 5;
+      const deliveryFee = quote.delivery_fee;
+      const handlingFee = quote.handling_fee;
       const tipAmount = Math.max(0, Math.round(Number(orderPayload.tipAmount) || 0));
-      const totalAmount = subtotal + deliveryFee + handlingFee + tipAmount;
+      const totalAmount = Math.round((subtotal + deliveryFee + handlingFee + tipAmount) * 100) / 100;
 
       // 3. Atomically deduct stock & write inventory logs
       for (const vi of validatedItems) {
-        const newStock = vi.product.stock - vi.requestedQty;
+        const newStock = Math.round((vi.product.stock - vi.requestedQty) * 100) / 100;
         const prodRef = doc(firestoreDb, 'products', String(vi.product.id));
         tx.update(prodRef, { stock: newStock, updated_at: new Date().toISOString() });
 
@@ -492,7 +615,7 @@ export const ordersRepo = {
         });
       }
 
-      // 4. Create Order Doc
+      // 4. Create Order Doc (saving immutable distance, coordinates, pricing savings, and fee snapshot)
       const orderId = Date.now() + Math.floor(Math.random() * 1000);
       const nowIso = new Date().toISOString();
       const newOrder: OrderDoc = {
@@ -505,10 +628,19 @@ export const ordersRepo = {
         landmark: orderPayload.landmark,
         pincode: orderPayload.pincode,
         subtotal,
+        regular_subtotal: regularSubtotal,
+        total_savings: totalSavings,
         delivery_fee: deliveryFee,
         handling_fee: handlingFee,
         tip_amount: tipAmount,
         total_amount: totalAmount,
+        distance_km: quote.distance_km,
+        distance_source: quote.distance_source,
+        customer_lat: orderPayload.customerLat,
+        customer_lng: orderPayload.customerLng,
+        warehouse_lat: quote.warehouse_lat,
+        warehouse_lng: quote.warehouse_lng,
+        delivery_fee_rule: quote.matched_slab_label || null,
         payment_mode: 'COD',
         status: 'placed',
         delivery_type: orderPayload.deliveryType,
@@ -523,7 +655,7 @@ export const ordersRepo = {
       const orderRef = doc(firestoreDb, 'orders', String(orderId));
       tx.set(orderRef, newOrder);
 
-      // 5. Create Order Items
+      // 5. Create Order Items (saving immutable applied_unit_price, quantity, savings, and slab snapshot)
       const createdItems: OrderItemDoc[] = [];
       let itemCounter = 0;
       for (const vi of validatedItems) {
@@ -535,9 +667,13 @@ export const ordersRepo = {
           product_id: vi.product.id,
           product_name: vi.product.name,
           unit: vi.product.unit,
-          price: vi.product.price,
+          product_type: vi.productType,
+          price: vi.appliedUnitPrice,
+          regular_unit_price: vi.regularUnitPrice,
           quantity: vi.requestedQty,
           total: vi.itemTotal,
+          savings: vi.savings,
+          applied_slab_label: vi.appliedSlabLabel,
           image_url: vi.product.image_url
         };
         const itemRef = doc(firestoreDb, 'order_items', String(itemId));
@@ -621,21 +757,28 @@ export const ordersRepo = {
         throw new Error('Order is already out for delivery. Please contact FMP Supermart support to cancel.');
       }
 
-      // Restore items stock
+      // Restore items stock (read ALL product docs before any writes)
       const itemsSnap = await getDocs(collection(firestoreDb, 'order_items'));
       const items = itemsSnap.docs
         .map(d => d.data() as OrderItemDoc)
         .filter(i => i.order_id === orderId);
 
-      for (const item of items) {
-        const prodRef = doc(firestoreDb, 'products', String(item.product_id));
-        const prodSnap = await tx.get(prodRef);
+      const prodSnapshots = await Promise.all(
+        items.map(async (item) => {
+          const prodRef = doc(firestoreDb, 'products', String(item.product_id));
+          const prodSnap = await tx.get(prodRef);
+          return { item, prodRef, prodSnap };
+        })
+      );
+
+      for (let idx = 0; idx < prodSnapshots.length; idx++) {
+        const { item, prodRef, prodSnap } = prodSnapshots[idx];
         if (prodSnap.exists()) {
           const prod = prodSnap.data() as ProductDoc;
-          const restoredStock = prod.stock + item.quantity;
+          const restoredStock = Math.round((prod.stock + item.quantity) * 100) / 100;
           tx.update(prodRef, { stock: restoredStock, updated_at: new Date().toISOString() });
 
-          const logId = Date.now() + Math.floor(Math.random() * 1000);
+          const logId = Date.now() + idx + Math.floor(Math.random() * 1000);
           tx.set(doc(firestoreDb, 'inventory', String(logId)), {
             id: logId,
             product_id: item.product_id,
@@ -914,6 +1057,14 @@ export interface DeliverySettingsDoc {
   handling_fee: number;
   min_order_amount: number;
   delivery_areas: string;
+  warehouse_lat: number;
+  warehouse_lng: number;
+  warehouse_address: string;
+  delivery_pricing_mode: 'slabs' | 'per_km';
+  per_km_rate: number;
+  free_delivery_up_to_km: number;
+  max_delivery_distance_km: number;
+  delivery_slabs: DeliverySlab[];
   updated_at: string;
 }
 
@@ -921,30 +1072,65 @@ export const settingsRepo = {
   async getDeliverySettings(): Promise<DeliverySettingsDoc> {
     const ref = doc(firestoreDb, 'settings', 'delivery');
     const snap = await getDoc(ref);
+    const defaults: DeliverySettingsDoc = {
+      default_delivery_fee: 0,
+      handling_fee: 5,
+      min_order_amount: 0,
+      delivery_areas: JSON.stringify([
+        { pincode: '444105', area: 'Karanja Lad City Center', fee: 0 },
+        { pincode: '444105', area: 'Station Road & APMC', fee: 10 },
+        { pincode: '444105', area: 'Outskirts / Rural Karanja', fee: 30 }
+      ]),
+      warehouse_lat: DEFAULT_WAREHOUSE_LAT,
+      warehouse_lng: DEFAULT_WAREHOUSE_LNG,
+      warehouse_address: DEFAULT_WAREHOUSE_ADDRESS,
+      delivery_pricing_mode: 'slabs',
+      per_km_rate: 8,
+      free_delivery_up_to_km: 0,
+      max_delivery_distance_km: DEFAULT_MAX_DELIVERY_DISTANCE_KM,
+      delivery_slabs: DEFAULT_DELIVERY_SLABS,
+      updated_at: new Date().toISOString()
+    };
+
     if (!snap.exists()) {
-      const def: DeliverySettingsDoc = {
-        default_delivery_fee: 25,
-        handling_fee: 5,
-        min_order_amount: 0,
-        delivery_areas: JSON.stringify([
-          { pincode: '444105', area: 'Karanja Lad City Center', fee: 25 },
-          { pincode: '444105', area: 'Station Road & APMC', fee: 25 },
-          { pincode: '444105', area: 'Outskirts / Rural Karanja', fee: 35 }
-        ]),
-        updated_at: new Date().toISOString()
-      };
-      await setDoc(ref, def);
-      return def;
+      await setDoc(ref, defaults);
+      return defaults;
     }
-    return snap.data() as DeliverySettingsDoc;
+
+    const existing = snap.data() as Partial<DeliverySettingsDoc>;
+    const merged: DeliverySettingsDoc = {
+      ...defaults,
+      ...existing,
+      warehouse_lat: Number(existing.warehouse_lat ?? defaults.warehouse_lat),
+      warehouse_lng: Number(existing.warehouse_lng ?? defaults.warehouse_lng),
+      warehouse_address: existing.warehouse_address || defaults.warehouse_address,
+      delivery_pricing_mode: existing.delivery_pricing_mode === 'per_km' ? 'per_km' : 'slabs',
+      per_km_rate: Number(existing.per_km_rate ?? defaults.per_km_rate),
+      free_delivery_up_to_km: Number(existing.free_delivery_up_to_km ?? defaults.free_delivery_up_to_km),
+      max_delivery_distance_km: Number(existing.max_delivery_distance_km ?? defaults.max_delivery_distance_km),
+      delivery_slabs: normalizeDeliverySlabs(existing.delivery_slabs),
+      handling_fee: Number(existing.handling_fee ?? defaults.handling_fee),
+      default_delivery_fee: Number(existing.default_delivery_fee ?? defaults.default_delivery_fee),
+      min_order_amount: Number(existing.min_order_amount ?? 0),
+      delivery_areas: existing.delivery_areas || defaults.delivery_areas,
+      updated_at: existing.updated_at || defaults.updated_at
+    };
+
+    // Persist new schema fields onto Firestore if the existing document predates distance-based config
+    if (existing.warehouse_lat === undefined || !Array.isArray(existing.delivery_slabs)) {
+      await setDoc(ref, merged, { merge: true });
+    }
+
+    return merged;
   },
 
   async updateDeliverySettings(data: Partial<DeliverySettingsDoc>): Promise<DeliverySettingsDoc> {
     const ref = doc(firestoreDb, 'settings', 'delivery');
     const current = await this.getDeliverySettings();
-    const updated = {
+    const updated: DeliverySettingsDoc = {
       ...current,
       ...data,
+      delivery_slabs: data.delivery_slabs ? normalizeDeliverySlabs(data.delivery_slabs) : current.delivery_slabs,
       updated_at: new Date().toISOString()
     };
     await setDoc(ref, updated);

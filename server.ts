@@ -24,7 +24,9 @@ import {
   auditLogsRepo,
   passwordResetsRepo,
   UserDoc,
-  OrderDoc
+  OrderDoc,
+  sanitizeProductForCustomer,
+  computeWholesaleMetrics
 } from './src/server/firestoreDb.ts';
 import {
   requireAuth,
@@ -34,6 +36,17 @@ import {
   generateDeliveryOTP,
   AuthenticatedRequest
 } from './src/server/auth.ts';
+import {
+  calculateRoadDistanceKm,
+  calculateDeliveryFeeFromDistance,
+  isValidCoordinate,
+  normalizeDeliverySlabs
+} from './src/server/deliveryDistance.ts';
+import {
+  normalizeProductType,
+  validateAdminPriceSlabs,
+  resolveProductQuantityPricing
+} from './src/shared/quantityPricing.ts';
 import { collection, getDocs } from 'firebase/firestore';
 
 dotenv.config();
@@ -111,7 +124,7 @@ app.get('/api/health', async (req: Request, res: Response) => {
         warning: null
       },
       businessRules: {
-        deliveryFeeModel: 'Admin Controlled (Default ₹25, Configurable per order/area, ₹0 allowed)',
+        deliveryFeeModel: 'Admin Controlled Distance-Based Delivery (OSRM Road Distance Slabs & Per-KM)',
         handlingCharge: 5,
         paymentMode: 'Cash on Delivery (COD) Only',
         warehouseLocation: 'Karanja Lad Central Hub (444105)'
@@ -425,7 +438,13 @@ app.get(['/api/settings/delivery', '/api/admin/settings/delivery'], async (req: 
       ...settings,
       default_delivery_fee: Number(settings.default_delivery_fee),
       handling_fee: Number(settings.handling_fee),
-      min_order_amount: Number(settings.min_order_amount || 0)
+      min_order_amount: Number(settings.min_order_amount || 0),
+      warehouse_lat: Number(settings.warehouse_lat),
+      warehouse_lng: Number(settings.warehouse_lng),
+      per_km_rate: Number(settings.per_km_rate),
+      free_delivery_up_to_km: Number(settings.free_delivery_up_to_km || 0),
+      max_delivery_distance_km: Number(settings.max_delivery_distance_km),
+      delivery_slabs: normalizeDeliverySlabs(settings.delivery_slabs)
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -434,24 +453,124 @@ app.get(['/api/settings/delivery', '/api/admin/settings/delivery'], async (req: 
 
 app.put('/api/admin/settings/delivery', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { default_delivery_fee, handling_fee, min_order_amount, delivery_areas } = req.body;
+    const {
+      default_delivery_fee,
+      handling_fee,
+      min_order_amount,
+      delivery_areas,
+      warehouse_lat,
+      warehouse_lng,
+      warehouse_address,
+      delivery_pricing_mode,
+      per_km_rate,
+      free_delivery_up_to_km,
+      max_delivery_distance_km,
+      delivery_slabs
+    } = req.body;
 
-    const defFee = Number(default_delivery_fee);
-    const handFee = handling_fee !== undefined ? Number(handling_fee) : 5;
-    const minOrder = Number(min_order_amount || 0);
-    const areasStr = typeof delivery_areas === 'object' ? JSON.stringify(delivery_areas) : (delivery_areas || '[]');
+    const current = await settingsRepo.getDeliverySettings();
+
+    const wLat = warehouse_lat !== undefined ? Number(warehouse_lat) : current.warehouse_lat;
+    const wLng = warehouse_lng !== undefined ? Number(warehouse_lng) : current.warehouse_lng;
+    if (!isValidCoordinate(wLat, wLng)) {
+      return res.status(400).json({ error: 'Please provide valid central warehouse latitude and longitude coordinates.' });
+    }
+
+    const defFee = default_delivery_fee !== undefined ? Math.max(0, Number(default_delivery_fee)) : current.default_delivery_fee;
+    const handFee = handling_fee !== undefined ? Math.max(0, Number(handling_fee)) : current.handling_fee;
+    const minOrder = min_order_amount !== undefined ? Math.max(0, Number(min_order_amount)) : current.min_order_amount;
+    const areasStr = delivery_areas !== undefined
+      ? (typeof delivery_areas === 'object' ? JSON.stringify(delivery_areas) : String(delivery_areas))
+      : current.delivery_areas;
+
+    const pricingMode: 'slabs' | 'per_km' =
+      delivery_pricing_mode === 'per_km'
+        ? 'per_km'
+        : delivery_pricing_mode === 'slabs'
+        ? 'slabs'
+        : current.delivery_pricing_mode;
+
+    const perKmRate = per_km_rate !== undefined ? Math.max(0, Number(per_km_rate)) : current.per_km_rate;
+    const freeUpToKm = free_delivery_up_to_km !== undefined ? Math.max(0, Number(free_delivery_up_to_km)) : current.free_delivery_up_to_km;
+    const maxDistKm = max_delivery_distance_km !== undefined ? Number(max_delivery_distance_km) : current.max_delivery_distance_km;
+    if (!Number.isFinite(maxDistKm) || maxDistKm <= 0) {
+      return res.status(400).json({ error: 'Maximum delivery distance must be greater than 0 km.' });
+    }
+
+    let slabs = current.delivery_slabs;
+    if (Array.isArray(delivery_slabs)) {
+      for (const s of delivery_slabs) {
+        const minK = Number(s.min_km);
+        const maxK = Number(s.max_km);
+        const chg = Number(s.charge);
+        if (!Number.isFinite(minK) || minK < 0 || !Number.isFinite(maxK) || maxK <= minK) {
+          return res.status(400).json({ error: 'Each delivery slab must have valid distances where max km > min km.' });
+        }
+        if (!Number.isFinite(chg) || chg < 0) {
+          return res.status(400).json({ error: 'Delivery slab charge cannot be negative.' });
+        }
+      }
+      slabs = normalizeDeliverySlabs(delivery_slabs);
+    }
 
     const updated = await settingsRepo.updateDeliverySettings({
       default_delivery_fee: defFee,
       handling_fee: handFee,
       min_order_amount: minOrder,
-      delivery_areas: areasStr
+      delivery_areas: areasStr,
+      warehouse_lat: wLat,
+      warehouse_lng: wLng,
+      warehouse_address: warehouse_address !== undefined ? String(warehouse_address).trim() : current.warehouse_address,
+      delivery_pricing_mode: pricingMode,
+      per_km_rate: perKmRate,
+      free_delivery_up_to_km: freeUpToKm,
+      max_delivery_distance_km: maxDistKm,
+      delivery_slabs: slabs
     });
 
-    await logAudit(req.user!.id, 'admin', 'DELIVERY_SETTINGS_UPDATED', 'delivery_settings', 1, `Updated delivery fee to ₹${defFee}, handling to ₹${handFee}`);
-    res.json({ message: 'Delivery settings updated successfully.', settings: updated });
+    await logAudit(
+      req.user!.id,
+      'admin',
+      'DELIVERY_SETTINGS_UPDATED',
+      'delivery_settings',
+      1,
+      `Updated warehouse (${wLat.toFixed(4)}, ${wLng.toFixed(4)}), mode=${pricingMode}, max=${maxDistKm}km, handling=₹${handFee}`
+    );
+    res.json({ message: 'Delivery & distance settings updated successfully.', settings: updated });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Backend road distance & delivery fee calculation endpoint (OSRM + Admin rules)
+app.post('/api/delivery/calculate-fee', async (req: Request, res: Response) => {
+  try {
+    const { customer_lat, customer_lng } = req.body;
+    const cLat = Number(customer_lat);
+    const cLng = Number(customer_lng);
+
+    if (!isValidCoordinate(cLat, cLng)) {
+      return res.status(400).json({ error: 'Valid delivery pin coordinates (latitude & longitude) are required.' });
+    }
+
+    const settings = await settingsRepo.getDeliverySettings();
+    const road = await calculateRoadDistanceKm(
+      settings.warehouse_lat,
+      settings.warehouse_lng,
+      cLat,
+      cLng
+    );
+
+    const quote = calculateDeliveryFeeFromDistance(
+      road.distance_km,
+      road.duration_mins,
+      road.source,
+      settings
+    );
+
+    res.json(quote);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to calculate delivery distance.' });
   }
 });
 
@@ -518,13 +637,15 @@ app.delete('/api/admin/delivery-slots/:id', requireAuth, requireRole(['admin']),
   }
 });
 
+// Public Customer Catalog (ALWAYS strips wholesale purchase cost, margins, and supplier details)
 app.get('/api/products', async (req: Request, res: Response) => {
   try {
     const { category, search, in_stock } = req.query;
     const products = await productsRepo.list({
       category: category as string,
       search: search as string,
-      in_stock: in_stock === 'true'
+      in_stock: in_stock === 'true',
+      includeWholesale: false
     });
     res.json(products);
   } catch (err: any) {
@@ -539,7 +660,97 @@ app.get('/api/products/:id', async (req: Request, res: Response) => {
     if (!product) {
       return res.status(404).json({ error: 'Product not found.' });
     }
-    res.json(product);
+    res.json(sanitizeProductForCustomer(product));
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin-Only Product Catalog (includes purchase cost, auto-computed gross margin, and supplier details)
+app.get('/api/admin/products', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { category, search, in_stock } = req.query;
+    const products = await productsRepo.list({
+      category: category as string,
+      search: search as string,
+      in_stock: in_stock === 'true',
+      includeWholesale: true
+    });
+    res.json(products);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Backend authoritative quantity-slab cart pricing & stock/quantity validation
+app.post('/api/pricing/calculate-cart', async (req: Request, res: Response) => {
+  try {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.json({
+        all_valid: true,
+        errors: [],
+        items: [],
+        subtotal: 0,
+        regular_subtotal: 0,
+        total_savings: 0
+      });
+    }
+
+    const resolvedItems = [];
+    const errors: string[] = [];
+    let subtotal = 0;
+    let regularSubtotal = 0;
+    let totalSavings = 0;
+
+    for (const it of items) {
+      const productId = Number(it?.product_id);
+      const quantity = Number(it?.quantity);
+      const product = Number.isFinite(productId) ? await productsRepo.findById(productId) : null;
+
+      if (!product) {
+        const msg = `Product #${it?.product_id} is no longer available.`;
+        errors.push(msg);
+        resolvedItems.push({
+          valid: false,
+          error: msg,
+          product_id: productId || 0,
+          product_name: 'Unavailable item',
+          product_type: 'packaged',
+          unit: '1 unit',
+          quantity: Number.isFinite(quantity) ? quantity : 0,
+          stock: 0,
+          regular_unit_price: 0,
+          applied_unit_price: 0,
+          regular_total: 0,
+          line_total: 0,
+          savings: 0,
+          savings_percent: 0,
+          applied_slab: null,
+          applied_slab_label: null,
+          next_slab_hint: null
+        });
+        continue;
+      }
+
+      const resolved = resolveProductQuantityPricing(product, quantity);
+      if (!resolved.valid && resolved.error) {
+        errors.push(resolved.error);
+      }
+      subtotal = Math.round((subtotal + resolved.line_total) * 100) / 100;
+      regularSubtotal = Math.round((regularSubtotal + resolved.regular_total) * 100) / 100;
+      totalSavings = Math.round((totalSavings + resolved.savings) * 100) / 100;
+      resolvedItems.push(resolved);
+    }
+
+    res.json({
+      all_valid: errors.length === 0,
+      errors,
+      items: resolvedItems,
+      subtotal,
+      regular_subtotal: regularSubtotal,
+      total_savings: totalSavings
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -548,7 +759,25 @@ app.get('/api/products/:id', async (req: Request, res: Response) => {
 // Admin Product Management
 app.post('/api/products', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { category_id, name, unit, price, mrp, stock, image_url, description } = req.body;
+    const {
+      category_id,
+      name,
+      unit,
+      price,
+      mrp,
+      stock,
+      image_url,
+      description,
+      product_type,
+      min_order_qty,
+      max_order_qty,
+      pricing_slabs,
+      purchase_cost,
+      supplier_id,
+      supplier_name,
+      supplier_phone,
+      supplier_address
+    } = req.body;
     if (!name || !unit || price === undefined) {
       return res.status(400).json({ error: 'Name, unit, and price are required.' });
     }
@@ -556,7 +785,53 @@ app.post('/api/products', requireAuth, requireRole(['admin']), async (req: Authe
     const numPrice = Number(price);
     const numMrp = mrp ? Number(mrp) : numPrice;
     const discount = numMrp > numPrice ? Math.round(((numMrp - numPrice) / numMrp) * 100) : 0;
-    const numStock = Number(stock) || 0;
+    const numStock = Math.round((Number(stock) || 0) * 100) / 100;
+
+    if (numStock < 0) {
+      return res.status(400).json({ error: 'Stock cannot be negative.' });
+    }
+
+    if (purchase_cost !== undefined && purchase_cost !== null && purchase_cost !== '' && Number(purchase_cost) < 0) {
+      return res.status(400).json({ error: 'Purchase cost cannot be negative.' });
+    }
+
+    const resolvedType = normalizeProductType(product_type, unit.trim());
+    const minOrderQty =
+      min_order_qty !== undefined && min_order_qty !== null && min_order_qty !== ''
+        ? Number(min_order_qty)
+        : 1;
+    const maxOrderQty =
+      max_order_qty !== undefined && max_order_qty !== null && max_order_qty !== ''
+        ? Number(max_order_qty)
+        : null;
+
+    if (!Number.isFinite(minOrderQty) || minOrderQty <= 0) {
+      return res.status(400).json({ error: 'Minimum order quantity must be greater than 0.' });
+    }
+    if (maxOrderQty !== null && (!Number.isFinite(maxOrderQty) || maxOrderQty < minOrderQty)) {
+      return res.status(400).json({ error: 'Maximum order quantity must be ≥ minimum order quantity.' });
+    }
+
+    const slabCheck = validateAdminPriceSlabs(pricing_slabs, resolvedType);
+    if (!slabCheck.valid) {
+      return res.status(400).json({ error: slabCheck.error });
+    }
+
+    let resolvedSupplierId: number | null = supplier_id ? Number(supplier_id) : null;
+    let resolvedSupplierName: string | null = supplier_name ? String(supplier_name).trim() : null;
+    let resolvedSupplierPhone: string | null = supplier_phone ? String(supplier_phone).trim() : null;
+    let resolvedSupplierAddress: string | null = supplier_address ? String(supplier_address).trim() : null;
+
+    if (resolvedSupplierId) {
+      const sup = await suppliersRepo.findById(resolvedSupplierId);
+      if (sup) {
+        if (!resolvedSupplierName) resolvedSupplierName = sup.name;
+        if (!resolvedSupplierPhone) resolvedSupplierPhone = sup.phone;
+        if (!resolvedSupplierAddress) resolvedSupplierAddress = sup.address;
+      }
+    }
+
+    const wholesale = computeWholesaleMetrics(numPrice, purchase_cost);
 
     const product = await productsRepo.create({
       category_id: Number(category_id) || 1,
@@ -569,6 +844,17 @@ app.post('/api/products', requireAuth, requireRole(['admin']), async (req: Authe
       image_url: image_url || null,
       description: description || null,
       is_active: true,
+      product_type: resolvedType,
+      min_order_qty: minOrderQty,
+      max_order_qty: maxOrderQty,
+      pricing_slabs: slabCheck.slabs,
+      purchase_cost: wholesale.purchase_cost,
+      gross_margin: wholesale.gross_margin,
+      margin_percent: wholesale.margin_percent,
+      supplier_id: resolvedSupplierId,
+      supplier_name: resolvedSupplierName,
+      supplier_phone: resolvedSupplierPhone,
+      supplier_address: resolvedSupplierAddress,
       created_at: new Date().toISOString()
     });
 
@@ -582,11 +868,94 @@ app.post('/api/products', requireAuth, requireRole(['admin']), async (req: Authe
 app.put('/api/products/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const { category_id, name, unit, price, mrp, stock, image_url, description, is_active } = req.body;
+    const existing = await productsRepo.findById(id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
 
-    const numPrice = Number(price);
-    const numMrp = mrp ? Number(mrp) : numPrice;
+    const {
+      category_id,
+      name,
+      unit,
+      price,
+      mrp,
+      stock,
+      image_url,
+      description,
+      is_active,
+      product_type,
+      min_order_qty,
+      max_order_qty,
+      pricing_slabs,
+      purchase_cost,
+      supplier_id,
+      supplier_name,
+      supplier_phone,
+      supplier_address
+    } = req.body;
+
+    const numPrice = price !== undefined ? Number(price) : Number(existing.price);
+    const numMrp = mrp !== undefined ? Number(mrp) : Number(existing.mrp || numPrice);
     const discount = numMrp > numPrice ? Math.round(((numMrp - numPrice) / numMrp) * 100) : 0;
+
+    if (purchase_cost !== undefined && purchase_cost !== null && purchase_cost !== '' && Number(purchase_cost) < 0) {
+      return res.status(400).json({ error: 'Purchase cost cannot be negative.' });
+    }
+
+    const effectiveCost = purchase_cost !== undefined ? purchase_cost : existing.purchase_cost;
+    const wholesale = computeWholesaleMetrics(numPrice, effectiveCost);
+
+    const resolvedType = product_type !== undefined
+      ? normalizeProductType(product_type, unit ? unit.trim() : existing.unit)
+      : normalizeProductType(existing.product_type, existing.unit);
+
+    const minOrderQty =
+      min_order_qty !== undefined
+        ? (min_order_qty === null || min_order_qty === '' ? 1 : Number(min_order_qty))
+        : (existing.min_order_qty || 1);
+    const maxOrderQty =
+      max_order_qty !== undefined
+        ? (max_order_qty === null || max_order_qty === '' ? null : Number(max_order_qty))
+        : (existing.max_order_qty ?? null);
+
+    if (!Number.isFinite(minOrderQty) || minOrderQty <= 0) {
+      return res.status(400).json({ error: 'Minimum order quantity must be greater than 0.' });
+    }
+    if (maxOrderQty !== null && (!Number.isFinite(maxOrderQty) || maxOrderQty < minOrderQty)) {
+      return res.status(400).json({ error: 'Maximum order quantity must be ≥ minimum order quantity.' });
+    }
+
+    let slabsPatch: Record<string, any> = {};
+    if (pricing_slabs !== undefined) {
+      const slabCheck = validateAdminPriceSlabs(pricing_slabs, resolvedType);
+      if (!slabCheck.valid) {
+        return res.status(400).json({ error: slabCheck.error });
+      }
+      slabsPatch = { pricing_slabs: slabCheck.slabs };
+    }
+
+    let supPatch: Record<string, any> = {};
+    if (supplier_id !== undefined || supplier_name !== undefined || supplier_phone !== undefined || supplier_address !== undefined) {
+      let resolvedSupplierId: number | null = supplier_id ? Number(supplier_id) : null;
+      let resolvedSupplierName: string | null = supplier_name ? String(supplier_name).trim() : null;
+      let resolvedSupplierPhone: string | null = supplier_phone ? String(supplier_phone).trim() : null;
+      let resolvedSupplierAddress: string | null = supplier_address ? String(supplier_address).trim() : null;
+
+      if (resolvedSupplierId) {
+        const sup = await suppliersRepo.findById(resolvedSupplierId);
+        if (sup) {
+          if (!resolvedSupplierName) resolvedSupplierName = sup.name;
+          if (!resolvedSupplierPhone) resolvedSupplierPhone = sup.phone;
+          if (!resolvedSupplierAddress) resolvedSupplierAddress = sup.address;
+        }
+      }
+      supPatch = {
+        supplier_id: resolvedSupplierId,
+        supplier_name: resolvedSupplierName,
+        supplier_phone: resolvedSupplierPhone,
+        supplier_address: resolvedSupplierAddress
+      };
+    }
 
     const updated = await productsRepo.update(id, {
       ...(category_id !== undefined ? { category_id: Number(category_id) } : {}),
@@ -595,17 +964,25 @@ app.put('/api/products/:id', requireAuth, requireRole(['admin']), async (req: Au
       ...(price !== undefined ? { price: numPrice } : {}),
       ...(mrp !== undefined ? { mrp: numMrp } : {}),
       discount_percent: discount,
-      ...(stock !== undefined ? { stock: Number(stock) } : {}),
+      ...(stock !== undefined ? { stock: Math.round(Number(stock) * 100) / 100 } : {}),
       ...(image_url !== undefined ? { image_url } : {}),
       ...(description !== undefined ? { description } : {}),
-      ...(is_active !== undefined ? { is_active: Boolean(is_active) } : {})
+      ...(is_active !== undefined ? { is_active: Boolean(is_active) } : {}),
+      product_type: resolvedType,
+      min_order_qty: minOrderQty,
+      max_order_qty: maxOrderQty,
+      ...slabsPatch,
+      purchase_cost: wholesale.purchase_cost,
+      gross_margin: wholesale.gross_margin,
+      margin_percent: wholesale.margin_percent,
+      ...supPatch
     });
 
     if (!updated) {
       return res.status(404).json({ error: 'Product not found.' });
     }
 
-    await logAudit(req.user!.id, 'admin', 'PRODUCT_UPDATED', 'products', id, `Updated product details`);
+    await logAudit(req.user!.id, 'admin', 'PRODUCT_UPDATED', 'products', id, `Updated product details & wholesale pricing`);
     res.json(updated);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -632,9 +1009,9 @@ app.put('/api/products/:id/stock', requireAuth, requireRole(['admin']), async (r
   try {
     const id = parseInt(req.params.id, 10);
     const { stock, reason } = req.body;
-    const newStock = parseInt(stock, 10);
+    const newStock = Math.round(Number(stock) * 100) / 100;
 
-    if (isNaN(newStock) || newStock < 0) {
+    if (!Number.isFinite(newStock) || newStock < 0) {
       return res.status(400).json({ error: 'Stock cannot be negative.' });
     }
 
@@ -651,7 +1028,20 @@ app.put('/api/products/:id/stock', requireAuth, requireRole(['admin']), async (r
 // ----------------------------------------------------
 app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { items, customer_name, customer_phone, delivery_address, landmark, pincode, delivery_fee, tip_amount, delivery_type, scheduled_date, time_slot } = req.body;
+    const {
+      items,
+      customer_name,
+      customer_phone,
+      delivery_address,
+      landmark,
+      pincode,
+      tip_amount,
+      delivery_type,
+      scheduled_date,
+      time_slot,
+      customer_lat,
+      customer_lng
+    } = req.body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Your cart is empty. Please add items to checkout.' });
@@ -663,6 +1053,30 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
 
     if (!recipientName || !cleanPhone || !address) {
       return res.status(400).json({ error: 'Recipient name, mobile number, and delivery address are mandatory.' });
+    }
+
+    // Require map pin coordinates & calculate road distance strictly on the backend (NEVER trust client delivery_fee)
+    const cLat = Number(customer_lat);
+    const cLng = Number(customer_lng);
+    if (!isValidCoordinate(cLat, cLng)) {
+      return res.status(400).json({ error: 'Please pin your delivery location on the map to calculate delivery distance and charges.' });
+    }
+
+    const settings = await settingsRepo.getDeliverySettings();
+    const road = await calculateRoadDistanceKm(
+      settings.warehouse_lat,
+      settings.warehouse_lng,
+      cLat,
+      cLng
+    );
+    const quoteCheck = calculateDeliveryFeeFromDistance(
+      road.distance_km,
+      road.duration_mins,
+      road.source,
+      settings
+    );
+    if (!quoteCheck.deliverable) {
+      return res.status(400).json({ error: quoteCheck.reason || 'Delivery unavailable at your selected location.' });
     }
 
     // Duplicate order prevention: check if customer placed an identical order within the last 5 seconds
@@ -690,13 +1104,24 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
         scheduledDate: scheduled_date || (delivery_type === 'scheduled' ? 'Today' : 'Immediate Express'),
         timeSlot: time_slot || (delivery_type === 'scheduled' ? '09:00 AM - 12:00 PM' : 'Within 45-60 mins'),
         tipAmount: Number(tip_amount) || 0,
-        deliveryFeeOverride: typeof delivery_fee === 'number' ? delivery_fee : undefined
+        customerLat: cLat,
+        customerLng: cLng,
+        distanceKm: road.distance_km,
+        durationMins: road.duration_mins,
+        distanceSource: road.source
       },
       items,
       adminUsers
     );
 
-    await logAudit(req.user!.id, req.user!.role, 'ORDER_PLACED', 'orders', created.order.id, `Order ${created.order.order_number} placed for ₹${created.order.total_amount}`);
+    await logAudit(
+      req.user!.id,
+      req.user!.role,
+      'ORDER_PLACED',
+      'orders',
+      created.order.id,
+      `Order ${created.order.order_number} placed for ₹${created.order.total_amount} (${created.order.distance_km} km, delivery ₹${created.order.delivery_fee})`
+    );
 
     res.status(201).json({
       message: 'Order placed successfully!',
