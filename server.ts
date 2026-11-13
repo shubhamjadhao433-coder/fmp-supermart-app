@@ -43,6 +43,10 @@ import {
   normalizeDeliverySlabs
 } from './src/server/deliveryDistance.ts';
 import {
+  searchOsmLocations,
+  reverseGeocodeOsm
+} from './src/server/osmGeocoding.ts';
+import {
   normalizeProductType,
   validateAdminPriceSlabs,
   resolveProductQuantityPricing
@@ -571,6 +575,42 @@ app.post('/api/delivery/calculate-fee', async (req: Request, res: Response) => {
     res.json(quote);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to calculate delivery distance.' });
+  }
+});
+
+// OpenStreetMap Nominatim + Photon location search (supports local landmarks, chowks, roads & nearby areas)
+app.get('/api/locations/search', async (req: Request, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) {
+      return res.json({ query: q, results: [] });
+    }
+
+    const settings = await settingsRepo.getDeliverySettings();
+    const qLat = Number(req.query.lat);
+    const qLng = Number(req.query.lng);
+    const refLat = isValidCoordinate(qLat, qLng) ? qLat : settings.warehouse_lat;
+    const refLng = isValidCoordinate(qLat, qLng) ? qLng : settings.warehouse_lng;
+
+    const results = await searchOsmLocations(q, refLat, refLng);
+    res.json({ query: q, results });
+  } catch (err: any) {
+    res.status(502).json({ error: err?.message || 'Unable to search OpenStreetMap areas right now.' });
+  }
+});
+
+// OpenStreetMap reverse-geocoding endpoint for map pins, GPS, and selected search coordinates
+app.get('/api/locations/reverse', async (req: Request, res: Response) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!isValidCoordinate(lat, lng)) {
+      return res.status(400).json({ error: 'Valid latitude and longitude are required for reverse geocoding.' });
+    }
+    const result = await reverseGeocodeOsm(lat, lng);
+    res.json(result);
+  } catch (err: any) {
+    res.status(502).json({ error: err?.message || 'Unable to reverse-geocode location.' });
   }
 });
 

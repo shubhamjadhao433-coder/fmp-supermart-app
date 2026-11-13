@@ -11,7 +11,9 @@ import {
   NotificationItem,
   DeliverySettings,
   DeliveryQuote,
-  CartQuoteResponse
+  CartQuoteResponse,
+  OsmLocationSuggestion,
+  ReverseGeocodeResponse
 } from '../types.ts';
 
 const TOKEN_KEY = 'fmp_supermart_token';
@@ -220,6 +222,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ customer_lat, customer_lng })
     }),
+
+  searchLocations: (query: string, lat?: number, lng?: number): Promise<{ query: string; results: OsmLocationSuggestion[] }> => {
+    const q = new URLSearchParams({ q: query });
+    if (typeof lat === 'number' && Number.isFinite(lat)) q.set('lat', String(lat));
+    if (typeof lng === 'number' && Number.isFinite(lng)) q.set('lng', String(lng));
+    return fetchWithAuth(`/api/locations/search?${q.toString()}`);
+  },
+
+  reverseGeocodeLocation: (lat: number, lng: number): Promise<ReverseGeocodeResponse> => {
+    const q = new URLSearchParams({ lat: String(lat), lng: String(lng) });
+    return fetchWithAuth(`/api/locations/reverse?${q.toString()}`);
+  },
 
   calculateCartPricing: (items: { product_id: number; quantity: number }[]): Promise<CartQuoteResponse> =>
     fetchWithAuth('/api/pricing/calculate-cart', {

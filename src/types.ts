@@ -311,3 +311,28 @@ export interface CartQuoteResponse {
   regular_subtotal: number;
   total_savings: number;
 }
+
+export interface OsmLocationSuggestion {
+  id: string;
+  title: string;
+  subtitle: string;
+  display_name: string;
+  lat: number;
+  lng: number;
+  category: string;
+  landmark?: string;
+  postcode?: string;
+  distance_km: number;
+  source: 'nominatim' | 'photon';
+  is_nearby_fallback?: boolean;
+}
+
+export interface ReverseGeocodeResponse {
+  lat: number;
+  lng: number;
+  display_name: string;
+  formatted_address: string;
+  landmark: string;
+  postcode?: string;
+  source: 'nominatim' | 'photon' | 'coordinates';
+}

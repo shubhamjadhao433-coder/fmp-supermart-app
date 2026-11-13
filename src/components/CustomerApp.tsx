@@ -305,11 +305,12 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     loadCatalogData();
   }, []);
 
-  // Backend OSRM Distance & Fee Calculation
+  // Backend OSRM Distance & Fee Calculation (only after customer selects/confirms a delivery location)
   useEffect(() => {
-    if (cart.length === 0) {
+    if (cart.length === 0 || !hasUserMovedPin) {
       setDeliveryQuote(null);
       setQuoteError(null);
+      setQuoteLoading(false);
       return;
     }
 
@@ -326,6 +327,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         }
       } catch (err: any) {
         if (!cancelled) {
+          setDeliveryQuote(null);
           setQuoteError(err?.message || 'Unable to calculate road distance right now.');
         }
       } finally {
@@ -339,7 +341,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [cart.length, isCartOpen, customerLat, customerLng]);
+  }, [cart.length, isCartOpen, customerLat, customerLng, hasUserMovedPin]);
 
   // Authoritative Backend Cart Pricing Calculation (Quantity Slabs + Stock Validation)
   const cartSignature = cart.map(i => `${i.product.id}:${i.quantity}`).join('|');
@@ -393,6 +395,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       setNotifications([]);
       setOrders([]);
       setIsProfileOpen(false);
+      setHasUserMovedPin(false);
+      setDeliveryQuote(null);
+      setQuoteError(null);
     }
   }, [currentUser]);
 
@@ -544,12 +549,28 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       return;
     }
 
+    if (!hasUserMovedPin || !Number.isFinite(customerLat) || !Number.isFinite(customerLng)) {
+      setShowMapPicker(true);
+      setCheckoutError('Please select a valid delivery location by choosing a search suggestion, tapping "Use My Current Location", or tapping/dragging the map pin.');
+      return;
+    }
+
+    if (quoteLoading) {
+      setCheckoutError('Calculating road distance and delivery fee. Please wait a moment.');
+      return;
+    }
+
+    if (quoteError || !deliveryQuote) {
+      setCheckoutError(quoteError || 'Unable to verify road distance for the selected pin. Please adjust your delivery location.');
+      return;
+    }
+
     if (hasCartPricingError) {
       setCheckoutError(cartValidationErrors[0] || 'Please fix quantity or stock errors in your cart before checkout.');
       return;
     }
 
-    if (deliveryQuote && !deliveryQuote.deliverable) {
+    if (!deliveryQuote.deliverable) {
       setCheckoutError(deliveryQuote.reason || 'Delivery is unavailable at your selected location.');
       return;
     }
@@ -2046,19 +2067,42 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     </div>
 
                     {/* Interactive OpenStreetMap Pin Picker */}
-                    <div className="bg-white border border-emerald-200 rounded-2xl p-3 space-y-2 shadow-xs">
+                    <div
+                      className={`bg-white rounded-2xl p-3 space-y-2 shadow-xs border ${
+                        hasUserMovedPin ? 'border-emerald-200' : 'border-amber-300'
+                      }`}
+                    >
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 min-w-0">
-                          <MapPin className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <MapPin
+                            className={`w-4 h-4 shrink-0 ${
+                              hasUserMovedPin ? 'text-emerald-600' : 'text-amber-600'
+                            }`}
+                          />
                           <div className="min-w-0">
-                            <div className="font-extrabold text-gray-900 text-xs">
-                              Pin Delivery Location (OpenStreetMap)
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="font-extrabold text-gray-900 text-xs">
+                                Delivery Location (OpenStreetMap)
+                              </span>
+                              {!hasUserMovedPin && (
+                                <span className="text-[9px] font-extrabold bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded-full">
+                                  Required
+                                </span>
+                              )}
                             </div>
                             <div className="text-[10px] text-gray-500 truncate">
-                              {quoteLoading
-                                ? 'Calculating road distance via OSRM...'
+                              {!hasUserMovedPin
+                                ? 'Search area/landmark, Use My Current Location, or tap map pin'
+                                : quoteLoading
+                                ? 'Calculating road distance & delivery fee via OSRM...'
                                 : deliveryQuote
-                                ? `${deliveryQuote.distance_km} km from Central Warehouse`
+                                ? `${deliveryQuote.distance_km} km from Warehouse • ${
+                                    !deliveryQuote.deliverable
+                                      ? 'Outside Zone'
+                                      : deliveryQuote.delivery_fee === 0
+                                      ? 'FREE Delivery'
+                                      : `₹${deliveryQuote.delivery_fee} Delivery`
+                                  }`
                                 : `${customerLat.toFixed(4)}, ${customerLng.toFixed(4)}`}
                             </div>
                           </div>
@@ -2083,15 +2127,25 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                           pinLabel="Your Location"
                           pinColor="emerald"
                           heightClass="h-44"
-                          onChange={(newLat, newLng, displayAddress) => {
+                          isLocationConfirmed={hasUserMovedPin}
+                          onChange={(newLat, newLng, displayAddress, meta) => {
                             setHasUserMovedPin(true);
                             setCustomerLat(newLat);
                             setCustomerLng(newLng);
-                            if (
-                              displayAddress &&
-                              (!deliveryAddress.trim() || deliveryAddress.trim() === 'Karanja Lad, Maharashtra')
-                            ) {
-                              setDeliveryAddress(displayAddress.split(',').slice(0, 3).join(', '));
+                            setCheckoutError(null);
+                            if (displayAddress && displayAddress.trim()) {
+                              const cleaned = displayAddress
+                                .split(',')
+                                .map(s => s.trim())
+                                .filter(Boolean)
+                                .slice(0, 4)
+                                .join(', ');
+                              if (cleaned) {
+                                setDeliveryAddress(cleaned);
+                              }
+                            }
+                            if (meta?.landmark && meta.landmark.trim()) {
+                              setLandmark(meta.landmark.trim());
                             }
                           }}
                         />
@@ -2298,7 +2352,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                           )}
                         </div>
                         <span className="shrink-0">
-                          {quoteLoading ? (
+                          {!hasUserMovedPin ? (
+                            <span className="text-amber-700 font-semibold">Select location</span>
+                          ) : quoteLoading ? (
                             <span className="text-gray-400 font-medium">Calculating...</span>
                           ) : deliveryQuote && !deliveryQuote.deliverable ? (
                             <span className="text-red-600 font-bold">Unavailable</span>
@@ -2349,6 +2405,15 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </div>
                 )}
 
+                {!hasUserMovedPin && (
+                  <div className="text-xs text-amber-900 bg-amber-50 p-2.5 rounded-xl border border-amber-200 flex items-start gap-2 font-semibold">
+                    <MapPin className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                    <span>
+                      Please select your delivery location (search area/landmark, Use My Current Location, or tap map pin) before placing your order.
+                    </span>
+                  </div>
+                )}
+
                 {deliveryQuote && !deliveryQuote.deliverable && (
                   <div className="text-xs text-red-700 bg-red-50 p-2.5 rounded-xl border border-red-200 flex items-start gap-2 font-semibold">
                     <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
@@ -2374,23 +2439,29 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 <button
                   onClick={handleCheckoutSubmit}
                   disabled={
+                    !hasUserMovedPin ||
                     checkoutSubmitting ||
                     quoteLoading ||
                     cartQuoteLoading ||
                     hasCartPricingError ||
-                    (deliveryQuote !== null && !deliveryQuote.deliverable)
+                    !deliveryQuote ||
+                    !deliveryQuote.deliverable
                   }
                   className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span>
                     {checkoutSubmitting
                       ? 'Placing Order...'
+                      : !hasUserMovedPin
+                      ? 'Select Delivery Location to Order'
                       : hasCartPricingError
                       ? 'Fix Quantity / Stock Errors'
                       : cartQuoteLoading || quoteLoading
                       ? 'Calculating Prices & Delivery...'
                       : deliveryQuote && !deliveryQuote.deliverable
                       ? 'Outside Delivery Zone'
+                      : !deliveryQuote
+                      ? 'Verify Delivery Location to Order'
                       : `Place COD Order (₹${totalAmount})`}
                   </span>
                   <ArrowRight className="w-4 h-4" />
