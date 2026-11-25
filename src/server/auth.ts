@@ -8,7 +8,8 @@ export interface AuthUser {
   id: number;
   phone: string;
   name: string;
-  role: 'customer' | 'admin' | 'rider';
+  role: 'customer' | 'admin' | 'rider' | 'store_owner';
+  store_id?: number | null;
   address?: string;
   landmark?: string;
   pincode?: string;
@@ -25,7 +26,8 @@ export function generateToken(user: AuthUser): string {
       id: user.id,
       phone: user.phone,
       name: user.name,
-      role: user.role
+      role: user.role,
+      store_id: user.store_id ?? null
     },
     JWT_SECRET,
     { expiresIn: '30d' }
@@ -75,6 +77,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       phone: user.phone,
       name: user.name,
       role: user.role,
+      store_id: user.store_id ?? null,
       address: user.address || undefined,
       landmark: user.landmark || undefined,
       pincode: user.pincode,
@@ -86,7 +89,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
   }
 }
 
-export function requireRole(allowedRoles: ('customer' | 'admin' | 'rider')[]) {
+export function requireRole(allowedRoles: ('customer' | 'admin' | 'rider' | 'store_owner')[]) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     if (!req.user) {
       return res.status(401).json({ error: 'Unauthorized.' });

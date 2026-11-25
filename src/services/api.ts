@@ -13,7 +13,14 @@ import {
   DeliveryQuote,
   CartQuoteResponse,
   OsmLocationSuggestion,
-  ReverseGeocodeResponse
+  ReverseGeocodeResponse,
+  Store,
+  StoreOwnerStats,
+  StoreServiceType,
+  StoreApprovalStatus,
+  Complaint,
+  ComplaintStatus,
+  SavedAddress
 } from '../types.ts';
 
 const TOKEN_KEY = 'fmp_supermart_token';
@@ -128,7 +135,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
 
   if (!response.ok) {
     // If the server explicitly rejected the token as expired or invalid (401), clean up local session
-    if (response.status === 401 && (url.startsWith('/api/auth/me') || url.startsWith('/api/admin') || url.startsWith('/api/rider'))) {
+    if (response.status === 401 && (url.startsWith('/api/auth/me') || url.startsWith('/api/admin') || url.startsWith('/api/rider') || url.startsWith('/api/store-owner'))) {
       authStorage.clearAll();
     }
     throw new Error(data?.error || `Request failed with status ${response.status}`);
@@ -258,20 +265,44 @@ export const api = {
       body: JSON.stringify({ rating, review_text }),
     }),
 
+  // Saved Addresses
+  getAddresses: (): Promise<SavedAddress[]> =>
+    fetchWithAuth('/api/addresses'),
+
+  saveAddress: (payload: {
+    label: string;
+    recipient_name?: string;
+    phone?: string;
+    address: string;
+    landmark?: string;
+    pincode?: string;
+    lat?: number | null;
+    lng?: number | null;
+    is_default?: boolean;
+  }): Promise<SavedAddress> =>
+    fetchWithAuth('/api/addresses', { method: 'POST', body: JSON.stringify(payload) }),
+
+  deleteAddress: (id: number): Promise<{ message: string }> =>
+    fetchWithAuth(`/api/addresses/${id}`, { method: 'DELETE' }),
+
   // Orders
   createOrder: (payload: {
     items: { product_id: number; quantity: number }[];
+    store_id?: number | null;
+    fulfillment_type?: 'delivery' | 'pickup';
+    payment_mode?: 'COD' | 'Pay at Store';
+    idempotency_key?: string;
     customer_name?: string;
     customer_phone?: string;
-    delivery_address: string;
+    delivery_address?: string;
     landmark?: string;
     pincode?: string;
     delivery_type?: 'immediate' | 'scheduled';
     scheduled_date?: string;
     time_slot?: string;
     tip_amount?: number;
-    customer_lat: number;
-    customer_lng: number;
+    customer_lat?: number;
+    customer_lng?: number;
   }): Promise<{ message: string; order: Order }> =>
     fetchWithAuth('/api/orders', { method: 'POST', body: JSON.stringify(payload) }),
 
@@ -410,4 +441,164 @@ export const api = {
 
   getRiderCodSummary: (): Promise<RiderSummary> =>
     fetchWithAuth('/api/rider/cod-summary'),
+
+  // Marketplace: Public Store Discovery & Self-Registration
+  registerStore: async (payload: {
+    owner_name: string;
+    phone: string;
+    password: string;
+    store_name: string;
+    description?: string;
+    address: string;
+    landmark?: string;
+    pincode?: string;
+    lat: number;
+    lng: number;
+    photos?: string[];
+    opening_hours: string;
+    service_type: StoreServiceType;
+    delivery_radius_km?: number;
+    delivery_fee?: number;
+    min_order_amount?: number;
+  }): Promise<{ message: string; token: string; user: User; store: Store }> => {
+    const data = await fetchWithAuth('/api/stores/register', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (data?.token) authStorage.setToken(data.token);
+    if (data?.user) authStorage.setUser(data.user);
+    return data;
+  },
+
+  getNearbyStores: (params?: { lat?: number; lng?: number; search?: string }): Promise<Store[]> => {
+    const q = new URLSearchParams();
+    if (typeof params?.lat === 'number' && Number.isFinite(params.lat)) q.set('lat', String(params.lat));
+    if (typeof params?.lng === 'number' && Number.isFinite(params.lng)) q.set('lng', String(params.lng));
+    if (params?.search) q.set('search', params.search);
+    return fetchWithAuth(`/api/stores/nearby?${q.toString()}`);
+  },
+
+  getStoreDetails: (storeId: number, lat?: number, lng?: number): Promise<Store> => {
+    const q = new URLSearchParams();
+    if (typeof lat === 'number' && Number.isFinite(lat)) q.set('lat', String(lat));
+    if (typeof lng === 'number' && Number.isFinite(lng)) q.set('lng', String(lng));
+    const qs = q.toString();
+    return fetchWithAuth(`/api/stores/${storeId}${qs ? `?${qs}` : ''}`);
+  },
+
+  getStoreProducts: (storeId: number, params?: { category?: string; search?: string; in_stock?: boolean }): Promise<Product[]> => {
+    const q = new URLSearchParams();
+    if (params?.category) q.set('category', params.category);
+    if (params?.search) q.set('search', params.search);
+    if (params?.in_stock) q.set('in_stock', 'true');
+    return fetchWithAuth(`/api/stores/${storeId}/products?${q.toString()}`);
+  },
+
+  calculateStoreDeliveryQuote: (storeId: number, customer_lat: number, customer_lng: number): Promise<DeliveryQuote> =>
+    fetchWithAuth(`/api/stores/${storeId}/delivery-quote`, {
+      method: 'POST',
+      body: JSON.stringify({ customer_lat, customer_lng })
+    }),
+
+  // Store Owner Dashboard
+  getMyStore: (): Promise<{
+    store: Store;
+    stats: StoreOwnerStats;
+  }> => fetchWithAuth('/api/store-owner/my-store'),
+
+  updateMyStore: (payload: Partial<Store>): Promise<{ message: string; store: Store }> =>
+    fetchWithAuth('/api/store-owner/my-store', { method: 'PUT', body: JSON.stringify(payload) }),
+
+  getStoreOwnerProducts: (): Promise<Product[]> =>
+    fetchWithAuth('/api/store-owner/products'),
+
+  createStoreOwnerProduct: (product: Partial<Product>): Promise<Product> =>
+    fetchWithAuth('/api/store-owner/products', { method: 'POST', body: JSON.stringify(product) }),
+
+  updateStoreOwnerProduct: (id: number, product: Partial<Product>): Promise<Product> =>
+    fetchWithAuth(`/api/store-owner/products/${id}`, { method: 'PUT', body: JSON.stringify(product) }),
+
+  updateStoreOwnerProductStock: (id: number, stock: number, is_active?: boolean): Promise<Product> =>
+    fetchWithAuth(`/api/store-owner/products/${id}/stock`, {
+      method: 'PUT',
+      body: JSON.stringify({ stock, ...(typeof is_active === 'boolean' ? { is_active } : {}) })
+    }),
+
+  deleteStoreOwnerProduct: (id: number): Promise<{ message: string }> =>
+    fetchWithAuth(`/api/store-owner/products/${id}`, { method: 'DELETE' }),
+
+  getStoreOwnerOrders: (): Promise<Order[]> =>
+    fetchWithAuth('/api/store-owner/orders'),
+
+  updateStoreOwnerOrderStatus: (
+    orderId: number,
+    status: 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled',
+    rejection_reason?: string
+  ): Promise<Order> =>
+    fetchWithAuth(`/api/store-owner/orders/${orderId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status, rejection_reason })
+    }),
+
+  // Complaints / Reported Problems
+  submitComplaint: (payload: {
+    subject: string;
+    description: string;
+    store_id?: number | null;
+    order_id?: number | null;
+  }): Promise<Complaint> =>
+    fetchWithAuth('/api/complaints', { method: 'POST', body: JSON.stringify(payload) }),
+
+  getMyComplaints: (): Promise<Complaint[]> =>
+    fetchWithAuth('/api/complaints/my'),
+
+  // Admin Marketplace Control
+  getAdminStores: (): Promise<(Store & { order_count?: number })[]> =>
+    fetchWithAuth('/api/admin/stores'),
+
+  updateStoreApproval: (
+    storeId: number,
+    approval_status: StoreApprovalStatus,
+    rejection_reason?: string
+  ): Promise<Store> =>
+    fetchWithAuth(`/api/admin/stores/${storeId}/approval`, {
+      method: 'PUT',
+      body: JSON.stringify({ approval_status, rejection_reason })
+    }),
+
+  toggleStoreStatus: (storeId: number, is_active: boolean): Promise<Store> =>
+    fetchWithAuth(`/api/admin/stores/${storeId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active })
+    }),
+
+  getAdminCustomers: (): Promise<(User & { order_count: number; total_spent: number })[]> =>
+    fetchWithAuth('/api/admin/customers'),
+
+  toggleCustomerStatus: (customerId: number, is_active: boolean): Promise<User> =>
+    fetchWithAuth(`/api/admin/customers/${customerId}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active })
+    }),
+
+  getAdminCategories: (): Promise<Category[]> =>
+    fetchWithAuth('/api/admin/categories'),
+
+  createAdminCategory: (payload: { name: string; description?: string; image_url?: string; display_order?: number }): Promise<Category> =>
+    fetchWithAuth('/api/admin/categories', { method: 'POST', body: JSON.stringify(payload) }),
+
+  updateAdminCategory: (id: number, payload: Partial<Category>): Promise<Category> =>
+    fetchWithAuth(`/api/admin/categories/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+
+  deleteAdminCategory: (id: number): Promise<{ message: string }> =>
+    fetchWithAuth(`/api/admin/categories/${id}`, { method: 'DELETE' }),
+
+  getAdminComplaints: (): Promise<Complaint[]> =>
+    fetchWithAuth('/api/admin/complaints'),
+
+  updateAdminComplaint: (id: number, status: ComplaintStatus, admin_notes?: string): Promise<Complaint> =>
+    fetchWithAuth(`/api/admin/complaints/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status, admin_notes })
+    }),
 };

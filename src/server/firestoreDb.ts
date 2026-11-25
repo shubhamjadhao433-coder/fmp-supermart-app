@@ -96,7 +96,8 @@ export interface UserDoc {
   phone: string;
   name: string;
   email: string | null;
-  role: 'customer' | 'admin' | 'rider';
+  role: 'customer' | 'admin' | 'rider' | 'store_owner';
+  store_id?: number | null;
   password_hash: string;
   address: string | null;
   landmark: string | null;
@@ -165,6 +166,14 @@ export const usersRepo = {
     const q = query(collection(firestoreDb, 'users'), where('role', '==', 'admin'));
     const snap = await getDocs(q);
     return snap.docs.map(d => d.data() as UserDoc);
+  },
+
+  async listCustomers(): Promise<UserDoc[]> {
+    const q = query(collection(firestoreDb, 'users'), where('role', '==', 'customer'));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map(d => d.data() as UserDoc)
+      .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
   }
 };
 
@@ -182,7 +191,7 @@ export interface CategoryDoc {
 }
 
 export const categoriesRepo = {
-  async list(): Promise<CategoryDoc[]> {
+  async list(includeInactive: boolean = false): Promise<CategoryDoc[]> {
     const snap = await getDocs(collection(firestoreDb, 'categories'));
     const list = snap.docs
       .map(d => {
@@ -190,7 +199,7 @@ export const categoriesRepo = {
         const id = data.id !== undefined && data.id !== null ? Number(data.id) : (isNaN(Number(d.id)) ? d.id : Number(d.id));
         return { ...data, id } as CategoryDoc;
       })
-      .filter(c => c.name);
+      .filter(c => c.name && (includeInactive || c.is_active !== false));
     return list.sort((a, b) => (a.display_order || 0) - (b.display_order || 0) || (Number(a.id) || 0) - (Number(b.id) || 0));
   },
 
@@ -211,6 +220,165 @@ export const categoriesRepo = {
     const cat: CategoryDoc = { ...data, id };
     await setDoc(doc(firestoreDb, 'categories', String(id)), cat);
     return cat;
+  },
+
+  async update(id: number, data: Partial<CategoryDoc>): Promise<CategoryDoc | null> {
+    const ref = doc(firestoreDb, 'categories', String(id));
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const updated = { ...snap.data(), ...data, id };
+    await setDoc(ref, updated, { merge: true });
+    return updated as CategoryDoc;
+  },
+
+  async remove(id: number): Promise<boolean> {
+    const ref = doc(firestoreDb, 'categories', String(id));
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return false;
+    await deleteDoc(ref);
+    return true;
+  }
+};
+
+// ----------------------------------------------------
+// STORES REPOSITORY (HYPERLOCAL KIRANA MARKETPLACE)
+// ----------------------------------------------------
+export interface StoreDoc {
+  id: number;
+  owner_id: number;
+  owner_name: string;
+  owner_phone: string;
+  name: string;
+  description?: string | null;
+  address: string;
+  landmark?: string | null;
+  city: string;
+  pincode: string;
+  lat: number;
+  lng: number;
+  logo_url?: string | null;
+  banner_url?: string | null;
+  photos: string[];
+  opening_hours: string;
+  opening_time?: string | null;
+  closing_time?: string | null;
+  weekly_closed_days?: string[];
+  service_type: 'delivery' | 'pickup' | 'both';
+  delivery_radius_km: number;
+  delivery_fee: number;
+  min_order_amount: number;
+  delivery_info?: string | null;
+  approval_status: 'pending' | 'approved' | 'rejected';
+  rejection_reason?: string | null;
+  is_active: boolean;
+  is_open: boolean;
+  // Future monetization flags (always disabled until Admin activates in future phase)
+  featured?: boolean;
+  subscription_tier?: 'free';
+  created_at: string;
+  updated_at: string;
+}
+
+export const storesRepo = {
+  async listAll(): Promise<StoreDoc[]> {
+    const snap = await getDocs(collection(firestoreDb, 'stores'));
+    return snap.docs
+      .map(d => d.data() as StoreDoc)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  async listApprovedActive(): Promise<StoreDoc[]> {
+    const snap = await getDocs(collection(firestoreDb, 'stores'));
+    return snap.docs
+      .map(d => d.data() as StoreDoc)
+      .filter(s => s.approval_status === 'approved' && s.is_active !== false);
+  },
+
+  async findById(id: number): Promise<StoreDoc | null> {
+    const ref = doc(firestoreDb, 'stores', String(id));
+    const snap = await getDoc(ref);
+    return snap.exists() ? (snap.data() as StoreDoc) : null;
+  },
+
+  async findByOwnerId(ownerId: number): Promise<StoreDoc | null> {
+    const q = query(collection(firestoreDb, 'stores'), where('owner_id', '==', ownerId));
+    const snap = await getDocs(q);
+    if (snap.empty) return null;
+    return snap.docs[0].data() as StoreDoc;
+  },
+
+  async create(data: Omit<StoreDoc, 'id'>): Promise<StoreDoc> {
+    const id = await getNextId('stores');
+    const storeDoc: StoreDoc = { ...data, id };
+    await setDoc(doc(firestoreDb, 'stores', String(id)), storeDoc);
+    return storeDoc;
+  },
+
+  async update(id: number, data: Partial<StoreDoc>): Promise<StoreDoc | null> {
+    const ref = doc(firestoreDb, 'stores', String(id));
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const updated = { ...snap.data(), ...data, id, updated_at: new Date().toISOString() };
+    await setDoc(ref, updated, { merge: true });
+    return updated as StoreDoc;
+  }
+};
+
+// ----------------------------------------------------
+// COMPLAINTS / REPORTED PROBLEMS REPOSITORY
+// ----------------------------------------------------
+export interface ComplaintDoc {
+  id: number;
+  reporter_id: number;
+  reporter_name: string;
+  reporter_phone: string;
+  reporter_role: string;
+  store_id?: number | null;
+  store_name?: string | null;
+  order_id?: number | null;
+  order_number?: string | null;
+  subject: string;
+  description: string;
+  status: 'open' | 'in_review' | 'resolved';
+  admin_notes?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
+}
+
+export const complaintsRepo = {
+  async listAll(): Promise<ComplaintDoc[]> {
+    const snap = await getDocs(collection(firestoreDb, 'complaints'));
+    return snap.docs
+      .map(d => d.data() as ComplaintDoc)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  async listByReporter(reporterId: number): Promise<ComplaintDoc[]> {
+    const q = query(collection(firestoreDb, 'complaints'), where('reporter_id', '==', reporterId));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map(d => d.data() as ComplaintDoc)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  async create(data: Omit<ComplaintDoc, 'id' | 'created_at'>): Promise<ComplaintDoc> {
+    const id = await getNextId('complaints');
+    const docData: ComplaintDoc = {
+      ...data,
+      id,
+      created_at: new Date().toISOString()
+    };
+    await setDoc(doc(firestoreDb, 'complaints', String(id)), docData);
+    return docData;
+  },
+
+  async update(id: number, data: Partial<ComplaintDoc>): Promise<ComplaintDoc | null> {
+    const ref = doc(firestoreDb, 'complaints', String(id));
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const updated = { ...snap.data(), ...data, id };
+    await setDoc(ref, updated, { merge: true });
+    return updated as ComplaintDoc;
   }
 };
 
@@ -220,6 +388,8 @@ export const categoriesRepo = {
 export interface ProductDoc {
   id: number;
   category_id: number;
+  store_id?: number | null;
+  store_name?: string | null;
   name: string;
   unit: string;
   price: number;
@@ -229,6 +399,7 @@ export interface ProductDoc {
   image_url: string | null;
   description: string | null;
   is_active: boolean;
+  is_deleted?: boolean;
   product_type?: ProductPackagingType;
   min_order_qty?: number;
   max_order_qty?: number | null;
@@ -288,7 +459,15 @@ export function sanitizeProductForCustomer<T extends Record<string, any>>(produc
 }
 
 export const productsRepo = {
-  async list(filters?: { category?: string; search?: string; in_stock?: boolean; includeWholesale?: boolean }): Promise<any[]> {
+  async list(filters?: {
+    category?: string;
+    search?: string;
+    in_stock?: boolean;
+    includeWholesale?: boolean;
+    store_id?: number | null;
+    includeInactive?: boolean;
+    includeZeroStockUnavailable?: boolean;
+  }): Promise<any[]> {
     const snap = await getDocs(collection(firestoreDb, 'products'));
     let products = snap.docs
       .map(d => {
@@ -296,9 +475,35 @@ export const productsRepo = {
         const id = data.id !== undefined && data.id !== null ? Number(data.id) : (isNaN(Number(d.id)) ? d.id : Number(d.id));
         return { ...data, id } as ProductDoc;
       })
-      .filter(p => p.is_active !== false && p.name && p.price !== undefined);
+      .filter(
+        p =>
+          !p.is_deleted &&
+          p.name &&
+          p.price !== undefined &&
+          (filters?.includeInactive ||
+            p.is_active !== false ||
+            (filters?.includeZeroStockUnavailable && Number(p.stock) <= 0))
+      );
 
-    const categories = await categoriesRepo.list();
+    const stores = await storesRepo.listAll();
+    const storeMap = new Map(stores.map(s => [s.id, s]));
+
+    if (filters?.store_id !== undefined) {
+      if (filters.store_id === null) {
+        products = products.filter(p => !p.store_id);
+      } else {
+        products = products.filter(p => p.store_id === filters.store_id);
+      }
+    } else if (!filters?.includeWholesale && !filters?.includeInactive) {
+      // Public catalog must never leak products from unapproved or deactivated stores
+      products = products.filter(p => {
+        if (!p.store_id) return true;
+        const st = storeMap.get(p.store_id);
+        return Boolean(st && st.approval_status === 'approved' && st.is_active !== false);
+      });
+    }
+
+    const categories = await categoriesRepo.list(true);
     const catMap = new Map(categories.map(c => [c.id, c]));
 
     // Reviews summary map
@@ -327,11 +532,13 @@ export const productsRepo = {
       const s = filters.search.toLowerCase();
       products = products.filter(p => {
         const cat = catMap.get(p.category_id);
+        const st = p.store_id ? storeMap.get(p.store_id) : null;
         return (
           p.name.toLowerCase().includes(s) ||
           (p.description && p.description.toLowerCase().includes(s)) ||
           String(p.id).includes(s) ||
-          (cat && cat.name.toLowerCase().includes(s))
+          (cat && cat.name.toLowerCase().includes(s)) ||
+          (st && st.name.toLowerCase().includes(s))
         );
       });
     }
@@ -344,6 +551,7 @@ export const productsRepo = {
 
     return products.map(p => {
       const cat = catMap.get(p.category_id);
+      const st = p.store_id ? storeMap.get(p.store_id) : null;
       const r = ratingMap[p.id];
       const count = r ? r.count : 0;
       const avg = count > 0 ? Number((r.sum / count).toFixed(1)) : (p.id % 2 === 0 ? 4.8 : 4.9);
@@ -352,6 +560,7 @@ export const productsRepo = {
       const pricingSlabs = normalizeProductPriceSlabs(p.pricing_slabs, productType === 'loose' ? 'kg' : '');
       const enriched = {
         ...p,
+        store_name: st?.name || p.store_name || null,
         product_type: productType,
         min_order_qty: p.min_order_qty && Number(p.min_order_qty) > 0 ? Number(p.min_order_qty) : 1,
         max_order_qty: p.max_order_qty && Number(p.max_order_qty) > 0 ? Number(p.max_order_qty) : null,
@@ -407,7 +616,7 @@ export const productsRepo = {
     const ref = doc(firestoreDb, 'products', String(id));
     const snap = await getDoc(ref);
     if (!snap.exists()) return false;
-    await updateDoc(ref, { is_active: false, updated_at: new Date().toISOString() });
+    await updateDoc(ref, { is_active: false, is_deleted: true, updated_at: new Date().toISOString() });
     return true;
   },
 
@@ -442,6 +651,58 @@ export const productsRepo = {
 
       return updated;
     });
+  },
+
+  async storeAdjustStock(
+    id: number,
+    newStock: number,
+    storeId: number,
+    isActiveOverride?: boolean
+  ): Promise<ProductDoc> {
+    const prodRef = doc(firestoreDb, 'products', String(id));
+    return await runTransaction(firestoreDb, async (tx) => {
+      const snap = await tx.get(prodRef);
+      if (!snap.exists()) throw new Error('Product not found.');
+      const prod = snap.data() as ProductDoc;
+      if (prod.store_id !== storeId) {
+        throw new Error('Forbidden: You can only adjust inventory for your own store products.');
+      }
+
+      const diff = Math.round((newStock - prod.stock) * 100) / 100;
+      let nextActive: boolean;
+      if (newStock <= 0) {
+        nextActive = false;
+      } else if (typeof isActiveOverride === 'boolean') {
+        nextActive = isActiveOverride;
+      } else if (prod.stock <= 0) {
+        nextActive = true;
+      } else {
+        nextActive = prod.is_active !== false;
+      }
+
+      const updated: ProductDoc = {
+        ...prod,
+        stock: newStock,
+        is_active: nextActive,
+        updated_at: new Date().toISOString()
+      };
+      tx.set(prodRef, updated, { merge: true });
+
+      const logId = await getNextId('inventory');
+      const logRef = doc(firestoreDb, 'inventory', String(logId));
+      tx.set(logRef, {
+        id: logId,
+        product_id: id,
+        change_type: 'store_stock_adjust',
+        quantity_change: diff,
+        stock_after: newStock,
+        reference_id: `STORE-${storeId}`,
+        notes: newStock <= 0 ? 'Stock reached 0; product automatically marked unavailable' : 'Store owner stock update',
+        created_at: new Date().toISOString()
+      });
+
+      return updated;
+    });
   }
 };
 
@@ -454,6 +715,9 @@ export interface OrderDoc {
   customer_id: number;
   customer_name: string;
   customer_phone: string;
+  store_id?: number | null;
+  store_name?: string | null;
+  fulfillment_type?: 'delivery' | 'pickup';
   delivery_address: string;
   landmark: string;
   pincode: string;
@@ -471,7 +735,9 @@ export interface OrderDoc {
   warehouse_lat?: number | null;
   warehouse_lng?: number | null;
   delivery_fee_rule?: string | null;
-  payment_mode: string;
+  payment_mode: 'COD' | 'Pay at Store' | string;
+  payment_method?: string;
+  payment_status?: 'pending' | 'paid' | 'cancelled';
   status: 'placed' | 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled';
   delivery_type: string;
   scheduled_date: string;
@@ -480,9 +746,14 @@ export interface OrderDoc {
   rider_name?: string | null;
   rider_phone?: string | null;
   delivery_otp?: string | null;
+  pickup_code?: string | null;
   otp_expires_at?: string | null;
   otp_attempts?: number;
   failure_reason?: string | null;
+  rejection_reason?: string | null;
+  cancelled_by_role?: 'customer' | 'store_owner' | 'admin' | string | null;
+  cancelled_at?: string | null;
+  idempotency_key?: string | null;
   cod_collected: boolean;
   cod_collected_at?: string | null;
   cod_reconciled: boolean;
@@ -513,6 +784,11 @@ export const ordersRepo = {
       customerId: number;
       customerName: string;
       customerPhone: string;
+      storeId?: number | null;
+      fulfillmentType?: 'delivery' | 'pickup';
+      paymentMode?: 'COD' | 'Pay at Store';
+      idempotencyKey?: string | null;
+      pickupCode?: string | null;
       address: string;
       landmark: string;
       pincode: string;
@@ -530,9 +806,53 @@ export const ordersRepo = {
     adminUsers: UserDoc[]
   ): Promise<{ order: OrderDoc; items: OrderItemDoc[] }> {
     const orderNumber = `FMP-KL-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+    const cleanIdemKey = orderPayload.idempotencyKey
+      ? String(orderPayload.idempotencyKey).trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)
+      : '';
 
     return await runTransaction(firestoreDb, async (tx) => {
-      // 1. Fetch & validate all items atomically (backend quantity-slab pricing + stock/min/max check)
+      const storeId = orderPayload.storeId ? Number(orderPayload.storeId) : null;
+      const fulfillmentType: 'delivery' | 'pickup' =
+        orderPayload.fulfillmentType === 'pickup' ? 'pickup' : 'delivery';
+      const idemRef = cleanIdemKey
+        ? doc(firestoreDb, 'order_idempotency', `${orderPayload.customerId}_${cleanIdemKey}`)
+        : null;
+
+      // -1. Atomic idempotency check (must execute before any writes)
+      if (idemRef) {
+        const idemSnap = await tx.get(idemRef);
+        if (idemSnap.exists()) {
+          const existingIdem = idemSnap.data();
+          throw new Error(`DUPLICATE_ORDER:${existingIdem.order_id || ''}:Duplicate order prevented. This order has already been submitted.`);
+        }
+      }
+
+      // 0. If marketplace store order, read & verify store first (before any writes!)
+      let storeDoc: StoreDoc | null = null;
+      if (storeId) {
+        const storeRef = doc(firestoreDb, 'stores', String(storeId));
+        const storeSnap = await tx.get(storeRef);
+        if (!storeSnap.exists()) {
+          throw new Error('Selected grocery store was not found.');
+        }
+        storeDoc = storeSnap.data() as StoreDoc;
+        if (storeDoc.approval_status !== 'approved' || storeDoc.is_active === false) {
+          throw new Error('This store is currently not active on FMP Supermart.');
+        }
+        if (storeDoc.is_open === false) {
+          throw new Error(`${storeDoc.name} is currently closed and not accepting orders.`);
+        }
+        const supportsDelivery = storeDoc.service_type === 'delivery' || storeDoc.service_type === 'both';
+        const supportsPickup = storeDoc.service_type === 'pickup' || storeDoc.service_type === 'both';
+        if (fulfillmentType === 'delivery' && !supportsDelivery) {
+          throw new Error(`${storeDoc.name} only supports Store Pickup.`);
+        }
+        if (fulfillmentType === 'pickup' && !supportsPickup) {
+          throw new Error(`${storeDoc.name} only supports Home Delivery.`);
+        }
+      }
+
+      // 1. Fetch & validate all items atomically (backend quantity-slab pricing + stock/min/max + store isolation check)
       let subtotal = 0;
       let regularSubtotal = 0;
       let totalSavings = 0;
@@ -554,6 +874,16 @@ export const ordersRepo = {
           throw new Error(`Product #${it.product_id} is no longer available.`);
         }
         const product = prodSnap.data() as ProductDoc;
+        if (product.is_deleted || product.is_active === false) {
+          throw new Error(`"${product.name}" is currently unavailable.`);
+        }
+        if (storeId && product.store_id !== storeId) {
+          throw new Error(`"${product.name}" does not belong to ${storeDoc?.name || 'the selected store'}. All cart items must come from one store.`);
+        }
+        if (!storeId && product.store_id) {
+          throw new Error(`"${product.name}" belongs to a local store. Please order it directly from that store.`);
+        }
+
         const resolved = resolveProductQuantityPricing(product, Number(it.quantity));
         if (!resolved.valid) {
           throw new Error(resolved.error || `Invalid order quantity for "${product.name}".`);
@@ -575,31 +905,76 @@ export const ordersRepo = {
         });
       }
 
-      // 2. Fetch delivery settings & compute authoritative backend delivery fee from road distance
+      // 2. Fetch delivery settings & compute authoritative backend delivery fee
       const settingsRef = doc(firestoreDb, 'settings', 'delivery');
       const settingsSnap = await tx.get(settingsRef);
       const rawSettings = settingsSnap.exists() ? settingsSnap.data() : {};
-      const quote = calculateDeliveryFeeFromDistance(
-        orderPayload.distanceKm,
-        orderPayload.durationMins,
-        orderPayload.distanceSource,
-        rawSettings
-      );
 
-      if (!quote.deliverable) {
-        throw new Error(quote.reason || 'Delivery is unavailable at your selected location.');
+      let deliveryFee = 0;
+      let handlingFee = 0;
+      let distanceKm = orderPayload.distanceKm;
+      let distanceSource = orderPayload.distanceSource;
+      let warehouseLat = Number((rawSettings as any).warehouse_lat ?? DEFAULT_WAREHOUSE_LAT);
+      let warehouseLng = Number((rawSettings as any).warehouse_lng ?? DEFAULT_WAREHOUSE_LNG);
+      let matchedSlabLabel: string | null = null;
+
+      if (storeDoc) {
+        warehouseLat = storeDoc.lat;
+        warehouseLng = storeDoc.lng;
+        if (storeDoc.min_order_amount > 0 && subtotal < storeDoc.min_order_amount) {
+          throw new Error(`Minimum order amount for ${storeDoc.name} is ₹${storeDoc.min_order_amount}.`);
+        }
+        if (fulfillmentType === 'pickup') {
+          deliveryFee = 0;
+          handlingFee = 0;
+          distanceKm = 0;
+          matchedSlabLabel = 'Store Pickup (Free)';
+        } else {
+          if (storeDoc.delivery_radius_km > 0 && distanceKm > storeDoc.delivery_radius_km) {
+            throw new Error(
+              `Your selected location (${distanceKm} km) is outside ${storeDoc.name}'s ${storeDoc.delivery_radius_km} km delivery radius.`
+            );
+          }
+          deliveryFee = Math.max(0, Number(storeDoc.delivery_fee || 0));
+          handlingFee = 0;
+          matchedSlabLabel = deliveryFee === 0 ? 'Free Store-Managed Delivery' : `Store-Managed Delivery (₹${deliveryFee})`;
+        }
+      } else {
+        const quote = calculateDeliveryFeeFromDistance(
+          orderPayload.distanceKm,
+          orderPayload.durationMins,
+          orderPayload.distanceSource,
+          rawSettings
+        );
+
+        if (!quote.deliverable) {
+          throw new Error(quote.reason || 'Delivery is unavailable at your selected location.');
+        }
+
+        deliveryFee = quote.delivery_fee;
+        handlingFee = quote.handling_fee;
+        distanceKm = quote.distance_km;
+        distanceSource = quote.distance_source;
+        warehouseLat = quote.warehouse_lat;
+        warehouseLng = quote.warehouse_lng;
+        matchedSlabLabel = quote.matched_slab_label || null;
       }
 
-      const deliveryFee = quote.delivery_fee;
-      const handlingFee = quote.handling_fee;
-      const tipAmount = Math.max(0, Math.round(Number(orderPayload.tipAmount) || 0));
+      const tipAmount = fulfillmentType === 'pickup' ? 0 : Math.max(0, Math.round(Number(orderPayload.tipAmount) || 0));
       const totalAmount = Math.round((subtotal + deliveryFee + handlingFee + tipAmount) * 100) / 100;
 
       // 3. Atomically deduct stock & write inventory logs
       for (const vi of validatedItems) {
-        const newStock = Math.round((vi.product.stock - vi.requestedQty) * 100) / 100;
+        const newStock = Math.max(0, Math.round((vi.product.stock - vi.requestedQty) * 100) / 100);
         const prodRef = doc(firestoreDb, 'products', String(vi.product.id));
-        tx.update(prodRef, { stock: newStock, updated_at: new Date().toISOString() });
+        const stockPatch: Record<string, any> = {
+          stock: newStock,
+          updated_at: new Date().toISOString()
+        };
+        if (vi.product.store_id && newStock <= 0) {
+          stockPatch.is_active = false;
+        }
+        tx.update(prodRef, stockPatch);
 
         const logId = Date.now() + Math.floor(Math.random() * 10000);
         const logRef = doc(firestoreDb, 'inventory', String(logId));
@@ -618,13 +993,20 @@ export const ordersRepo = {
       // 4. Create Order Doc (saving immutable distance, coordinates, pricing savings, and fee snapshot)
       const orderId = Date.now() + Math.floor(Math.random() * 1000);
       const nowIso = new Date().toISOString();
+      const resolvedPaymentMode: 'COD' | 'Pay at Store' =
+        fulfillmentType === 'pickup' && orderPayload.paymentMode === 'Pay at Store' ? 'Pay at Store' : 'COD';
+      const resolvedPaymentMethod = fulfillmentType === 'pickup' ? 'Pay at Store' : 'Cash on Delivery';
+
       const newOrder: OrderDoc = {
         id: orderId,
         order_number: orderNumber,
         customer_id: orderPayload.customerId,
         customer_name: orderPayload.customerName,
         customer_phone: orderPayload.customerPhone,
-        delivery_address: orderPayload.address,
+        store_id: storeDoc ? storeDoc.id : null,
+        store_name: storeDoc ? storeDoc.name : null,
+        fulfillment_type: fulfillmentType,
+        delivery_address: fulfillmentType === 'pickup' && storeDoc ? `Store Pickup: ${storeDoc.name}, ${storeDoc.address}` : orderPayload.address,
         landmark: orderPayload.landmark,
         pincode: orderPayload.pincode,
         subtotal,
@@ -634,18 +1016,22 @@ export const ordersRepo = {
         handling_fee: handlingFee,
         tip_amount: tipAmount,
         total_amount: totalAmount,
-        distance_km: quote.distance_km,
-        distance_source: quote.distance_source,
+        distance_km: distanceKm,
+        distance_source: distanceSource,
         customer_lat: orderPayload.customerLat,
         customer_lng: orderPayload.customerLng,
-        warehouse_lat: quote.warehouse_lat,
-        warehouse_lng: quote.warehouse_lng,
-        delivery_fee_rule: quote.matched_slab_label || null,
-        payment_mode: 'COD',
+        warehouse_lat: warehouseLat,
+        warehouse_lng: warehouseLng,
+        delivery_fee_rule: matchedSlabLabel,
+        payment_mode: resolvedPaymentMode,
+        payment_method: resolvedPaymentMethod,
+        payment_status: 'pending',
         status: 'placed',
         delivery_type: orderPayload.deliveryType,
         scheduled_date: orderPayload.scheduledDate,
-        time_slot: orderPayload.timeSlot,
+        time_slot: fulfillmentType === 'pickup' ? 'Store Pickup' : orderPayload.timeSlot,
+        pickup_code: fulfillmentType === 'pickup' ? (orderPayload.pickupCode || null) : null,
+        idempotency_key: cleanIdemKey || null,
         cod_collected: false,
         cod_reconciled: false,
         created_at: nowIso,
@@ -654,6 +1040,15 @@ export const ordersRepo = {
 
       const orderRef = doc(firestoreDb, 'orders', String(orderId));
       tx.set(orderRef, newOrder);
+
+      if (idemRef) {
+        tx.set(idemRef, {
+          order_id: orderId,
+          order_number: orderNumber,
+          customer_id: orderPayload.customerId,
+          created_at: nowIso
+        });
+      }
 
       // 5. Create Order Items (saving immutable applied_unit_price, quantity, savings, and slab snapshot)
       const createdItems: OrderItemDoc[] = [];
@@ -681,26 +1076,42 @@ export const ordersRepo = {
         createdItems.push(itemDoc);
       }
 
-      // 6. Notifications (Customer + Admins)
+      // 6. Notifications (Customer + Store Owner / Admins)
       const custNotifId = Date.now() + 800;
       tx.set(doc(firestoreDb, 'notifications', String(custNotifId)), {
         id: custNotifId,
         user_id: orderPayload.customerId,
         title: 'Order Placed Successfully! 🎉',
-        message: `Your FMP Supermart order #${orderNumber} for ₹${totalAmount} has been placed. Payment via Cash on Delivery.`,
+        message: storeDoc
+          ? `Your ${fulfillmentType === 'pickup' ? 'Store Pickup' : 'Delivery'} order #${orderNumber} at ${storeDoc.name} for ₹${totalAmount} has been placed.`
+          : `Your FMP Supermart order #${orderNumber} for ₹${totalAmount} has been placed. Payment via Cash on Delivery.`,
         type: 'order',
         is_read: false,
         order_id: orderId,
         created_at: nowIso
       });
 
+      if (storeDoc) {
+        const ownerNotifId = Date.now() + 830 + storeDoc.owner_id;
+        tx.set(doc(firestoreDb, 'notifications', String(ownerNotifId)), {
+          id: ownerNotifId,
+          user_id: storeDoc.owner_id,
+          title: `New ${fulfillmentType === 'pickup' ? 'Pickup' : 'Delivery'} Order! 🛒`,
+          message: `Order #${orderNumber} for ₹${totalAmount} placed by ${orderPayload.customerName} (${orderPayload.customerPhone}).`,
+          type: 'order',
+          is_read: false,
+          order_id: orderId,
+          created_at: nowIso
+        });
+      }
+
       for (const adm of adminUsers) {
         const admNotifId = Date.now() + 850 + adm.id;
         tx.set(doc(firestoreDb, 'notifications', String(admNotifId)), {
           id: admNotifId,
           user_id: adm.id,
-          title: 'New Order Received! 🛒',
-          message: `New order #${orderNumber} for ₹${totalAmount} placed by ${orderPayload.customerName} (${orderPayload.customerPhone}).`,
+          title: storeDoc ? `Store Order Received (${storeDoc.name}) 🛒` : 'New Order Received! 🛒',
+          message: `Order #${orderNumber} for ₹${totalAmount} placed by ${orderPayload.customerName} (${orderPayload.customerPhone}).`,
           type: 'order',
           is_read: false,
           order_id: orderId,
@@ -712,7 +1123,7 @@ export const ordersRepo = {
     });
   },
 
-  async list(filters?: { customer_id?: number; rider_id?: number }): Promise<OrderDoc[]> {
+  async list(filters?: { customer_id?: number; rider_id?: number; store_id?: number }): Promise<OrderDoc[]> {
     const snap = await getDocs(collection(firestoreDb, 'orders'));
     let orders = snap.docs.map(d => d.data() as OrderDoc);
     if (filters?.customer_id) {
@@ -721,7 +1132,21 @@ export const ordersRepo = {
     if (filters?.rider_id) {
       orders = orders.filter(o => o.rider_id === filters.rider_id);
     }
+    if (filters?.store_id) {
+      orders = orders.filter(o => o.store_id === filters.store_id);
+    }
     return orders.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  async listItemsMap(): Promise<Map<number, OrderItemDoc[]>> {
+    const itemsSnap = await getDocs(collection(firestoreDb, 'order_items'));
+    const map = new Map<number, OrderItemDoc[]>();
+    for (const d of itemsSnap.docs) {
+      const it = d.data() as OrderItemDoc;
+      if (!map.has(it.order_id)) map.set(it.order_id, []);
+      map.get(it.order_id)!.push(it);
+    }
+    return map;
   },
 
   async findById(id: number): Promise<{ order: OrderDoc | null; items: OrderItemDoc[] }> {
@@ -754,7 +1179,20 @@ export const ordersRepo = {
         throw new Error(`Order cannot be cancelled because it is already ${order.status}.`);
       }
       if (order.status === 'dispatched' && cancelledBy.role === 'customer') {
-        throw new Error('Order is already out for delivery. Please contact FMP Supermart support to cancel.');
+        throw new Error(
+          order.fulfillment_type === 'pickup'
+            ? 'Order is already ready for pickup. Please contact the store to cancel.'
+            : 'Order is already out for delivery. Please contact the store or FMP Supermart support to cancel.'
+        );
+      }
+
+      // Read store owner (if store order) BEFORE writes
+      let storeOwnerId: number | null = null;
+      if (order.store_id) {
+        const stSnap = await tx.get(doc(firestoreDb, 'stores', String(order.store_id)));
+        if (stSnap.exists()) {
+          storeOwnerId = (stSnap.data() as StoreDoc).owner_id || null;
+        }
       }
 
       // Restore items stock (read ALL product docs before any writes)
@@ -776,7 +1214,14 @@ export const ordersRepo = {
         if (prodSnap.exists()) {
           const prod = prodSnap.data() as ProductDoc;
           const restoredStock = Math.round((prod.stock + item.quantity) * 100) / 100;
-          tx.update(prodRef, { stock: restoredStock, updated_at: new Date().toISOString() });
+          const restorePatch: Record<string, any> = {
+            stock: restoredStock,
+            updated_at: new Date().toISOString()
+          };
+          if (prod.store_id && prod.stock <= 0 && restoredStock > 0) {
+            restorePatch.is_active = true;
+          }
+          tx.update(prodRef, restorePatch);
 
           const logId = Date.now() + idx + Math.floor(Math.random() * 1000);
           tx.set(doc(firestoreDb, 'inventory', String(logId)), {
@@ -793,10 +1238,17 @@ export const ordersRepo = {
       }
 
       const nowIso = new Date().toISOString();
+      const isStoreOrAdminReject = cancelledBy.role === 'store_owner' || cancelledBy.role === 'admin';
+      const cleanReason = reason?.trim() || (isStoreOrAdminReject ? `Rejected by ${cancelledBy.name}` : 'Cancelled by customer');
+
       const updatedOrder: OrderDoc = {
         ...order,
         status: 'cancelled',
-        failure_reason: reason || `Cancelled by ${cancelledBy.role}`,
+        payment_status: 'cancelled',
+        failure_reason: cleanReason,
+        rejection_reason: isStoreOrAdminReject ? cleanReason : (order.rejection_reason ?? null),
+        cancelled_by_role: cancelledBy.role,
+        cancelled_at: nowIso,
         updated_at: nowIso
       };
       tx.set(orderRef, updatedOrder);
@@ -806,13 +1258,30 @@ export const ordersRepo = {
       tx.set(doc(firestoreDb, 'notifications', String(cNotifId)), {
         id: cNotifId,
         user_id: order.customer_id,
-        title: 'Order Cancelled',
-        message: `Order #${order.order_number} has been cancelled. Reserved items have been released.`,
+        title: isStoreOrAdminReject ? 'Order Rejected by Store' : 'Order Cancelled',
+        message: isStoreOrAdminReject
+          ? `Order #${order.order_number} was rejected (${cleanReason}).`
+          : `Order #${order.order_number} has been cancelled. Reserved items have been released.`,
         type: 'order',
         is_read: false,
         order_id: orderId,
         created_at: nowIso
       });
+
+      // Notify Store Owner if customer cancelled a store order
+      if (storeOwnerId && cancelledBy.role === 'customer') {
+        const sNotifId = Date.now() + 15 + storeOwnerId;
+        tx.set(doc(firestoreDb, 'notifications', String(sNotifId)), {
+          id: sNotifId,
+          user_id: storeOwnerId,
+          title: 'Order Cancelled by Customer',
+          message: `Customer ${order.customer_name} cancelled order #${order.order_number}. Stock has been restored.`,
+          type: 'order',
+          is_read: false,
+          order_id: orderId,
+          created_at: nowIso
+        });
+      }
 
       // Admin Notifications
       for (const adm of adminUsers) {
@@ -820,8 +1289,8 @@ export const ordersRepo = {
         tx.set(doc(firestoreDb, 'notifications', String(aNotifId)), {
           id: aNotifId,
           user_id: adm.id,
-          title: 'Order Cancelled ⚠️',
-          message: `Order #${order.order_number} was cancelled by ${cancelledBy.name} (${cancelledBy.role}). Stock was restored.`,
+          title: isStoreOrAdminReject ? 'Order Rejected ⚠️' : 'Order Cancelled ⚠️',
+          message: `Order #${order.order_number} was ${isStoreOrAdminReject ? 'rejected' : 'cancelled'} by ${cancelledBy.name} (${cancelledBy.role}). Stock was restored.`,
           type: 'order',
           is_read: false,
           order_id: orderId,
@@ -833,20 +1302,39 @@ export const ordersRepo = {
     });
   },
 
-  async updateStatus(id: number, status: OrderDoc['status']): Promise<OrderDoc | null> {
+  async updateStatus(
+    id: number,
+    status: OrderDoc['status'],
+    extra?: { cod_collected?: boolean; cod_collected_at?: string; payment_status?: 'pending' | 'paid' | 'cancelled'; rejection_reason?: string }
+  ): Promise<OrderDoc | null> {
     const ref = doc(firestoreDb, 'orders', String(id));
     const snap = await getDoc(ref);
     if (!snap.exists()) return null;
     const order = snap.data() as OrderDoc;
     const nowIso = new Date().toISOString();
-    const updated: OrderDoc = { ...order, status, updated_at: nowIso };
+    const updated: OrderDoc = {
+      ...order,
+      status,
+      ...(status === 'delivered' ? { payment_status: 'paid' as const, cod_collected: true, cod_collected_at: extra?.cod_collected_at || nowIso } : {}),
+      ...(extra || {}),
+      updated_at: nowIso
+    };
     await setDoc(ref, updated, { merge: true });
 
-    // Notify customer
+    const labelMap: Record<string, string> = {
+      confirmed: 'accepted & confirmed',
+      packed: 'being prepared',
+      dispatched: order.fulfillment_type === 'pickup' ? 'ready for store pickup' : 'ready / out for delivery',
+      delivered: 'completed',
+      cancelled: 'cancelled'
+    };
+
     await notificationsRepo.create({
       user_id: updated.customer_id,
-      title: `Order Status Update: ${status.toUpperCase()}`,
-      message: `Your order #${updated.order_number} is now ${status}.`,
+      title: `Order Update: ${(labelMap[status] || status).toUpperCase()}`,
+      message: updated.store_name
+        ? `Your order #${updated.order_number} from ${updated.store_name} is now ${labelMap[status] || status}.`
+        : `Your order #${updated.order_number} is now ${labelMap[status] || status}.`,
       type: 'order',
       order_id: id
     });
@@ -1000,6 +1488,7 @@ export const ordersRepo = {
       const delivered: OrderDoc = {
         ...order,
         status: 'delivered',
+        payment_status: 'paid',
         cod_collected: true,
         cod_collected_at: nowIso,
         updated_at: nowIso
@@ -1693,6 +2182,53 @@ export const passwordResetsRepo = {
         resolved_at: new Date().toISOString()
       });
     }
+  }
+};
+
+export interface SavedAddressDoc {
+  id: number;
+  user_id: number;
+  label: string;
+  recipient_name?: string;
+  phone?: string;
+  address: string;
+  landmark?: string;
+  pincode?: string;
+  lat?: number | null;
+  lng?: number | null;
+  is_default: boolean;
+  created_at: string;
+}
+
+export const addressesRepo = {
+  async listByUser(userId: number): Promise<SavedAddressDoc[]> {
+    const q = query(collection(firestoreDb, 'addresses'), where('user_id', '==', userId));
+    const snap = await getDocs(q);
+    return snap.docs
+      .map(d => d.data() as SavedAddressDoc)
+      .sort((a, b) => Number(Boolean(b.is_default)) - Number(Boolean(a.is_default)) || new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  async create(userId: number, data: Omit<SavedAddressDoc, 'id' | 'user_id' | 'created_at'>): Promise<SavedAddressDoc> {
+    const id = await getNextId('addresses');
+    const addrDoc: SavedAddressDoc = {
+      ...data,
+      id,
+      user_id: userId,
+      created_at: new Date().toISOString()
+    };
+    await setDoc(doc(firestoreDb, 'addresses', String(id)), addrDoc);
+    return addrDoc;
+  },
+
+  async remove(userId: number, id: number): Promise<'deleted' | 'not_found' | 'forbidden'> {
+    const ref = doc(firestoreDb, 'addresses', String(id));
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return 'not_found';
+    const existing = snap.data() as SavedAddressDoc;
+    if (existing.user_id !== userId) return 'forbidden';
+    await deleteDoc(ref);
+    return 'deleted';
   }
 };
 

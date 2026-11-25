@@ -1,12 +1,97 @@
+export type UserRole = 'customer' | 'admin' | 'rider' | 'store_owner';
+
 export interface User {
   id: number;
   phone: string;
   name: string;
   email?: string;
-  role: 'customer' | 'admin' | 'rider';
+  role: UserRole;
+  store_id?: number | null;
   address?: string;
   landmark?: string;
   pincode?: string;
+  is_active?: boolean;
+  created_at?: string;
+}
+
+export type StoreServiceType = 'delivery' | 'pickup' | 'both';
+export type StoreApprovalStatus = 'pending' | 'approved' | 'rejected';
+
+export interface Store {
+  id: number;
+  owner_id?: number;
+  owner_name?: string;
+  owner_phone?: string;
+  name: string;
+  description?: string | null;
+  address: string;
+  landmark?: string | null;
+  city: string;
+  pincode: string;
+  lat: number;
+  lng: number;
+  logo_url?: string | null;
+  banner_url?: string | null;
+  photos: string[];
+  opening_hours: string;
+  opening_time?: string | null;
+  closing_time?: string | null;
+  weekly_closed_days?: string[];
+  service_type: StoreServiceType;
+  delivery_radius_km: number;
+  delivery_fee: number;
+  min_order_amount: number;
+  delivery_info?: string | null;
+  approval_status: StoreApprovalStatus;
+  rejection_reason?: string | null;
+  is_active: boolean;
+  is_open: boolean;
+  // Future monetization flags (strictly disabled during free launch)
+  featured?: boolean;
+  subscription_tier?: 'free';
+  distance_km?: number;
+  product_count?: number;
+  available_product_names?: string[];
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface StoreOwnerStats {
+  total_products: number;
+  available_products: number;
+  unavailable_products: number;
+  active_products: number;
+  total_orders: number;
+  new_orders: number;
+  pending_orders: number;
+  active_orders: number;
+  in_progress_orders: number;
+  completed_orders: number;
+  cancelled_orders: number;
+  gross_order_value: number;
+  platform_fee: number;
+  net_earnings: number;
+  total_revenue: number;
+}
+
+export type ComplaintStatus = 'open' | 'in_review' | 'resolved';
+
+export interface Complaint {
+  id: number;
+  reporter_id: number;
+  reporter_name: string;
+  reporter_phone: string;
+  reporter_role: string;
+  store_id?: number | null;
+  store_name?: string | null;
+  order_id?: number | null;
+  order_number?: string | null;
+  subject: string;
+  description: string;
+  status: ComplaintStatus;
+  admin_notes?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
 }
 
 export interface Category {
@@ -16,6 +101,7 @@ export interface Category {
   description?: string;
   image_url?: string;
   display_order: number;
+  is_active?: boolean;
 }
 
 export interface ProductPriceSlab {
@@ -31,6 +117,8 @@ export interface Product {
   category_id: number;
   category_name?: string;
   category_slug?: string;
+  store_id?: number | null;
+  store_name?: string | null;
   name: string;
   unit: string;
   price: number | string;
@@ -40,6 +128,7 @@ export interface Product {
   image_url?: string;
   description?: string;
   is_active: boolean;
+  is_deleted?: boolean;
   product_type?: 'loose' | 'packaged';
   min_order_qty?: number;
   max_order_qty?: number | null;
@@ -84,6 +173,11 @@ export interface Order {
   customer_id: number;
   customer_name: string;
   customer_phone: string;
+  store_id?: number | null;
+  store_name?: string | null;
+  store_address?: string | null;
+  store_delivery_info?: string | null;
+  fulfillment_type?: 'delivery' | 'pickup';
   delivery_address: string;
   landmark?: string;
   pincode?: string;
@@ -101,7 +195,9 @@ export interface Order {
   warehouse_lat?: number | null;
   warehouse_lng?: number | null;
   delivery_fee_rule?: string | null;
-  payment_mode: 'COD';
+  payment_mode: 'COD' | 'Pay at Store';
+  payment_method?: string;
+  payment_status?: 'pending' | 'paid' | 'cancelled';
   status: 'placed' | 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled';
   delivery_type?: 'immediate' | 'scheduled';
   scheduled_date?: string;
@@ -110,8 +206,12 @@ export interface Order {
   rider_name?: string;
   rider_phone?: string;
   delivery_otp?: string;
+  pickup_code?: string | null;
   otp_attempts?: number;
   failure_reason?: string;
+  rejection_reason?: string | null;
+  cancelled_by_role?: 'customer' | 'store_owner' | 'admin' | null;
+  cancelled_at?: string | null;
   cod_collected: boolean;
   cod_collected_at?: string;
   cod_reconciled: boolean;
@@ -119,6 +219,21 @@ export interface Order {
   created_at: string;
   updated_at?: string;
   items?: OrderItem[];
+}
+
+export interface SavedAddress {
+  id: number;
+  user_id: number;
+  label: string;
+  recipient_name?: string;
+  phone?: string;
+  address: string;
+  landmark?: string;
+  pincode?: string;
+  lat?: number | null;
+  lng?: number | null;
+  is_default?: boolean;
+  created_at?: string;
 }
 
 export interface ProductReview {

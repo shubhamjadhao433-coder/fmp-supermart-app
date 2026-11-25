@@ -8,7 +8,8 @@
         "phone": { "type": "string", "description": "10-digit mobile number" },
         "name": { "type": "string", "description": "Full name" },
         "email": { "type": "string", "description": "Email address" },
-        "role": { "type": "string", "enum": ["customer", "admin", "rider"], "description": "System role" },
+        "role": { "type": "string", "enum": ["customer", "admin", "rider", "store_owner"], "description": "System role" },
+        "store_id": { "type": "number", "description": "Owned store ID for store owners" },
         "address": { "type": "string", "description": "Delivery address in Karanja Lad" },
         "landmark": { "type": "string", "description": "Nearby landmark" },
         "city": { "type": "string", "description": "City e.g. Karanja Lad" },
@@ -58,19 +59,77 @@
         "supplier_name": { "type": "string" },
         "supplier_phone": { "type": "string" },
         "supplier_address": { "type": "string" },
+        "store_id": { "type": "number" },
+        "store_name": { "type": "string" },
+        "is_deleted": { "type": "boolean" },
         "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["name", "price", "stock"]
     },
+    "stores": {
+      "title": "Store",
+      "description": "Independent registered kirana/grocery store in FMP Supermart",
+      "type": "object",
+      "properties": {
+        "owner_id": { "type": "number" },
+        "owner_name": { "type": "string" },
+        "owner_phone": { "type": "string" },
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "landmark": { "type": "string" },
+        "city": { "type": "string" },
+        "pincode": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "logo_url": { "type": "string" },
+        "banner_url": { "type": "string" },
+        "photos": { "type": "array" },
+        "opening_hours": { "type": "string" },
+        "opening_time": { "type": "string" },
+        "closing_time": { "type": "string" },
+        "weekly_closed_days": { "type": "array" },
+        "service_type": { "type": "string", "enum": ["delivery", "pickup", "both"] },
+        "delivery_radius_km": { "type": "number" },
+        "delivery_fee": { "type": "number" },
+        "min_order_amount": { "type": "number" },
+        "delivery_info": { "type": "string" },
+        "approval_status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "is_active": { "type": "boolean" },
+        "is_open": { "type": "boolean" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["owner_id", "name", "address", "lat", "lng", "service_type", "approval_status"]
+    },
+    "complaints": {
+      "title": "Complaint",
+      "description": "Customer or store reported problem for admin resolution",
+      "type": "object",
+      "properties": {
+        "reporter_id": { "type": "number" },
+        "reporter_name": { "type": "string" },
+        "reporter_phone": { "type": "string" },
+        "store_id": { "type": "number" },
+        "order_id": { "type": "number" },
+        "subject": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["open", "in_review", "resolved"] },
+        "admin_notes": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reporter_id", "subject", "description", "status"]
+    },
     "orders": {
       "title": "Order",
-      "description": "Customer COD grocery order with OTP verification",
+      "description": "Customer COD grocery order with OTP verification or store pickup",
       "type": "object",
       "properties": {
         "order_number": { "type": "string" },
         "customer_id": { "type": "string" },
         "customer_name": { "type": "string" },
         "customer_phone": { "type": "string" },
+        "store_id": { "type": "number" },
+        "store_name": { "type": "string" },
+        "fulfillment_type": { "type": "string", "enum": ["delivery", "pickup"] },
         "delivery_address": { "type": "string" },
         "landmark": { "type": "string" },
         "pincode": { "type": "string" },
@@ -88,7 +147,9 @@
         "warehouse_lat": { "type": "number" },
         "warehouse_lng": { "type": "number" },
         "delivery_fee_rule": { "type": "string" },
-        "payment_mode": { "type": "string", "enum": ["COD"] },
+        "payment_mode": { "type": "string", "enum": ["COD", "Pay at Store"] },
+        "payment_method": { "type": "string" },
+        "payment_status": { "type": "string", "enum": ["pending", "paid", "cancelled"] },
         "status": {
           "type": "string",
           "enum": ["placed", "confirmed", "packed", "dispatched", "delivered", "cancelled"]
@@ -100,11 +161,16 @@
         "rider_name": { "type": "string" },
         "rider_phone": { "type": "string" },
         "delivery_otp": { "type": "string" },
+        "pickup_code": { "type": "string" },
         "otp_expires_at": { "type": "string", "format": "date-time" },
         "otp_attempts": { "type": "number" },
         "cod_collected": { "type": "boolean" },
         "cod_reconciled": { "type": "boolean" },
         "failure_reason": { "type": "string" },
+        "rejection_reason": { "type": "string" },
+        "cancelled_by_role": { "type": "string", "enum": ["customer", "store_owner", "admin"] },
+        "cancelled_at": { "type": "string", "format": "date-time" },
+        "idempotency_key": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["order_number", "customer_id", "total_amount", "status", "payment_mode"]
@@ -166,10 +232,15 @@
       "properties": {
         "user_id": { "type": "string" },
         "label": { "type": "string" },
+        "recipient_name": { "type": "string" },
+        "phone": { "type": "string" },
         "address": { "type": "string" },
         "landmark": { "type": "string" },
         "pincode": { "type": "string" },
-        "is_default": { "type": "boolean" }
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "is_default": { "type": "boolean" },
+        "created_at": { "type": "string", "format": "date-time" }
       },
       "required": ["user_id", "address"]
     },
@@ -287,6 +358,14 @@
     "/reviews/{reviewId}": {
       "schema": "reviews",
       "description": "Customer product reviews and ratings"
+    },
+    "/stores/{storeId}": {
+      "schema": "stores",
+      "description": "Independent registered grocery & kirana stores"
+    },
+    "/complaints/{complaintId}": {
+      "schema": "complaints",
+      "description": "Customer and store reported problems for admin review"
     }
   }
 }

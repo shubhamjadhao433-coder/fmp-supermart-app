@@ -23,8 +23,12 @@ import {
   codReconciliationsRepo,
   auditLogsRepo,
   passwordResetsRepo,
+  storesRepo,
+  complaintsRepo,
+  addressesRepo,
   UserDoc,
   OrderDoc,
+  StoreDoc,
   sanitizeProductForCustomer,
   computeWholesaleMetrics
 } from './src/server/firestoreDb.ts';
@@ -39,8 +43,11 @@ import {
 import {
   calculateRoadDistanceKm,
   calculateDeliveryFeeFromDistance,
+  calculateHaversineKm,
   isValidCoordinate,
-  normalizeDeliverySlabs
+  normalizeDeliverySlabs,
+  DEFAULT_WAREHOUSE_LAT,
+  DEFAULT_WAREHOUSE_LNG
 } from './src/server/deliveryDistance.ts';
 import {
   searchOsmLocations,
@@ -67,7 +74,7 @@ app.use(cors({
   },
   credentials: true,
 }));
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 // Serve public directory for PWA assets, manifest, and icons
 const publicDirPath = path.resolve(__dirname, 'public');
@@ -151,6 +158,76 @@ function normalizePhone(rawPhone: any): string {
     cleaned = cleaned.slice(1);
   }
   return cleaned;
+}
+
+function sanitizeImageValue(val: unknown): string | null {
+  if (typeof val !== 'string') return null;
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.slice(0, 1500);
+  }
+  if (/^data:image\/(jpeg|jpg|png|webp);base64,[a-zA-Z0-9+/=]+$/i.test(trimmed)) {
+    if (trimmed.length > 350000) {
+      throw new Error('Uploaded image is too large. Please choose a smaller image.');
+    }
+    return trimmed;
+  }
+  return null;
+}
+
+function sanitizeStorePhotos(rawPhotos: unknown): string[] {
+  if (!Array.isArray(rawPhotos)) return [];
+  const out: string[] = [];
+  for (const item of rawPhotos.slice(0, 4)) {
+    const clean = sanitizeImageValue(item);
+    if (clean) out.push(clean);
+  }
+  return out;
+}
+
+function sanitizePublicStore(
+  store: StoreDoc,
+  extra?: { distance_km?: number; product_count?: number; available_product_names?: string[] }
+) {
+  return {
+    id: store.id,
+    name: store.name,
+    description: store.description || null,
+    address: store.address,
+    landmark: store.landmark || null,
+    city: store.city,
+    pincode: store.pincode,
+    lat: store.lat,
+    lng: store.lng,
+    logo_url: store.logo_url || null,
+    banner_url: store.banner_url || null,
+    photos: Array.isArray(store.photos) ? store.photos : [],
+    opening_hours: store.opening_hours,
+    opening_time: store.opening_time || null,
+    closing_time: store.closing_time || null,
+    weekly_closed_days: Array.isArray(store.weekly_closed_days) ? store.weekly_closed_days : [],
+    service_type: store.service_type,
+    delivery_radius_km: store.delivery_radius_km,
+    delivery_fee: store.delivery_fee,
+    min_order_amount: store.min_order_amount,
+    delivery_info: store.delivery_info || null,
+    approval_status: store.approval_status,
+    is_active: store.is_active,
+    is_open: store.is_open,
+    created_at: store.created_at,
+    ...(extra || {})
+  };
+}
+
+function formatTime12h(hhmm: string): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return hhmm.trim();
+  let h = Number(m[1]);
+  const mins = m[2];
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${String(h).padStart(2, '0')}:${mins} ${ampm}`;
 }
 
 app.post('/api/auth/register', async (req: Request, res: Response) => {
@@ -271,6 +348,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       name: matchedUser.name,
       email: matchedUser.email,
       role: matchedUser.role,
+      store_id: matchedUser.store_id ?? null,
       status: 'active',
       is_active: true,
       address: matchedUser.address,
@@ -414,6 +492,65 @@ app.put('/api/auth/profile', requireAuth, async (req: AuthenticatedRequest, res:
 
     await logAudit(req.user!.id, req.user!.role, 'PROFILE_UPDATED', 'users', req.user!.id, `User updated profile information`);
     res.json({ message: 'Profile updated successfully', user: updatedUser });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------------------------------------------
+// Customer Saved Delivery Addresses
+// ----------------------------------------------------
+app.get('/api/addresses', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const list = await addressesRepo.listByUser(req.user!.id);
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/addresses', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { label, recipient_name, phone, address, landmark, pincode, lat, lng, is_default } = req.body;
+    const cleanAddress = String(address || '').trim();
+    if (cleanAddress.length < 5) {
+      return res.status(400).json({ error: 'Please enter a complete delivery address (at least 5 characters).' });
+    }
+    const cleanPhone = phone ? String(phone).trim().replace(/\D/g, '') : req.user!.phone;
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
+    }
+    const numLat = lat !== undefined && lat !== null ? Number(lat) : null;
+    const numLng = lng !== undefined && lng !== null ? Number(lng) : null;
+    const hasCoords = numLat !== null && numLng !== null && isValidCoordinate(numLat, numLng);
+
+    const saved = await addressesRepo.create(req.user!.id, {
+      label: String(label || 'Home').trim().slice(0, 40) || 'Home',
+      recipient_name: String(recipient_name || req.user!.name).trim(),
+      phone: cleanPhone,
+      address: cleanAddress,
+      landmark: landmark ? String(landmark).trim() : '',
+      pincode: pincode ? String(pincode).trim() : '444105',
+      lat: hasCoords ? numLat : null,
+      lng: hasCoords ? numLng : null,
+      is_default: Boolean(is_default)
+    });
+    res.status(201).json(saved);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/addresses/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid address ID.' });
+    }
+    const result = await addressesRepo.remove(req.user!.id, id);
+    if (result === 'not_found') return res.status(404).json({ error: 'Saved address not found.' });
+    if (result === 'forbidden') return res.status(403).json({ error: 'Forbidden: You can only delete your own addresses.' });
+    res.json({ message: 'Saved address deleted.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -697,8 +834,14 @@ app.get('/api/products/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
     const product = await productsRepo.findById(id);
-    if (!product) {
+    if (!product || product.is_deleted || product.is_active === false) {
       return res.status(404).json({ error: 'Product not found.' });
+    }
+    if (product.store_id) {
+      const store = await storesRepo.findById(product.store_id);
+      if (!store || store.approval_status !== 'approved' || store.is_active === false) {
+        return res.status(404).json({ error: 'Product not found.' });
+      }
     }
     res.json(sanitizeProductForCustomer(product));
   } catch (err: any) {
@@ -742,22 +885,27 @@ app.post('/api/pricing/calculate-cart', async (req: Request, res: Response) => {
     let subtotal = 0;
     let regularSubtotal = 0;
     let totalSavings = 0;
+    let cartStoreId: number | null | undefined = undefined;
+    let storeMixedErrorAdded = false;
+    const checkedStores = new Map<number, StoreDoc | null>();
 
     for (const it of items) {
       const productId = Number(it?.product_id);
       const quantity = Number(it?.quantity);
       const product = Number.isFinite(productId) ? await productsRepo.findById(productId) : null;
 
-      if (!product) {
-        const msg = `Product #${it?.product_id} is no longer available.`;
+      if (!product || product.is_deleted || product.is_active === false) {
+        const msg = product
+          ? `"${product.name}" is currently unavailable.`
+          : `Product #${it?.product_id} is no longer available.`;
         errors.push(msg);
         resolvedItems.push({
           valid: false,
           error: msg,
           product_id: productId || 0,
-          product_name: 'Unavailable item',
+          product_name: product?.name || 'Unavailable item',
           product_type: 'packaged',
-          unit: '1 unit',
+          unit: product?.unit || '1 unit',
           quantity: Number.isFinite(quantity) ? quantity : 0,
           stock: 0,
           regular_unit_price: 0,
@@ -771,6 +919,26 @@ app.post('/api/pricing/calculate-cart', async (req: Request, res: Response) => {
           next_slab_hint: null
         });
         continue;
+      }
+
+      const itemStoreId = product.store_id ? Number(product.store_id) : null;
+      if (cartStoreId === undefined) {
+        cartStoreId = itemStoreId;
+      } else if (cartStoreId !== itemStoreId && !storeMixedErrorAdded) {
+        errors.push('Cart items cannot mix products from different stores.');
+        storeMixedErrorAdded = true;
+      }
+
+      if (itemStoreId) {
+        if (!checkedStores.has(itemStoreId)) {
+          checkedStores.set(itemStoreId, await storesRepo.findById(itemStoreId));
+        }
+        const st = checkedStores.get(itemStoreId);
+        if (!st || st.approval_status !== 'approved' || st.is_active === false) {
+          errors.push(`Store for "${product.name}" is currently unavailable.`);
+        } else if (st.is_open === false) {
+          errors.push(`${st.name} is currently closed and not accepting orders.`);
+        }
       }
 
       const resolved = resolveProductQuantityPricing(product, quantity);
@@ -1070,6 +1238,10 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
   try {
     const {
       items,
+      store_id,
+      fulfillment_type,
+      payment_mode,
+      idempotency_key,
       customer_name,
       customer_phone,
       delivery_address,
@@ -1087,47 +1259,117 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
       return res.status(400).json({ error: 'Your cart is empty. Please add items to checkout.' });
     }
 
-    const cleanPhone = (customer_phone || req.user!.phone).trim().replace(/\D/g, '');
-    const recipientName = (customer_name || req.user!.name).trim();
-    const address = (delivery_address || req.user!.address || '').trim();
-
-    if (!recipientName || !cleanPhone || !address) {
-      return res.status(400).json({ error: 'Recipient name, mobile number, and delivery address are mandatory.' });
+    if (payment_mode !== undefined && !['COD', 'Pay at Store'].includes(payment_mode)) {
+      return res.status(400).json({ error: 'Only Cash on Delivery (COD) and Pay at Store are supported.' });
     }
 
-    // Require map pin coordinates & calculate road distance strictly on the backend (NEVER trust client delivery_fee)
-    const cLat = Number(customer_lat);
-    const cLng = Number(customer_lng);
-    if (!isValidCoordinate(cLat, cLng)) {
-      return res.status(400).json({ error: 'Please pin your delivery location on the map to calculate delivery distance and charges.' });
+    const cleanPhone = String(customer_phone || req.user!.phone || '').trim().replace(/\D/g, '');
+    const recipientName = String(customer_name || req.user!.name || '').trim();
+    const storeId = store_id ? Number(store_id) : null;
+    const fulfillment: 'delivery' | 'pickup' = fulfillment_type === 'pickup' ? 'pickup' : 'delivery';
+    const resolvedPaymentMode: 'COD' | 'Pay at Store' =
+      fulfillment === 'pickup' && payment_mode === 'Pay at Store' ? 'Pay at Store' : 'COD';
+
+    let storeDoc: StoreDoc | null = null;
+    if (storeId) {
+      storeDoc = await storesRepo.findById(storeId);
+      if (!storeDoc) {
+        return res.status(404).json({ error: 'Selected grocery store was not found.' });
+      }
+      if (storeDoc.approval_status !== 'approved' || storeDoc.is_active === false) {
+        return res.status(400).json({ error: 'This store is not currently active on FMP Supermart.' });
+      }
+      if (storeDoc.is_open === false) {
+        return res.status(400).json({ error: `${storeDoc.name} is currently closed and not accepting orders.` });
+      }
+      const supportsDelivery = storeDoc.service_type === 'delivery' || storeDoc.service_type === 'both';
+      const supportsPickup = storeDoc.service_type === 'pickup' || storeDoc.service_type === 'both';
+      if (fulfillment === 'delivery' && !supportsDelivery) {
+        return res.status(400).json({ error: `${storeDoc.name} only offers Store Pickup.` });
+      }
+      if (fulfillment === 'pickup' && !supportsPickup) {
+        return res.status(400).json({ error: `${storeDoc.name} only offers Home Delivery.` });
+      }
+    } else if (fulfillment === 'pickup') {
+      return res.status(400).json({ error: 'Store pickup is available for local kirana store orders.' });
     }
 
-    const settings = await settingsRepo.getDeliverySettings();
-    const road = await calculateRoadDistanceKm(
-      settings.warehouse_lat,
-      settings.warehouse_lng,
-      cLat,
-      cLng
-    );
-    const quoteCheck = calculateDeliveryFeeFromDistance(
-      road.distance_km,
-      road.duration_mins,
-      road.source,
-      settings
-    );
-    if (!quoteCheck.deliverable) {
-      return res.status(400).json({ error: quoteCheck.reason || 'Delivery unavailable at your selected location.' });
+    const address =
+      fulfillment === 'pickup' && storeDoc
+        ? `Store Pickup: ${storeDoc.name}, ${storeDoc.address}`
+        : String(delivery_address || req.user!.address || '').trim();
+
+    if (!recipientName || cleanPhone.length < 10 || !address || (fulfillment === 'delivery' && address.length < 5)) {
+      return res.status(400).json({ error: 'Recipient name, valid 10-digit mobile number, and complete delivery address are mandatory.' });
     }
 
-    // Duplicate order prevention: check if customer placed an identical order within the last 5 seconds
+    let cLat = Number(customer_lat);
+    let cLng = Number(customer_lng);
+    let road: { distance_km: number; duration_mins: number | null; source: 'osrm' | 'haversine_fallback' };
+    let pickupCode: string | null = null;
+
+    if (storeDoc && fulfillment === 'pickup') {
+      if (!isValidCoordinate(cLat, cLng)) {
+        cLat = storeDoc.lat;
+        cLng = storeDoc.lng;
+      }
+      road = { distance_km: 0, duration_mins: null, source: 'osrm' };
+      pickupCode = generateDeliveryOTP();
+    } else {
+      // Require map pin coordinates & calculate road distance strictly on the backend (NEVER trust client delivery_fee)
+      if (!isValidCoordinate(cLat, cLng)) {
+        return res.status(400).json({ error: 'Please pin your delivery location on the map to calculate delivery distance and charges.' });
+      }
+
+      if (storeDoc) {
+        road = await calculateRoadDistanceKm(storeDoc.lat, storeDoc.lng, cLat, cLng);
+        if (storeDoc.delivery_radius_km > 0 && road.distance_km > storeDoc.delivery_radius_km) {
+          return res.status(400).json({
+            error: `Delivery unavailable beyond ${storeDoc.delivery_radius_km} km for ${storeDoc.name}. Your location is ${road.distance_km} km away.`
+          });
+        }
+      } else {
+        const settings = await settingsRepo.getDeliverySettings();
+        road = await calculateRoadDistanceKm(
+          settings.warehouse_lat,
+          settings.warehouse_lng,
+          cLat,
+          cLng
+        );
+        const quoteCheck = calculateDeliveryFeeFromDistance(
+          road.distance_km,
+          road.duration_mins,
+          road.source,
+          settings
+        );
+        if (!quoteCheck.deliverable) {
+          return res.status(400).json({ error: quoteCheck.reason || 'Delivery unavailable at your selected location.' });
+        }
+      }
+    }
+
+    // Short-window identical fingerprint duplicate guard (in addition to atomic Firestore idempotency_key lock)
+    const requestSig = items
+      .map((i: any) => `${Number(i.product_id)}:${Number(i.quantity)}`)
+      .sort()
+      .join('|');
     const recentOrders = await ordersRepo.list({ customer_id: req.user!.id });
+    const itemsMapForDup = recentOrders.length > 0 ? await ordersRepo.listItemsMap() : new Map();
     const now = Date.now();
     const isDuplicate = recentOrders.some(o => {
       const orderAgeMs = now - new Date(o.created_at).getTime();
-      return orderAgeMs >= 0 && orderAgeMs < 5000 && o.delivery_address === address;
+      if (orderAgeMs < 0 || orderAgeMs >= 5000) return false;
+      if (o.delivery_address !== address || (o.store_id ?? null) !== (storeId ?? null) || (o.fulfillment_type || 'delivery') !== fulfillment) {
+        return false;
+      }
+      const existingSig = (itemsMapForDup.get(o.id) || [])
+        .map((it: any) => `${Number(it.product_id)}:${Number(it.quantity)}`)
+        .sort()
+        .join('|');
+      return existingSig === requestSig;
     });
     if (isDuplicate) {
-      return res.status(409).json({ error: 'Duplicate order detected. You have already placed an order a moment ago.' });
+      return res.status(409).json({ error: 'Duplicate order detected. You have already placed this order a moment ago.', duplicate: true });
     }
 
     const adminUsers = await usersRepo.listAdmins();
@@ -1137,13 +1379,18 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
         customerId: req.user!.id,
         customerName: recipientName,
         customerPhone: cleanPhone,
+        storeId: storeDoc ? storeDoc.id : null,
+        fulfillmentType: fulfillment,
+        paymentMode: resolvedPaymentMode,
+        idempotencyKey: idempotency_key ? String(idempotency_key) : null,
+        pickupCode,
         address,
-        landmark: landmark || 'Karanja Lad',
-        pincode: pincode || '444105',
+        landmark: landmark || (storeDoc ? storeDoc.landmark || storeDoc.city : 'Karanja Lad'),
+        pincode: pincode || (storeDoc ? storeDoc.pincode : '444105'),
         deliveryType: delivery_type === 'scheduled' ? 'scheduled' : 'immediate',
         scheduledDate: scheduled_date || (delivery_type === 'scheduled' ? 'Today' : 'Immediate Express'),
-        timeSlot: time_slot || (delivery_type === 'scheduled' ? '09:00 AM - 12:00 PM' : 'Within 45-60 mins'),
-        tipAmount: Number(tip_amount) || 0,
+        timeSlot: time_slot || (fulfillment === 'pickup' ? 'Store Pickup' : delivery_type === 'scheduled' ? '09:00 AM - 12:00 PM' : 'Within 45-60 mins'),
+        tipAmount: fulfillment === 'pickup' ? 0 : Number(tip_amount) || 0,
         customerLat: cLat,
         customerLng: cLng,
         distanceKm: road.distance_km,
@@ -1160,23 +1407,34 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
       'ORDER_PLACED',
       'orders',
       created.order.id,
-      `Order ${created.order.order_number} placed for ₹${created.order.total_amount} (${created.order.distance_km} km, delivery ₹${created.order.delivery_fee})`
+      `Order ${created.order.order_number} placed for ₹${created.order.total_amount} (${fulfillment}, ${created.order.distance_km} km, delivery ₹${created.order.delivery_fee})`
     );
 
     res.status(201).json({
       message: 'Order placed successfully!',
       order: {
         ...created.order,
+        store_address: storeDoc?.address || null,
+        store_delivery_info: storeDoc?.delivery_info || null,
         items: created.items
       }
     });
   } catch (err: any) {
+    const msg = String(err?.message || 'Failed to place order.');
+    if (msg.startsWith('DUPLICATE_ORDER:')) {
+      const parts = msg.split(':');
+      return res.status(409).json({
+        error: parts.slice(2).join(':') || 'Duplicate order prevented. This order has already been submitted.',
+        duplicate: true,
+        existing_order_id: parts[1] ? Number(parts[1]) : undefined
+      });
+    }
     console.error('Order placement error:', err);
-    res.status(400).json({ error: err.message || 'Failed to place order.' });
+    res.status(400).json({ error: msg });
   }
 });
 
-// Get orders list (Role-filtered)
+// Get orders list (Role-filtered, enriched with items & store address/instructions)
 app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     let orders: OrderDoc[] = [];
@@ -1184,16 +1442,29 @@ app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Respo
       orders = await ordersRepo.list({ customer_id: req.user!.id });
     } else if (req.user!.role === 'rider') {
       orders = await ordersRepo.list({ rider_id: req.user!.id });
+    } else if (req.user!.role === 'store_owner') {
+      const myStore = await storesRepo.findByOwnerId(req.user!.id);
+      orders = myStore ? await ordersRepo.list({ store_id: myStore.id }) : [];
     } else {
       orders = await ordersRepo.list();
     }
 
+    const [itemsMap, storesList] = await Promise.all([
+      orders.length > 0 ? ordersRepo.listItemsMap() : Promise.resolve(new Map()),
+      orders.some(o => o.store_id) ? storesRepo.listAll() : Promise.resolve([])
+    ]);
+    const storeMap = new Map(storesList.map(s => [s.id, s]));
+
     // Filter OTP from general list for security
     const sanitized = orders.map(o => {
       const isCustomerOwner = req.user!.role === 'customer' && o.customer_id === req.user!.id;
+      const st = o.store_id ? storeMap.get(o.store_id) : null;
       return {
         ...o,
-        delivery_otp: isCustomerOwner && ['dispatched', 'delivered'].includes(o.status) ? o.delivery_otp : undefined
+        store_address: st?.address || null,
+        store_delivery_info: st?.delivery_info || null,
+        delivery_otp: isCustomerOwner && ['dispatched', 'delivered'].includes(o.status) ? o.delivery_otp : undefined,
+        items: itemsMap.get(o.id) || []
       };
     });
 
@@ -1220,12 +1491,21 @@ app.get('/api/orders/:id', requireAuth, async (req: AuthenticatedRequest, res: R
     if (req.user!.role === 'rider' && order.rider_id !== req.user!.id) {
       return res.status(403).json({ error: 'Access denied.' });
     }
+    if (req.user!.role === 'store_owner') {
+      const myStore = await storesRepo.findByOwnerId(req.user!.id);
+      if (!myStore || order.store_id !== myStore.id) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+    }
 
+    const st = order.store_id ? await storesRepo.findById(order.store_id) : null;
     const isCustomerOwner = req.user!.role === 'customer' && order.customer_id === req.user!.id;
     const canSeeOtp = (isCustomerOwner || req.user!.role === 'admin') && ['dispatched', 'delivered'].includes(order.status);
 
     res.json({
       ...order,
+      store_address: st?.address || null,
+      store_delivery_info: st?.delivery_info || null,
       delivery_otp: canSeeOtp ? order.delivery_otp : undefined,
       items
     });
@@ -1240,11 +1520,21 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req: AuthenticatedRequest
     const id = parseInt(req.params.id, 10);
     const { reason } = req.body;
 
+    if (req.user!.role === 'rider') {
+      return res.status(403).json({ error: 'Delivery partners cannot cancel customer orders.' });
+    }
+
     const { order } = await ordersRepo.findById(id);
     if (!order) return res.status(404).json({ error: 'Order not found.' });
 
     if (req.user!.role === 'customer' && order.customer_id !== req.user!.id) {
       return res.status(403).json({ error: 'You cannot cancel another customer’s order.' });
+    }
+    if (req.user!.role === 'store_owner') {
+      const myStore = await storesRepo.findByOwnerId(req.user!.id);
+      if (!myStore || order.store_id !== myStore.id) {
+        return res.status(403).json({ error: 'You cannot cancel an order belonging to another store.' });
+      }
     }
 
     const adminUsers = await usersRepo.listAdmins();
@@ -1993,6 +2283,1206 @@ app.delete('/api/admin/reviews/:id', requireAuth, requireRole(['admin']), async 
     res.json({ success: true, message: 'Review deleted successfully.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------------------------------------------
+// Hyperlocal Grocery Marketplace: Store Self-Registration & Public Discovery
+// ----------------------------------------------------
+app.post('/api/stores/register', async (req: Request, res: Response) => {
+  try {
+    const {
+      owner_name,
+      phone,
+      password,
+      store_name,
+      description,
+      address,
+      landmark,
+      pincode,
+      lat,
+      lng,
+      photos,
+      opening_hours,
+      service_type,
+      delivery_radius_km,
+      delivery_fee,
+      min_order_amount
+    } = req.body;
+
+    const cleanPhone = normalizePhone(phone);
+    const cleanPassword = typeof password === 'string' ? password.trim() : '';
+
+    if (!owner_name?.trim() || !cleanPhone || !cleanPassword || !store_name?.trim() || !address?.trim()) {
+      return res.status(400).json({
+        error: 'Owner name, 10-digit mobile number, password, store name, and store address are required.'
+      });
+    }
+    if (cleanPhone.length < 10) {
+      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
+    }
+    if (cleanPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    }
+
+    const sLat = Number(lat);
+    const sLng = Number(lng);
+    if (!isValidCoordinate(sLat, sLng)) {
+      return res.status(400).json({ error: 'Please pin your exact store location on the map.' });
+    }
+
+    const existingOwner = await usersRepo.findByPhoneAndRole(cleanPhone, 'store_owner');
+    if (existingOwner) {
+      return res.status(400).json({
+        error: 'A store owner account with this mobile number already exists. Please sign in instead.'
+      });
+    }
+
+    const validServiceType: 'delivery' | 'pickup' | 'both' =
+      service_type === 'delivery' || service_type === 'pickup' || service_type === 'both'
+        ? service_type
+        : 'both';
+
+    const cleanPhotos = sanitizeStorePhotos(photos);
+    const passwordHash = await bcrypt.hash(cleanPassword, 10);
+    const nowIso = new Date().toISOString();
+
+    const ownerUser = await usersRepo.create({
+      phone: cleanPhone,
+      name: owner_name.trim(),
+      email: null,
+      role: 'store_owner',
+      store_id: null,
+      password_hash: passwordHash,
+      address: address.trim(),
+      landmark: landmark?.trim() || null,
+      city: 'Karanja Lad',
+      pincode: pincode?.trim() || '444105',
+      is_active: true,
+      created_at: nowIso
+    });
+
+    const store = await storesRepo.create({
+      owner_id: ownerUser.id,
+      owner_name: owner_name.trim(),
+      owner_phone: cleanPhone,
+      name: store_name.trim(),
+      description: description?.trim() || null,
+      address: address.trim(),
+      landmark: landmark?.trim() || null,
+      city: 'Karanja Lad',
+      pincode: pincode?.trim() || '444105',
+      lat: sLat,
+      lng: sLng,
+      logo_url: null,
+      banner_url: null,
+      photos: cleanPhotos,
+      opening_hours: opening_hours?.trim() || '08:00 AM - 09:00 PM',
+      opening_time: null,
+      closing_time: null,
+      weekly_closed_days: [],
+      service_type: validServiceType,
+      delivery_radius_km: Math.max(0.5, Number(delivery_radius_km) || 5),
+      delivery_fee: Math.max(0, Number(delivery_fee) || 0),
+      min_order_amount: Math.max(0, Number(min_order_amount) || 0),
+      delivery_info: null,
+      approval_status: 'pending',
+      rejection_reason: null,
+      is_active: true,
+      is_open: true,
+      featured: false,
+      subscription_tier: 'free',
+      created_at: nowIso,
+      updated_at: nowIso
+    });
+
+    await usersRepo.update(ownerUser.id, { store_id: store.id });
+
+    const adminUsers = await usersRepo.listAdmins();
+    for (const adm of adminUsers) {
+      await notificationsRepo.create({
+        user_id: adm.id,
+        title: 'New Store Registration Pending Approval 🏪',
+        message: `${store.name} (${owner_name.trim()}, ${cleanPhone}) has registered and awaits your approval.`,
+        type: 'store'
+      });
+    }
+
+    const userPayload = {
+      id: ownerUser.id,
+      phone: ownerUser.phone,
+      name: ownerUser.name,
+      email: ownerUser.email,
+      role: ownerUser.role,
+      store_id: store.id,
+      is_active: true,
+      address: ownerUser.address,
+      landmark: ownerUser.landmark,
+      pincode: ownerUser.pincode
+    };
+
+    const token = generateToken(userPayload as any);
+    await logAudit(ownerUser.id, 'store_owner', 'STORE_REGISTERED', 'stores', store.id, `Registered store ${store.name} (pending admin approval)`);
+
+    const isProduction = process.env.NODE_ENV === 'production';
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 30 * 24 * 60 * 60 * 1000
+    });
+
+    res.status(201).json({
+      message: 'Store registered successfully! Your store is pending Admin approval before appearing to customers.',
+      token,
+      user: userPayload,
+      store: sanitizePublicStore(store)
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Store registration failed.' });
+  }
+});
+
+// Customer Store Discovery: ONLY returns real Admin-approved active stores with valid location sorted by distance
+app.get('/api/stores/nearby', async (req: Request, res: Response) => {
+  try {
+    const qLat = Number(req.query.lat);
+    const qLng = Number(req.query.lng);
+    const search = String(req.query.search || '').trim().toLowerCase();
+
+    const refLat = isValidCoordinate(qLat, qLng) ? qLat : DEFAULT_WAREHOUSE_LAT;
+    const refLng = isValidCoordinate(qLat, qLng) ? qLng : DEFAULT_WAREHOUSE_LNG;
+
+    const approvedStores = (await storesRepo.listApprovedActive()).filter(
+      st => isValidCoordinate(st.lat, st.lng) && Boolean(st.address && st.address.trim())
+    );
+    const allProducts = await productsRepo.list({ includeWholesale: false });
+
+    const productCountMap: Record<number, number> = {};
+    const availableProductNamesMap: Record<number, string[]> = {};
+    for (const p of allProducts) {
+      if (p.store_id) {
+        productCountMap[p.store_id] = (productCountMap[p.store_id] || 0) + 1;
+        if (p.is_active !== false && !p.is_deleted && Number(p.stock) > 0 && p.name) {
+          if (!availableProductNamesMap[p.store_id]) {
+            availableProductNamesMap[p.store_id] = [];
+          }
+          availableProductNamesMap[p.store_id].push(p.name);
+        }
+      }
+    }
+
+    let enriched = approvedStores.map(st => {
+      const distKm = Math.round(calculateHaversineKm(refLat, refLng, st.lat, st.lng) * 100) / 100;
+      return sanitizePublicStore(st, {
+        distance_km: distKm,
+        product_count: productCountMap[st.id] || 0,
+        available_product_names: availableProductNamesMap[st.id] || []
+      });
+    });
+
+    if (search) {
+      enriched = enriched.filter(
+        st =>
+          st.name.toLowerCase().includes(search) ||
+          st.address.toLowerCase().includes(search) ||
+          (st.landmark && st.landmark.toLowerCase().includes(search)) ||
+          (st.description && st.description.toLowerCase().includes(search)) ||
+          (Array.isArray(st.available_product_names) &&
+            st.available_product_names.some(prodName => prodName.toLowerCase().includes(search)))
+      );
+    }
+
+    enriched.sort((a, b) => (a.distance_km ?? 0) - (b.distance_km ?? 0));
+    res.json(enriched);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/stores/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const store = await storesRepo.findById(id);
+    if (
+      !store ||
+      store.approval_status !== 'approved' ||
+      store.is_active === false ||
+      !isValidCoordinate(store.lat, store.lng) ||
+      !store.address?.trim()
+    ) {
+      return res.status(404).json({ error: 'Store not found or unavailable.' });
+    }
+    const qLat = Number(req.query.lat);
+    const qLng = Number(req.query.lng);
+    const refLat = isValidCoordinate(qLat, qLng) ? qLat : DEFAULT_WAREHOUSE_LAT;
+    const refLng = isValidCoordinate(qLat, qLng) ? qLng : DEFAULT_WAREHOUSE_LNG;
+    const distKm = Math.round(calculateHaversineKm(refLat, refLng, store.lat, store.lng) * 100) / 100;
+    const storeProds = await productsRepo.list({ store_id: id, includeWholesale: false });
+
+    res.json(
+      sanitizePublicStore(store, {
+        distance_km: distKm,
+        product_count: storeProds.length
+      })
+    );
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/stores/:id/products', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const store = await storesRepo.findById(id);
+    if (
+      !store ||
+      store.approval_status !== 'approved' ||
+      store.is_active === false ||
+      !isValidCoordinate(store.lat, store.lng)
+    ) {
+      return res.status(404).json({ error: 'Store not found or unavailable.' });
+    }
+    const { category, search, in_stock } = req.query;
+    const products = await productsRepo.list({
+      store_id: id,
+      category: category as string,
+      search: search as string,
+      in_stock: in_stock === 'true',
+      includeZeroStockUnavailable: true,
+      includeWholesale: false
+    });
+    res.json(products);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/stores/:id/delivery-quote', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const store = await storesRepo.findById(id);
+    if (!store || store.approval_status !== 'approved' || store.is_active === false) {
+      return res.status(404).json({ error: 'Store not found or unavailable.' });
+    }
+
+    const cLat = Number(req.body?.customer_lat);
+    const cLng = Number(req.body?.customer_lng);
+    if (!isValidCoordinate(cLat, cLng)) {
+      return res.status(400).json({ error: 'Valid delivery coordinates are required.' });
+    }
+
+    const road = await calculateRoadDistanceKm(store.lat, store.lng, cLat, cLng);
+    const radius = Math.max(0.5, Number(store.delivery_radius_km) || 5);
+    const deliverable =
+      (store.service_type === 'delivery' || store.service_type === 'both') && road.distance_km <= radius;
+
+    res.json({
+      deliverable,
+      distance_km: road.distance_km,
+      duration_mins: road.duration_mins,
+      distance_source: road.source,
+      delivery_fee: Math.max(0, Number(store.delivery_fee || 0)),
+      handling_fee: 0,
+      max_delivery_distance_km: radius,
+      pricing_mode: 'slabs',
+      matched_slab_label:
+        Number(store.delivery_fee || 0) === 0
+          ? 'Free Store-Managed Delivery'
+          : `Store-Managed Delivery (₹${store.delivery_fee})`,
+      warehouse_lat: store.lat,
+      warehouse_lng: store.lng,
+      warehouse_address: store.address,
+      reason: !deliverable
+        ? store.service_type === 'pickup'
+          ? `${store.name} supports Store Pickup only.`
+          : `Delivery unavailable beyond ${radius} km for ${store.name}. Your location is ${road.distance_km} km away.`
+        : undefined
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to compute store delivery distance.' });
+  }
+});
+
+// ----------------------------------------------------
+// Store Owner Dashboard Routes (Strict Store Ownership Isolation)
+// ----------------------------------------------------
+async function getStoreForOwnerOr404(ownerId: number) {
+  const store = await storesRepo.findByOwnerId(ownerId);
+  return store;
+}
+
+app.get('/api/store-owner/my-store', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) {
+      return res.status(404).json({ error: 'No store found for this owner account.' });
+    }
+    const products = await productsRepo.list({ store_id: store.id, includeInactive: true, includeWholesale: false });
+    const orders = await ordersRepo.list({ store_id: store.id });
+
+    const availableProducts = products.filter(p => p.is_active !== false && Number(p.stock) > 0).length;
+    const unavailableProducts = products.length - availableProducts;
+    const newOrders = orders.filter(o => o.status === 'placed').length;
+    const inProgressOrders = orders.filter(o => ['confirmed', 'packed', 'dispatched'].includes(o.status)).length;
+    const completedOrders = orders.filter(o => o.status === 'delivered').length;
+    const cancelledOrders = orders.filter(o => o.status === 'cancelled').length;
+    // Completed sales only — cancelled/rejected orders are strictly excluded
+    const completedSales = Math.round(
+      orders
+        .filter(o => o.status === 'delivered')
+        .reduce((sum, o) => sum + Number(o.total_amount || 0), 0) * 100
+    ) / 100;
+
+    res.json({
+      store,
+      stats: {
+        total_products: products.length,
+        available_products: availableProducts,
+        unavailable_products: unavailableProducts,
+        active_products: availableProducts,
+        total_orders: orders.length,
+        new_orders: newOrders,
+        pending_orders: newOrders,
+        active_orders: inProgressOrders,
+        in_progress_orders: inProgressOrders,
+        completed_orders: completedOrders,
+        cancelled_orders: cancelledOrders,
+        gross_order_value: completedSales,
+        platform_fee: 0,
+        net_earnings: completedSales,
+        total_revenue: completedSales
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/store-owner/my-store', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) {
+      return res.status(404).json({ error: 'Store not found.' });
+    }
+    if (store.is_active === false) {
+      return res.status(403).json({ error: 'Your store has been suspended by Admin.' });
+    }
+
+    // Strict security guard: store owners cannot self-approve, unsuspend, or hijack store ownership/monetization flags
+    if (
+      req.body.approval_status !== undefined ||
+      req.body.is_active !== undefined ||
+      req.body.owner_id !== undefined ||
+      req.body.featured !== undefined ||
+      req.body.subscription_tier !== undefined
+    ) {
+      return res.status(403).json({
+        error: 'Forbidden: Approval status and platform administrative flags cannot be modified by store owners.'
+      });
+    }
+
+    const {
+      name,
+      description,
+      owner_phone,
+      address,
+      landmark,
+      pincode,
+      lat,
+      lng,
+      logo_url,
+      banner_url,
+      photos,
+      opening_hours,
+      opening_time,
+      closing_time,
+      weekly_closed_days,
+      service_type,
+      delivery_radius_km,
+      delivery_fee,
+      min_order_amount,
+      delivery_info,
+      is_open
+    } = req.body;
+
+    let nextLat = store.lat;
+    let nextLng = store.lng;
+    if (lat !== undefined || lng !== undefined) {
+      const cLat = Number(lat);
+      const cLng = Number(lng);
+      if (!isValidCoordinate(cLat, cLng)) {
+        return res.status(400).json({ error: 'Invalid map coordinates.' });
+      }
+      nextLat = cLat;
+      nextLng = cLng;
+    }
+
+    let cleanOwnerPhone = store.owner_phone;
+    if (owner_phone !== undefined) {
+      const normalized = normalizePhone(owner_phone);
+      if (normalized.length !== 10) {
+        return res.status(400).json({ error: 'Store contact mobile number must be a valid 10-digit number.' });
+      }
+      cleanOwnerPhone = normalized;
+    }
+
+    if (delivery_fee !== undefined && (!Number.isFinite(Number(delivery_fee)) || Number(delivery_fee) < 0)) {
+      return res.status(400).json({ error: 'Delivery fee must be a valid non-negative amount.' });
+    }
+    if (min_order_amount !== undefined && (!Number.isFinite(Number(min_order_amount)) || Number(min_order_amount) < 0)) {
+      return res.status(400).json({ error: 'Minimum order amount must be a valid non-negative amount.' });
+    }
+    if (delivery_radius_km !== undefined && (!Number.isFinite(Number(delivery_radius_km)) || Number(delivery_radius_km) < 0.5)) {
+      return res.status(400).json({ error: 'Delivery radius must be at least 0.5 km.' });
+    }
+
+    const validDaysSet = new Set(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
+    const nextClosedDays = Array.isArray(weekly_closed_days)
+      ? Array.from(new Set(weekly_closed_days.map((d: any) => String(d).trim()).filter(d => validDaysSet.has(d))))
+      : store.weekly_closed_days || [];
+
+    const nextOpeningTime = opening_time !== undefined ? (opening_time ? String(opening_time).trim() : null) : store.opening_time || null;
+    const nextClosingTime = closing_time !== undefined ? (closing_time ? String(closing_time).trim() : null) : store.closing_time || null;
+
+    let nextOpeningHours = opening_hours ? String(opening_hours).trim() : store.opening_hours;
+    if (!opening_hours && (opening_time !== undefined || closing_time !== undefined || weekly_closed_days !== undefined)) {
+      if (nextOpeningTime && nextClosingTime) {
+        const closedSuffix = nextClosedDays.length > 0 ? ` · Closed: ${nextClosedDays.join(', ')}` : '';
+        nextOpeningHours = `${formatTime12h(nextOpeningTime)} - ${formatTime12h(nextClosingTime)}${closedSuffix}`;
+      }
+    }
+
+    const nextLogo = logo_url !== undefined ? (logo_url ? sanitizeImageValue(logo_url) : null) : (store.logo_url || null);
+    const nextBanner = banner_url !== undefined ? (banner_url ? sanitizeImageValue(banner_url) : null) : (store.banner_url || null);
+
+    let nextPhotos = photos !== undefined ? sanitizeStorePhotos(photos) : [...(Array.isArray(store.photos) ? store.photos : [])];
+    if (logo_url !== undefined || banner_url !== undefined) {
+      const oldSpecials = new Set([store.banner_url, store.logo_url].filter(Boolean));
+      const extras = nextPhotos.filter(p => !oldSpecials.has(p) && p !== nextBanner && p !== nextLogo);
+      nextPhotos = [nextBanner, nextLogo, ...extras].filter((x): x is string => Boolean(x)).slice(0, 4);
+    }
+
+    const patch: Partial<StoreDoc> = {
+      ...(name !== undefined && String(name).trim() ? { name: String(name).trim() } : {}),
+      ...(description !== undefined ? { description: description ? String(description).trim() : null } : {}),
+      owner_phone: cleanOwnerPhone,
+      ...(address !== undefined && String(address).trim() ? { address: String(address).trim() } : {}),
+      ...(landmark !== undefined ? { landmark: landmark ? String(landmark).trim() : null } : {}),
+      ...(pincode !== undefined && String(pincode).trim() ? { pincode: String(pincode).trim() } : {}),
+      lat: nextLat,
+      lng: nextLng,
+      logo_url: nextLogo,
+      banner_url: nextBanner,
+      photos: nextPhotos,
+      opening_hours: nextOpeningHours,
+      opening_time: nextOpeningTime,
+      closing_time: nextClosingTime,
+      weekly_closed_days: nextClosedDays,
+      ...(service_type && ['delivery', 'pickup', 'both'].includes(service_type) ? { service_type } : {}),
+      ...(delivery_radius_km !== undefined ? { delivery_radius_km: Math.max(0.5, Number(delivery_radius_km)) } : {}),
+      ...(delivery_fee !== undefined ? { delivery_fee: Math.max(0, Number(delivery_fee)) } : {}),
+      ...(min_order_amount !== undefined ? { min_order_amount: Math.max(0, Number(min_order_amount)) } : {}),
+      ...(delivery_info !== undefined ? { delivery_info: delivery_info ? String(delivery_info).trim() : null } : {}),
+      ...(is_open !== undefined ? { is_open: Boolean(is_open) } : {})
+    };
+
+    const updated = await storesRepo.update(store.id, patch);
+    await logAudit(req.user!.id, 'store_owner', 'STORE_UPDATED', 'stores', store.id, `Updated store profile (${updated?.name})`);
+    res.json({ message: 'Store settings updated successfully.', store: updated });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/store-owner/products', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+
+    const products = await productsRepo.list({
+      store_id: store.id,
+      includeInactive: true,
+      includeWholesale: false
+    });
+    res.json(products);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/store-owner/products', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+    if (store.approval_status !== 'approved' || store.is_active === false) {
+      return res.status(403).json({ error: 'Your store must be approved and active to manage products.' });
+    }
+
+    const {
+      category_id,
+      name,
+      unit,
+      price,
+      mrp,
+      stock,
+      image_url,
+      description,
+      is_active,
+      product_type,
+      min_order_qty,
+      max_order_qty,
+      pricing_slabs
+    } = req.body;
+
+    if (!name || !String(name).trim() || !unit || !String(unit).trim() || price === undefined || price === '') {
+      return res.status(400).json({ error: 'Product name, unit, and selling price are required.' });
+    }
+
+    const numPrice = Number(price);
+    const numMrp = mrp !== undefined && mrp !== null && mrp !== '' ? Number(mrp) : numPrice;
+    const rawStock = stock !== undefined && stock !== null && stock !== '' ? Number(stock) : 0;
+
+    if (!Number.isFinite(numPrice) || numPrice < 0) {
+      return res.status(400).json({ error: 'Selling price cannot be negative.' });
+    }
+    if (!Number.isFinite(numMrp) || numMrp < 0) {
+      return res.status(400).json({ error: 'MRP cannot be negative.' });
+    }
+    if (!Number.isFinite(rawStock) || rawStock < 0) {
+      return res.status(400).json({ error: 'Stock quantity cannot be negative.' });
+    }
+
+    const numStock = Math.round(rawStock * 100) / 100;
+    if (numStock <= 0 && is_active === true) {
+      return res.status(400).json({ error: 'Cannot mark a product with 0 stock as available. Increase stock above 0 first.' });
+    }
+    const resolvedIsActive = numStock <= 0 ? false : (is_active === undefined ? true : Boolean(is_active));
+
+    const discount = numMrp > numPrice && numMrp > 0 ? Math.round(((numMrp - numPrice) / numMrp) * 100) : 0;
+    const resolvedType = normalizeProductType(product_type, String(unit).trim());
+    const minOrderQty =
+      min_order_qty !== undefined && min_order_qty !== null && min_order_qty !== ''
+        ? Number(min_order_qty)
+        : 1;
+    const maxOrderQty =
+      max_order_qty !== undefined && max_order_qty !== null && max_order_qty !== ''
+        ? Number(max_order_qty)
+        : null;
+
+    const slabCheck = validateAdminPriceSlabs(pricing_slabs, resolvedType);
+    if (!slabCheck.valid) {
+      return res.status(400).json({ error: slabCheck.error });
+    }
+
+    const cleanImageUrl = image_url ? sanitizeImageValue(image_url) : null;
+
+    const product = await productsRepo.create({
+      category_id: Number(category_id) || 1,
+      store_id: store.id,
+      store_name: store.name,
+      name: String(name).trim(),
+      unit: String(unit).trim(),
+      price: numPrice,
+      mrp: numMrp,
+      discount_percent: discount,
+      stock: numStock,
+      image_url: cleanImageUrl,
+      description: description ? String(description).trim() : null,
+      is_active: resolvedIsActive,
+      is_deleted: false,
+      product_type: resolvedType,
+      min_order_qty: minOrderQty,
+      max_order_qty: maxOrderQty,
+      pricing_slabs: slabCheck.slabs,
+      created_at: new Date().toISOString()
+    });
+
+    await logAudit(req.user!.id, 'store_owner', 'STORE_PRODUCT_CREATED', 'products', product.id, `Store ${store.name} added ${product.name}`);
+    res.status(201).json(sanitizeProductForCustomer(product));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/store-owner/products/:id', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+    if (store.approval_status !== 'approved' || store.is_active === false) {
+      return res.status(403).json({ error: 'Your store must be approved and active to edit products.' });
+    }
+
+    const id = parseInt(req.params.id, 10);
+    const existing = await productsRepo.findById(id);
+    if (!existing || existing.is_deleted) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+    if (existing.store_id !== store.id) {
+      return res.status(403).json({ error: 'Forbidden: You can only edit products belonging to your own store.' });
+    }
+
+    const {
+      category_id,
+      name,
+      unit,
+      price,
+      mrp,
+      stock,
+      image_url,
+      description,
+      is_active,
+      product_type,
+      min_order_qty,
+      max_order_qty,
+      pricing_slabs
+    } = req.body;
+
+    const numPrice = price !== undefined ? Number(price) : Number(existing.price);
+    const numMrp = mrp !== undefined && mrp !== null && mrp !== '' ? Number(mrp) : Number(existing.mrp ?? numPrice);
+    const rawStock = stock !== undefined ? Number(stock) : Number(existing.stock);
+
+    if (!Number.isFinite(numPrice) || numPrice < 0) {
+      return res.status(400).json({ error: 'Selling price cannot be negative.' });
+    }
+    if (!Number.isFinite(numMrp) || numMrp < 0) {
+      return res.status(400).json({ error: 'MRP cannot be negative.' });
+    }
+    if (!Number.isFinite(rawStock) || rawStock < 0) {
+      return res.status(400).json({ error: 'Stock quantity cannot be negative.' });
+    }
+
+    const numStock = Math.round(rawStock * 100) / 100;
+    if (numStock <= 0 && is_active === true) {
+      return res.status(400).json({ error: 'Cannot mark a product with 0 stock as available. Increase stock above 0 first.' });
+    }
+
+    let resolvedIsActive: boolean;
+    if (numStock <= 0) {
+      resolvedIsActive = false;
+    } else if (is_active !== undefined) {
+      resolvedIsActive = Boolean(is_active);
+    } else if (existing.stock <= 0 && numStock > 0) {
+      resolvedIsActive = true;
+    } else {
+      resolvedIsActive = existing.is_active !== false;
+    }
+
+    const discount = numMrp > numPrice && numMrp > 0 ? Math.round(((numMrp - numPrice) / numMrp) * 100) : 0;
+
+    const resolvedType = product_type !== undefined
+      ? normalizeProductType(product_type, unit ? String(unit).trim() : existing.unit)
+      : normalizeProductType(existing.product_type, existing.unit);
+
+    let slabsPatch: Record<string, any> = {};
+    if (pricing_slabs !== undefined) {
+      const slabCheck = validateAdminPriceSlabs(pricing_slabs, resolvedType);
+      if (!slabCheck.valid) {
+        return res.status(400).json({ error: slabCheck.error });
+      }
+      slabsPatch = { pricing_slabs: slabCheck.slabs };
+    }
+
+    const cleanImageUrl = image_url !== undefined ? (image_url ? sanitizeImageValue(image_url) : null) : existing.image_url;
+
+    const updated = await productsRepo.update(id, {
+      ...(category_id !== undefined ? { category_id: Number(category_id) } : {}),
+      ...(name ? { name: String(name).trim() } : {}),
+      ...(unit ? { unit: String(unit).trim() } : {}),
+      ...(price !== undefined ? { price: numPrice } : {}),
+      ...(mrp !== undefined ? { mrp: numMrp } : {}),
+      discount_percent: discount,
+      ...(stock !== undefined ? { stock: numStock } : {}),
+      image_url: cleanImageUrl,
+      ...(description !== undefined ? { description: description ? String(description).trim() : null } : {}),
+      is_active: resolvedIsActive,
+      product_type: resolvedType,
+      ...(min_order_qty !== undefined ? { min_order_qty: Number(min_order_qty) || 1 } : {}),
+      ...(max_order_qty !== undefined ? { max_order_qty: max_order_qty ? Number(max_order_qty) : null } : {}),
+      ...slabsPatch
+    });
+
+    await logAudit(req.user!.id, 'store_owner', 'STORE_PRODUCT_UPDATED', 'products', id, `Store ${store.name} updated product #${id}`);
+    res.json(sanitizeProductForCustomer(updated!));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/store-owner/products/:id/stock', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+    if (store.approval_status !== 'approved' || store.is_active === false) {
+      return res.status(403).json({ error: 'Your store must be approved and active to update inventory.' });
+    }
+
+    const id = parseInt(req.params.id, 10);
+    const existing = await productsRepo.findById(id);
+    if (!existing || existing.is_deleted) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+    if (existing.store_id !== store.id) {
+      return res.status(403).json({ error: 'Forbidden: You can only adjust inventory belonging to your own store.' });
+    }
+
+    const rawStock = req.body?.stock;
+    if (rawStock === undefined || rawStock === null || rawStock === '') {
+      return res.status(400).json({ error: 'Stock quantity is required.' });
+    }
+    const parsedStock = Number(rawStock);
+    if (!Number.isFinite(parsedStock) || parsedStock < 0) {
+      return res.status(400).json({ error: 'Stock quantity cannot be negative.' });
+    }
+    const newStock = Math.round(parsedStock * 100) / 100;
+    if (newStock <= 0 && req.body?.is_active === true) {
+      return res.status(400).json({ error: 'Cannot mark a product with 0 stock as available.' });
+    }
+
+    const updated = await productsRepo.storeAdjustStock(
+      id,
+      newStock,
+      store.id,
+      typeof req.body?.is_active === 'boolean' ? req.body.is_active : undefined
+    );
+
+    await logAudit(
+      req.user!.id,
+      'store_owner',
+      'STORE_STOCK_UPDATED',
+      'products',
+      id,
+      `Store ${store.name} updated stock for "${existing.name}" to ${newStock}`
+    );
+    res.json(sanitizeProductForCustomer(updated));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/store-owner/products/:id', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+
+    const id = parseInt(req.params.id, 10);
+    const existing = await productsRepo.findById(id);
+    if (!existing || existing.is_deleted) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+    if (existing.store_id !== store.id) {
+      return res.status(403).json({ error: 'Forbidden: You can only delete products belonging to your own store.' });
+    }
+
+    await productsRepo.softDelete(id);
+    await logAudit(req.user!.id, 'store_owner', 'STORE_PRODUCT_DELETED', 'products', id, `Store ${store.name} removed product #${id}`);
+    res.json({ message: 'Product deleted successfully.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/store-owner/orders', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+
+    const orders = await ordersRepo.list({ store_id: store.id });
+    const itemsSnap = await getDocs(collection(firestoreDb, 'order_items'));
+    const itemsByOrder = new Map<number, any[]>();
+    for (const d of itemsSnap.docs) {
+      const it = d.data();
+      if (!itemsByOrder.has(it.order_id)) itemsByOrder.set(it.order_id, []);
+      itemsByOrder.get(it.order_id)!.push(it);
+    }
+
+    res.json(
+      orders.map(o => {
+        const needsDeliveryAddress =
+          o.fulfillment_type !== 'pickup' && !['delivered', 'cancelled'].includes(o.status);
+        return {
+          ...o,
+          delivery_otp: undefined,
+          delivery_address:
+            o.fulfillment_type === 'pickup'
+              ? o.delivery_address
+              : needsDeliveryAddress
+                ? o.delivery_address
+                : o.status === 'cancelled'
+                  ? 'Order cancelled — delivery address hidden'
+                  : 'Delivered — street address hidden after fulfillment',
+          landmark: needsDeliveryAddress ? o.landmark : '',
+          customer_lat: needsDeliveryAddress ? o.customer_lat : null,
+          customer_lng: needsDeliveryAddress ? o.customer_lng : null,
+          items: itemsByOrder.get(o.id) || []
+        };
+      })
+    );
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const ALLOWED_STORE_ORDER_TRANSITIONS: Record<string, string[]> = {
+  placed: ['confirmed', 'cancelled'],
+  confirmed: ['packed', 'cancelled'],
+  packed: ['dispatched', 'cancelled'],
+  dispatched: ['delivered'],
+  delivered: [],
+  cancelled: []
+};
+
+app.put('/api/store-owner/orders/:id/status', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+    if (store.approval_status !== 'approved' || store.is_active === false) {
+      return res.status(403).json({ error: 'Your store must be approved and active to manage orders.' });
+    }
+
+    const id = parseInt(req.params.id, 10);
+    const { order } = await ordersRepo.findById(id);
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+    if (order.store_id !== store.id) {
+      return res.status(403).json({ error: 'Forbidden: This order belongs to another store.' });
+    }
+
+    const { status, rejection_reason } = req.body;
+    if (!['confirmed', 'packed', 'dispatched', 'delivered', 'cancelled'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid order status.' });
+    }
+
+    const allowedNext = ALLOWED_STORE_ORDER_TRANSITIONS[order.status] || [];
+    if (!allowedNext.includes(status)) {
+      return res.status(400).json({
+        error: `Invalid order status transition from "${order.status}" to "${status}".`
+      });
+    }
+
+    if (status === 'cancelled') {
+      const adminUsers = await usersRepo.listAdmins();
+      const reason = rejection_reason?.trim() || `Rejected by ${store.name}`;
+      const cancelled = await ordersRepo.cancelOrderTransactional(
+        id,
+        reason,
+        { id: req.user!.id, name: store.name, role: 'store_owner' },
+        adminUsers
+      );
+      await logAudit(req.user!.id, 'store_owner', 'STORE_ORDER_REJECTED', 'orders', id, `Store ${store.name} rejected order #${order.order_number}`);
+      return res.json(cancelled);
+    }
+
+    const extra =
+      status === 'delivered'
+        ? { payment_status: 'paid' as const, cod_collected: true, cod_collected_at: new Date().toISOString() }
+        : undefined;
+
+    const updated = await ordersRepo.updateStatus(id, status, extra);
+    await logAudit(req.user!.id, 'store_owner', 'STORE_ORDER_STATUS', 'orders', id, `Store ${store.name} marked order #${order.order_number} as ${status}`);
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ----------------------------------------------------
+// Complaints / Reported Problems (Customers & Store Owners -> Admin)
+// ----------------------------------------------------
+app.post('/api/complaints', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { subject, description, store_id, order_id } = req.body;
+    if (!subject?.trim() || !description?.trim()) {
+      return res.status(400).json({ error: 'Subject and problem description are required.' });
+    }
+
+    let storeName: string | null = null;
+    if (store_id) {
+      const st = await storesRepo.findById(Number(store_id));
+      storeName = st?.name || null;
+    }
+
+    let orderNumber: string | null = null;
+    if (order_id) {
+      const { order } = await ordersRepo.findById(Number(order_id));
+      orderNumber = order?.order_number || null;
+    }
+
+    const complaint = await complaintsRepo.create({
+      reporter_id: req.user!.id,
+      reporter_name: req.user!.name,
+      reporter_phone: req.user!.phone,
+      reporter_role: req.user!.role,
+      store_id: store_id ? Number(store_id) : null,
+      store_name: storeName,
+      order_id: order_id ? Number(order_id) : null,
+      order_number: orderNumber,
+      subject: String(subject).trim(),
+      description: String(description).trim(),
+      status: 'open',
+      admin_notes: null,
+      resolved_at: null
+    });
+
+    const admins = await usersRepo.listAdmins();
+    for (const adm of admins) {
+      await notificationsRepo.create({
+        user_id: adm.id,
+        title: 'New Issue Reported 📋',
+        message: `${req.user!.name} (${req.user!.role}) reported: ${complaint.subject}`,
+        type: 'complaint'
+      });
+    }
+
+    await logAudit(req.user!.id, req.user!.role, 'COMPLAINT_SUBMITTED', 'complaints', complaint.id, complaint.subject);
+    res.status(201).json(complaint);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/complaints/my', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const list = await complaintsRepo.listByReporter(req.user!.id);
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------------------------------------------
+// Admin Marketplace Control Routes (Stores, Customers, Categories, Complaints)
+// ----------------------------------------------------
+app.get('/api/admin/stores', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const stores = await storesRepo.listAll();
+    const products = await productsRepo.list({ includeInactive: true, includeWholesale: true });
+    const orders = await ordersRepo.list();
+
+    const prodCounts: Record<number, number> = {};
+    for (const p of products) {
+      if (p.store_id) prodCounts[p.store_id] = (prodCounts[p.store_id] || 0) + 1;
+    }
+    const orderCounts: Record<number, number> = {};
+    for (const o of orders) {
+      if (o.store_id) orderCounts[o.store_id] = (orderCounts[o.store_id] || 0) + 1;
+    }
+
+    res.json(
+      stores.map(s => ({
+        ...s,
+        product_count: prodCounts[s.id] || 0,
+        order_count: orderCounts[s.id] || 0
+      }))
+    );
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/stores/:id/approval', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { approval_status, rejection_reason } = req.body;
+    if (!['approved', 'rejected', 'pending'].includes(approval_status)) {
+      return res.status(400).json({ error: 'Invalid approval status.' });
+    }
+
+    const existing = await storesRepo.findById(id);
+    if (!existing) return res.status(404).json({ error: 'Store not found.' });
+
+    const updated = await storesRepo.update(id, {
+      approval_status,
+      rejection_reason: approval_status === 'rejected' ? (rejection_reason?.trim() || 'Not approved by Admin') : null,
+      ...(approval_status === 'approved' ? { is_active: true } : {})
+    });
+
+    await notificationsRepo.create({
+      user_id: existing.owner_id,
+      title: approval_status === 'approved' ? 'Store Approved! 🎉' : 'Store Registration Update',
+      message:
+        approval_status === 'approved'
+          ? `Congratulations! ${existing.name} is now approved and live for nearby customers on FMP Supermart.`
+          : `Your store registration for ${existing.name} was ${approval_status}. ${rejection_reason || ''}`,
+      type: 'store'
+    });
+
+    await logAudit(req.user!.id, 'admin', 'STORE_APPROVAL_UPDATED', 'stores', id, `Set store ${existing.name} approval to ${approval_status}`);
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/stores/:id/status', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { is_active } = req.body;
+    const existing = await storesRepo.findById(id);
+    if (!existing) return res.status(404).json({ error: 'Store not found.' });
+
+    const updated = await storesRepo.update(id, { is_active: Boolean(is_active) });
+    await notificationsRepo.create({
+      user_id: existing.owner_id,
+      title: is_active ? 'Store Activated ✅' : 'Store Suspended ⚠️',
+      message: is_active
+        ? `${existing.name} has been reactivated by Admin.`
+        : `${existing.name} has been temporarily deactivated by Admin.`,
+      type: 'store'
+    });
+
+    await logAudit(req.user!.id, 'admin', 'STORE_ACTIVE_TOGGLED', 'stores', id, `Store ${existing.name} is_active=${Boolean(is_active)}`);
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/customers', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const customers = await usersRepo.listCustomers();
+    const orders = await ordersRepo.list();
+    const statsByCustomer: Record<number, { orders: number; total_spent: number }> = {};
+    for (const o of orders) {
+      if (!statsByCustomer[o.customer_id]) {
+        statsByCustomer[o.customer_id] = { orders: 0, total_spent: 0 };
+      }
+      statsByCustomer[o.customer_id].orders++;
+      if (o.status !== 'cancelled') {
+        statsByCustomer[o.customer_id].total_spent += Number(o.total_amount || 0);
+      }
+    }
+
+    res.json(
+      customers.map(({ password_hash: _pw, ...safeUser }) => ({
+        ...safeUser,
+        order_count: statsByCustomer[safeUser.id]?.orders || 0,
+        total_spent: Math.round((statsByCustomer[safeUser.id]?.total_spent || 0) * 100) / 100
+      }))
+    );
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/customers/:id/status', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { is_active } = req.body;
+    const customer = await usersRepo.findById(id);
+    if (!customer || customer.role !== 'customer') {
+      return res.status(404).json({ error: 'Customer not found.' });
+    }
+    const updated = await usersRepo.update(id, { is_active: Boolean(is_active) });
+    if (!updated) return res.status(404).json({ error: 'Customer not found.' });
+    const { password_hash: _pw, ...safe } = updated;
+    await logAudit(req.user!.id, 'admin', 'CUSTOMER_STATUS_UPDATED', 'users', id, `Customer ${customer.name} is_active=${Boolean(is_active)}`);
+    res.json(safe);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/categories', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const list = await categoriesRepo.list(true);
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/categories', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, description, image_url, display_order } = req.body;
+    if (!name?.trim()) {
+      return res.status(400).json({ error: 'Category name is required.' });
+    }
+    const cleanName = String(name).trim();
+    const slug = cleanName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `cat-${Date.now()}`;
+    const cleanImg = image_url ? sanitizeImageValue(image_url) : '';
+    const created = await categoriesRepo.create({
+      name: cleanName,
+      slug,
+      description: description?.trim() || '',
+      image_url: cleanImg || '',
+      display_order: Number(display_order) || 10,
+      is_active: true
+    });
+    await logAudit(req.user!.id, 'admin', 'CATEGORY_CREATED', 'categories', created.id, `Created category ${cleanName}`);
+    res.status(201).json(created);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/categories/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { name, description, image_url, display_order, is_active } = req.body;
+    const cleanImg = image_url !== undefined ? (image_url ? sanitizeImageValue(image_url) : '') : undefined;
+    const updated = await categoriesRepo.update(id, {
+      ...(name ? { name: String(name).trim(), slug: String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') } : {}),
+      ...(description !== undefined ? { description: String(description).trim() } : {}),
+      ...(cleanImg !== undefined ? { image_url: cleanImg || '' } : {}),
+      ...(display_order !== undefined ? { display_order: Number(display_order) } : {}),
+      ...(is_active !== undefined ? { is_active: Boolean(is_active) } : {})
+    });
+    if (!updated) return res.status(404).json({ error: 'Category not found.' });
+    await logAudit(req.user!.id, 'admin', 'CATEGORY_UPDATED', 'categories', id, `Updated category ${updated.name}`);
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/categories/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const ok = await categoriesRepo.remove(id);
+    if (!ok) return res.status(404).json({ error: 'Category not found.' });
+    await logAudit(req.user!.id, 'admin', 'CATEGORY_DELETED', 'categories', id, `Deleted category #${id}`);
+    res.json({ message: 'Category deleted.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/complaints', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const list = await complaintsRepo.listAll();
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/complaints/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { status, admin_notes } = req.body;
+    if (!['open', 'in_review', 'resolved'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid complaint status.' });
+    }
+    const updated = await complaintsRepo.update(id, {
+      status,
+      ...(admin_notes !== undefined ? { admin_notes: String(admin_notes).trim() } : {}),
+      resolved_at: status === 'resolved' ? new Date().toISOString() : null
+    });
+    if (!updated) return res.status(404).json({ error: 'Complaint not found.' });
+
+    await notificationsRepo.create({
+      user_id: updated.reporter_id,
+      title: `Support Ticket ${status.replace('_', ' ').toUpperCase()}`,
+      message: `Your issue "${updated.subject}" was updated by Admin.${updated.admin_notes ? ` Note: ${updated.admin_notes}` : ''}`,
+      type: 'complaint'
+    });
+
+    await logAudit(req.user!.id, 'admin', 'COMPLAINT_UPDATED', 'complaints', id, `Complaint #${id} set to ${status}`);
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
   }
 });
 

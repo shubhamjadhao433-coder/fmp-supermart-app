@@ -68,6 +68,12 @@ service cloud.firestore {
     match /cod_reconciliations/{recId} {
       allow read, write: if true;
     }
+    match /stores/{storeId} {
+      allow read, write: if true;
+    }
+    match /complaints/{complaintId} {
+      allow read, write: if true;
+    }
 
     match /{document=**} {
       allow read, write: if true;

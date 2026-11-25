@@ -31,7 +31,13 @@ import {
   Bell,
   Navigation,
   Building2,
-  Percent
+  Percent,
+  Store as StoreIcon,
+  Users,
+  FolderKanban,
+  MessageSquare,
+  Check,
+  Ban
 } from 'lucide-react';
 import {
   AdminStats,
@@ -42,7 +48,10 @@ import {
   Supplier,
   DeliverySettings,
   DeliverySlab,
-  ProductPriceSlab
+  ProductPriceSlab,
+  Store as StoreType,
+  Complaint,
+  ComplaintStatus
 } from '../types.ts';
 import { api } from '../services/api.ts';
 import { normalizeProductType } from '../shared/quantityPricing.ts';
@@ -54,7 +63,18 @@ interface AdminDashboardProps {
   onSwitchToCustomerView?: () => void;
 }
 
-type AdminTab = 'orders' | 'pricing' | 'riders' | 'settlement' | 'settings' | 'reviews' | 'inventory';
+type AdminTab =
+  | 'orders'
+  | 'stores'
+  | 'customers'
+  | 'categories'
+  | 'complaints'
+  | 'pricing'
+  | 'riders'
+  | 'settlement'
+  | 'settings'
+  | 'reviews'
+  | 'inventory';
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   currentUser,
@@ -71,6 +91,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [notifications, setNotifications] = useState<any[]>([]);
   const [showNotifications, setShowNotifications] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
+
+  // Marketplace Admin Control States
+  const [adminStores, setAdminStores] = useState<(StoreType & { order_count?: number })[]>([]);
+  const [storeFilter, setStoreFilter] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
+  const [rejectingStore, setRejectingStore] = useState<StoreType | null>(null);
+  const [rejectionReason, setRejectionReason] = useState<string>('');
+  const [adminCustomers, setAdminCustomers] = useState<(User & { order_count: number; total_spent: number })[]>([]);
+  const [customerSearch, setCustomerSearch] = useState<string>('');
+  const [adminCategories, setAdminCategories] = useState<Category[]>([]);
+  const [categoryModalOpen, setCategoryModalOpen] = useState<boolean>(false);
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [categoryForm, setCategoryForm] = useState<{ name: string; description: string; display_order: string; is_active: boolean }>({
+    name: '',
+    description: '',
+    display_order: '0',
+    is_active: true
+  });
+  const [complaints, setComplaints] = useState<Complaint[]>([]);
+  const [complaintFilter, setComplaintFilter] = useState<'all' | ComplaintStatus>('all');
+  const [complaintNotesById, setComplaintNotesById] = useState<Record<number, string>>({});
 
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -171,7 +211,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const loadAdminData = async () => {
     setLoading(true);
     try {
-      const [statsData, ordersData, prodsData, catsData, ridersData, auditData, feeSettings, slotsData, reviewsData, reportsData, notifsData, suppliersData] = await Promise.all([
+      const [
+        statsData,
+        ordersData,
+        prodsData,
+        catsData,
+        ridersData,
+        auditData,
+        feeSettings,
+        slotsData,
+        reviewsData,
+        reportsData,
+        notifsData,
+        suppliersData,
+        storesData,
+        customersData,
+        adminCatsData,
+        complaintsData
+      ] = await Promise.all([
         api.getAdminStats(),
         api.getOrders(),
         api.getAdminProducts(),
@@ -183,7 +240,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         api.getAdminReviews().catch(() => []),
         api.getAdminReports().catch(() => ({ categorySales: [], inventoryLogs: [] })),
         api.getNotifications().catch(() => []),
-        api.getSuppliers().catch(() => [])
+        api.getSuppliers().catch(() => []),
+        api.getAdminStores().catch(() => []),
+        api.getAdminCustomers().catch(() => []),
+        api.getAdminCategories().catch(() => []),
+        api.getAdminComplaints().catch(() => [])
       ]);
       setStats(statsData);
       setOrders(ordersData);
@@ -193,6 +254,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setAuditLogs(auditData);
       setNotifications(notifsData);
       setSuppliers(suppliersData);
+      setAdminStores(Array.isArray(storesData) ? storesData : []);
+      setAdminCustomers(Array.isArray(customersData) ? customersData : []);
+      setAdminCategories(Array.isArray(adminCatsData) && adminCatsData.length > 0 ? adminCatsData : catsData);
+      if (Array.isArray(complaintsData)) {
+        setComplaints(complaintsData);
+        const notesInit: Record<number, string> = {};
+        complaintsData.forEach(c => {
+          notesInit[c.id] = c.admin_notes || '';
+        });
+        setComplaintNotesById(notesInit);
+      }
       if (feeSettings) {
         setDeliverySettings({
           ...feeSettings,
@@ -665,6 +737,107 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  // Marketplace Control Handlers: Stores, Customers, Categories, Complaints
+  const handleApproveStore = async (storeId: number) => {
+    try {
+      await api.updateStoreApproval(storeId, 'approved');
+      showToast('Store approved and is now visible to customers.');
+      loadAdminData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to approve store', 'error');
+    }
+  };
+
+  const handleRejectStoreSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectingStore) return;
+    try {
+      await api.updateStoreApproval(rejectingStore.id, 'rejected', rejectionReason.trim() || 'Details require verification');
+      showToast('Store registration rejected.');
+      setRejectingStore(null);
+      setRejectionReason('');
+      loadAdminData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to reject store', 'error');
+    }
+  };
+
+  const handleToggleStoreActive = async (store: StoreType) => {
+    try {
+      await api.toggleStoreStatus(store.id, !store.is_active);
+      showToast(`Store "${store.name}" ${!store.is_active ? 'activated' : 'suspended'}.`);
+      loadAdminData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update store status', 'error');
+    }
+  };
+
+  const handleToggleCustomerActive = async (customer: User) => {
+    const nextActive = customer.is_active === false;
+    try {
+      await api.toggleCustomerStatus(customer.id, nextActive);
+      showToast(`Customer ${customer.name} ${nextActive ? 'activated' : 'suspended'}.`);
+      loadAdminData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update customer status', 'error');
+    }
+  };
+
+  const handleSaveCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!categoryForm.name.trim()) return;
+    try {
+      if (editingCategory) {
+        await api.updateAdminCategory(editingCategory.id, {
+          name: categoryForm.name.trim(),
+          description: categoryForm.description.trim(),
+          display_order: Number(categoryForm.display_order || 0),
+          is_active: categoryForm.is_active
+        });
+        showToast('Category updated.');
+      } else {
+        await api.createAdminCategory({
+          name: categoryForm.name.trim(),
+          description: categoryForm.description.trim(),
+          display_order: Number(categoryForm.display_order || 0)
+        });
+        showToast('Category created.');
+      }
+      setCategoryModalOpen(false);
+      setEditingCategory(null);
+      setCategoryForm({ name: '', description: '', display_order: '0', is_active: true });
+      loadAdminData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to save category', 'error');
+    }
+  };
+
+  const handleDeleteCategory = (cat: Category) => {
+    setConfirmDialog({
+      title: 'Delete Category',
+      message: `Remove category "${cat.name}"?`,
+      onConfirm: async () => {
+        try {
+          await api.deleteAdminCategory(cat.id);
+          showToast('Category removed.');
+          loadAdminData();
+        } catch (err: any) {
+          showToast(err.message || 'Failed to delete category', 'error');
+        }
+      }
+    });
+  };
+
+  const handleUpdateComplaint = async (complaint: Complaint, status: ComplaintStatus) => {
+    try {
+      await api.updateAdminComplaint(complaint.id, status, (complaintNotesById[complaint.id] || '').trim());
+      showToast(`Ticket #${complaint.id} marked ${status.replace('_', ' ')}.`);
+      loadAdminData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to update complaint', 'error');
+    }
+  };
+
   // Filtered Orders for Tab 1
   const filteredOrders = orders.filter(o => {
     if (orderStatusFilter !== 'all' && o.status !== orderStatusFilter) return false;
@@ -893,7 +1066,76 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </button>
 
-              {/* Tab 2: Daily Pricing */}
+              {/* Tab 2: Stores Marketplace */}
+              <button
+                onClick={() => setActiveTab('stores')}
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  activeTab === 'stores'
+                    ? 'bg-purple-600 text-white font-black shadow-xs'
+                    : 'text-purple-200 hover:bg-purple-900/60'
+                }`}
+              >
+                <StoreIcon className="w-4 h-4" />
+                <span>Stores</span>
+                {adminStores.filter(s => s.approval_status === 'pending').length > 0 ? (
+                  <span className="bg-amber-500 text-gray-900 text-[10px] font-black px-1.5 py-0.2 rounded-full">
+                    {adminStores.filter(s => s.approval_status === 'pending').length}
+                  </span>
+                ) : (
+                  <span className="text-[10px] bg-purple-800 text-purple-200 px-1.5 py-0.2 rounded-full font-bold">
+                    {adminStores.length}
+                  </span>
+                )}
+              </button>
+
+              {/* Tab 3: Customers */}
+              <button
+                onClick={() => setActiveTab('customers')}
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  activeTab === 'customers'
+                    ? 'bg-purple-600 text-white font-black shadow-xs'
+                    : 'text-purple-200 hover:bg-purple-900/60'
+                }`}
+              >
+                <Users className="w-4 h-4" />
+                <span>Customers</span>
+                <span className="text-[10px] bg-purple-800 text-purple-200 px-1.5 py-0.2 rounded-full font-bold">
+                  {adminCustomers.length}
+                </span>
+              </button>
+
+              {/* Tab 4: Categories */}
+              <button
+                onClick={() => setActiveTab('categories')}
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  activeTab === 'categories'
+                    ? 'bg-purple-600 text-white font-black shadow-xs'
+                    : 'text-purple-200 hover:bg-purple-900/60'
+                }`}
+              >
+                <FolderKanban className="w-4 h-4" />
+                <span>Categories</span>
+              </button>
+
+              {/* Tab 5: Complaints */}
+              <button
+                onClick={() => setActiveTab('complaints')}
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  activeTab === 'complaints'
+                    ? 'bg-purple-600 text-white font-black shadow-xs'
+                    : 'text-purple-200 hover:bg-purple-900/60'
+                }`}
+              >
+                <MessageSquare className="w-4 h-4" />
+                <span>Complaints</span>
+                {complaints.filter(c => c.status !== 'resolved').length > 0 && (
+                  <span className="bg-amber-500 text-gray-900 text-[10px] font-black px-1.5 py-0.2 rounded-full">
+                    {complaints.filter(c => c.status !== 'resolved').length}
+                  </span>
+                )}
+              </button>
+
+              {/* Tab 6: Daily Pricing */}
               <button
                 onClick={() => setActiveTab('pricing')}
                 className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
@@ -909,7 +1151,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </span>
               </button>
 
-              {/* Tab 3: Delivery Partners (Fleet) */}
+              {/* Tab 7: Delivery Partners (Fleet) */}
               <button
                 onClick={() => setActiveTab('riders')}
                 className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
@@ -925,7 +1167,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </span>
               </button>
 
-              {/* Tab 4: Delivery Settings & Slots */}
+              {/* Tab 8: Delivery Settings & Slots */}
               <button
                 onClick={() => setActiveTab('settings')}
                 className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
@@ -935,10 +1177,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 }`}
               >
                 <Settings className="w-4 h-4" />
-                <span>Delivery & Slots</span>
+                <span>Delivery &amp; Slots</span>
               </button>
 
-              {/* Tab 5: Rider Cash Settlement */}
+              {/* Tab 9: Rider Cash Settlement */}
               <button
                 onClick={() => setActiveTab('settlement')}
                 className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
@@ -956,7 +1198,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </button>
 
-              {/* Tab 6: Reviews Moderation */}
+              {/* Tab 10: Reviews Moderation */}
               <button
                 onClick={() => setActiveTab('reviews')}
                 className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
@@ -974,7 +1216,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </button>
 
-              {/* Tab 7: Inventory Logs */}
+              {/* Tab 11: Inventory Logs */}
               <button
                 onClick={() => setActiveTab('inventory')}
                 className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
@@ -1108,7 +1350,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             {order.status}
                           </span>
 
-                          {order.delivery_type === 'scheduled' ? (
+                          {order.store_name && (
+                            <span className="bg-amber-100 text-amber-900 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 shrink-0">
+                              <StoreIcon className="w-3 h-3" />
+                              <span>{order.store_name}</span>
+                            </span>
+                          )}
+
+                          {order.fulfillment_type === 'pickup' ? (
+                            <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0">
+                              🏪 Store Pickup{order.pickup_code ? ` (${order.pickup_code})` : ''}
+                            </span>
+                          ) : order.delivery_type === 'scheduled' ? (
                             <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 shrink-0">
                               <Calendar className="w-3 h-3" />
                               <span>Scheduled: {order.scheduled_date}</span>
@@ -1245,6 +1498,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                       {/* Actions: Assign Partner, Dispatch, Cancel */}
                       <div className="pt-2.5 border-t border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-2.5 text-xs min-w-0">
+                        {order.store_id ? (
+                          <div className="flex items-center gap-2 text-amber-900 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-semibold">
+                            <StoreIcon className="w-3.5 h-3.5 shrink-0" />
+                            <span>
+                              Managed directly by store: <strong>{order.store_name || `#${order.store_id}`}</strong>
+                              {order.fulfillment_type === 'pickup' ? ' (Store Pickup)' : ' (Store-Managed Delivery)'}
+                            </span>
+                          </div>
+                        ) : (
                         <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0 w-full md:w-auto">
                           <span className="font-bold text-gray-600 shrink-0">Assigned Partner:</span>
                           {order.rider_name && reassigningOrderId !== order.id ? (
@@ -1301,16 +1563,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             </div>
                           )}
                         </div>
+                        )}
 
                         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto">
-                          {isPending && (
+                          {!order.store_id && isPending && (
                             <button
                               onClick={() => handleDispatchOrder(order.id)}
                               disabled={dispatchingOrderId === order.id}
                               className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 sm:py-1.5 rounded-xl shadow-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 w-full sm:w-auto"
                             >
                               <Truck className="w-3.5 h-3.5 shrink-0" />
-                              <span>Dispatch & Generate OTP</span>
+                              <span>Dispatch &amp; Generate OTP</span>
                             </button>
                           )}
 
@@ -2332,6 +2595,367 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
         )}
+
+        {/* ======================================================== */}
+        {/* TAB: KIRANA STORES APPROVAL & MANAGEMENT */}
+        {/* ======================================================== */}
+        {activeTab === 'stores' && (
+          <div className="space-y-4 min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-gray-900">Registered Kirana &amp; Grocery Stores</h2>
+                <p className="text-xs text-gray-500">Approve new store registrations or activate / suspend partner shops (100% Free Marketplace)</p>
+              </div>
+              <div className="flex items-center gap-1.5 overflow-x-auto touch-pan-x scrollbar-none max-w-full">
+                {(['all', 'pending', 'approved', 'rejected'] as const).map(f => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setStoreFilter(f)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize cursor-pointer shrink-0 ${
+                      storeFilter === f ? 'bg-purple-700 text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    {f} ({f === 'all' ? adminStores.length : adminStores.filter(s => s.approval_status === f).length})
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {adminStores.filter(s => storeFilter === 'all' || s.approval_status === storeFilter).length === 0 ? (
+              <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-400 text-xs">
+                No stores found in this view.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {adminStores
+                  .filter(s => storeFilter === 'all' || s.approval_status === storeFilter)
+                  .map(store => (
+                    <div key={store.id} className="bg-white rounded-2xl border border-gray-200 p-3.5 sm:p-4 shadow-xs space-y-3 min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div className="flex items-start gap-3 min-w-0">
+                          <div className="w-14 h-14 rounded-xl bg-amber-50 border border-gray-200 overflow-hidden shrink-0 flex items-center justify-center">
+                            {store.photos && store.photos.length > 0 ? (
+                              <img src={store.photos[0]} alt={store.name} className="w-full h-full object-cover" />
+                            ) : (
+                              <StoreIcon className="w-6 h-6 text-amber-700" />
+                            )}
+                          </div>
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <h3 className="font-extrabold text-sm text-gray-900 break-words">{store.name}</h3>
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                                store.approval_status === 'approved'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : store.approval_status === 'rejected'
+                                  ? 'bg-red-100 text-red-800'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}>
+                                {store.approval_status}
+                              </span>
+                              {store.approval_status === 'approved' && (
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  store.is_active ? 'bg-blue-100 text-blue-800' : 'bg-gray-200 text-gray-700'
+                                }`}>
+                                  {store.is_active ? 'Active' : 'Suspended'}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-xs text-gray-700 font-semibold">
+                              Owner: {store.owner_name} • <a href={`tel:${store.owner_phone}`} className="text-purple-700 underline">{store.owner_phone}</a>
+                            </div>
+                            <div className="text-[11px] text-gray-500 break-words">{store.address}{store.landmark ? `, ${store.landmark}` : ''}</div>
+                            <div className="flex flex-wrap items-center gap-2 text-[10px] text-gray-600 pt-1">
+                              <span className="bg-gray-100 px-2 py-0.5 rounded-md font-bold capitalize">Service: {store.service_type}</span>
+                              <span className="bg-gray-100 px-2 py-0.5 rounded-md font-semibold">Hours: {store.opening_hours}</span>
+                              <span className="bg-gray-100 px-2 py-0.5 rounded-md font-semibold">Products: {store.product_count ?? 0}</span>
+                              <span className="bg-gray-100 px-2 py-0.5 rounded-md font-semibold">Orders: {store.order_count ?? 0}</span>
+                            </div>
+                            {store.rejection_reason && (
+                              <div className="text-[11px] text-red-700 font-semibold pt-1">Reason: {store.rejection_reason}</div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {store.approval_status !== 'approved' && (
+                            <button
+                              type="button"
+                              onClick={() => handleApproveStore(store.id)}
+                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Approve</span>
+                            </button>
+                          )}
+                          {store.approval_status === 'pending' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRejectingStore(store);
+                                setRejectionReason('');
+                              }}
+                              className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              <span>Reject</span>
+                            </button>
+                          )}
+                          {store.approval_status === 'approved' && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleStoreActive(store)}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer ${
+                                store.is_active
+                                  ? 'bg-red-50 hover:bg-red-100 text-red-700 border border-red-200'
+                                  : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200'
+                              }`}
+                            >
+                              <Ban className="w-3.5 h-3.5" />
+                              <span>{store.is_active ? 'Suspend Store' : 'Reactivate Store'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB: CUSTOMERS MANAGEMENT */}
+        {/* ======================================================== */}
+        {activeTab === 'customers' && (
+          <div className="space-y-4 min-w-0">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div>
+                <h2 className="text-base font-extrabold text-gray-900">Registered Customers ({adminCustomers.length})</h2>
+                <p className="text-xs text-gray-500">View customer activity and activate or suspend accounts</p>
+              </div>
+              <div className="relative w-full sm:w-72">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  value={customerSearch}
+                  onChange={e => setCustomerSearch(e.target.value)}
+                  placeholder="Search customer name or phone..."
+                  className="w-full pl-9 pr-3 py-2 bg-white border border-gray-200 rounded-xl text-xs outline-hidden"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              {adminCustomers
+                .filter(c => {
+                  if (!customerSearch.trim()) return true;
+                  const q = customerSearch.toLowerCase();
+                  return c.name.toLowerCase().includes(q) || c.phone.includes(q);
+                })
+                .map(c => (
+                  <div key={c.id} className="bg-white rounded-2xl border border-gray-200 p-3.5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="min-w-0 space-y-0.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-extrabold text-sm text-gray-900">{c.name}</span>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          c.is_active !== false ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                        }`}>
+                          {c.is_active !== false ? 'Active' : 'Suspended'}
+                        </span>
+                      </div>
+                      <div className="text-xs text-purple-700 font-semibold">{c.phone}</div>
+                      {c.address && <div className="text-[11px] text-gray-500 truncate">{c.address}</div>}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 shrink-0 text-xs">
+                      <div className="bg-gray-50 px-2.5 py-1.5 rounded-xl border border-gray-100">
+                        <span className="text-gray-500">Orders: </span>
+                        <strong className="text-gray-900">{c.order_count}</strong>
+                        <span className="text-gray-400 mx-1.5">•</span>
+                        <span className="text-gray-500">Spent: </span>
+                        <strong className="text-emerald-700">₹{c.total_spent}</strong>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleCustomerActive(c)}
+                        className={`px-3 py-1.5 rounded-xl font-bold text-xs cursor-pointer ${
+                          c.is_active !== false
+                            ? 'bg-red-50 hover:bg-red-100 text-red-700 border border-red-200'
+                            : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                        }`}
+                      >
+                        {c.is_active !== false ? 'Suspend' : 'Activate'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB: GROCERY CATEGORIES CRUD */}
+        {/* ======================================================== */}
+        {activeTab === 'categories' && (
+          <div className="space-y-4 min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-gray-900">Grocery Categories ({adminCategories.length})</h2>
+                <p className="text-xs text-gray-500">Create, edit, reorder, or remove marketplace product categories</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingCategory(null);
+                  setCategoryForm({ name: '', description: '', display_order: String(adminCategories.length + 1), is_active: true });
+                  setCategoryModalOpen(true);
+                }}
+                className="bg-purple-700 hover:bg-purple-800 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add Category</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {adminCategories.map(cat => (
+                <div key={cat.id} className="bg-white rounded-2xl border border-gray-200 p-4 shadow-xs flex items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-extrabold text-sm text-gray-900 truncate">{cat.name}</span>
+                      {cat.is_active === false && (
+                        <span className="text-[10px] bg-gray-200 text-gray-700 font-bold px-2 py-0.5 rounded-full">Hidden</span>
+                      )}
+                    </div>
+                    {cat.description && <p className="text-[11px] text-gray-500 line-clamp-2">{cat.description}</p>}
+                    <div className="text-[10px] text-gray-400">Slug: {cat.slug} • Order: {cat.display_order}</div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingCategory(cat);
+                        setCategoryForm({
+                          name: cat.name,
+                          description: cat.description || '',
+                          display_order: String(cat.display_order || 0),
+                          is_active: cat.is_active !== false
+                        });
+                        setCategoryModalOpen(true);
+                      }}
+                      className="p-1.5 text-gray-500 hover:text-purple-700 hover:bg-purple-50 rounded-lg cursor-pointer"
+                      title="Edit Category"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteCategory(cat)}
+                      className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg cursor-pointer"
+                      title="Delete Category"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB: REPORTED PROBLEMS & COMPLAINTS */}
+        {/* ======================================================== */}
+        {activeTab === 'complaints' && (
+          <div className="space-y-4 min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-gray-900">Reported Problems &amp; Complaints ({complaints.length})</h2>
+                <p className="text-xs text-gray-500">Review and resolve issues reported by customers and store owners</p>
+              </div>
+              <div className="flex items-center gap-1.5 overflow-x-auto touch-pan-x scrollbar-none">
+                {(['all', 'open', 'in_review', 'resolved'] as const).map(f => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setComplaintFilter(f)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize cursor-pointer shrink-0 ${
+                      complaintFilter === f ? 'bg-purple-700 text-white' : 'bg-white border border-gray-200 text-gray-700'
+                    }`}
+                  >
+                    {f.replace('_', ' ')}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {complaints.filter(c => complaintFilter === 'all' || c.status === complaintFilter).length === 0 ? (
+              <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-400 text-xs">
+                No complaints matching this filter.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {complaints
+                  .filter(c => complaintFilter === 'all' || c.status === complaintFilter)
+                  .map(c => (
+                    <div key={c.id} className="bg-white rounded-2xl border border-gray-200 p-4 shadow-xs space-y-2.5 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-extrabold text-sm text-gray-900">{c.subject}</span>
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                            c.status === 'resolved'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : c.status === 'in_review'
+                              ? 'bg-blue-100 text-blue-800'
+                              : 'bg-amber-100 text-amber-900'
+                          }`}>
+                            {c.status.replace('_', ' ')}
+                          </span>
+                        </div>
+                        <span className="text-[11px] text-gray-400">
+                          {new Date(c.created_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                        </span>
+                      </div>
+                      <p className="text-gray-700 bg-gray-50 p-2.5 rounded-xl border border-gray-100">{c.description}</p>
+                      <div className="text-[11px] text-gray-500">
+                        Reported by <strong className="text-gray-800">{c.reporter_name}</strong> ({c.reporter_role} • {c.reporter_phone})
+                        {c.store_name && <> • Store: <strong>{c.store_name}</strong></>}
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                        <input
+                          type="text"
+                          value={complaintNotesById[c.id] ?? ''}
+                          onChange={e => setComplaintNotesById(prev => ({ ...prev, [c.id]: e.target.value }))}
+                          placeholder="Add admin resolution note..."
+                          className="flex-1 p-2 bg-gray-50 border border-gray-200 rounded-xl text-xs"
+                        />
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {c.status === 'open' && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateComplaint(c, 'in_review')}
+                              className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs cursor-pointer"
+                            >
+                              Mark In Review
+                            </button>
+                          )}
+                          {c.status !== 'resolved' && (
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateComplaint(c, 'resolved')}
+                              className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs cursor-pointer"
+                            >
+                              Resolve
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        )}
       </main>
 
       {/* ======================================================== */}
@@ -3061,6 +3685,127 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition cursor-pointer shadow-xs disabled:opacity-50"
                 >
                   {reconciling ? 'Settling...' : 'Confirm Cash Received'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODAL: REJECT STORE REGISTRATION */}
+      {/* ======================================================== */}
+      {rejectingStore && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-gray-100 space-y-4">
+            <h3 className="font-extrabold text-gray-900 text-base">Reject Store Registration</h3>
+            <p className="text-xs text-gray-500">
+              Provide a reason for rejecting <strong>{rejectingStore.name}</strong> so the store owner knows what to update.
+            </p>
+            <form onSubmit={handleRejectStoreSubmit} className="space-y-3 text-xs">
+              <textarea
+                rows={3}
+                required
+                value={rejectionReason}
+                onChange={e => setRejectionReason(e.target.value)}
+                placeholder="e.g. Incomplete store address or unclear shop photos"
+                className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRejectingStore(null)}
+                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold cursor-pointer"
+                >
+                  Reject Store
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* MODAL: ADD / EDIT CATEGORY */}
+      {/* ======================================================== */}
+      {categoryModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-gray-100 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-extrabold text-gray-900 text-base">
+                {editingCategory ? 'Edit Category' : 'Add Grocery Category'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setCategoryModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveCategory} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">Category Name</label>
+                <input
+                  type="text"
+                  required
+                  value={categoryForm.name}
+                  onChange={e => setCategoryForm({ ...categoryForm, name: e.target.value })}
+                  placeholder="e.g. Dry Fruits & Spices"
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">Description (Optional)</label>
+                <input
+                  type="text"
+                  value={categoryForm.description}
+                  onChange={e => setCategoryForm({ ...categoryForm, description: e.target.value })}
+                  placeholder="Short description..."
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2 items-center">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Display Order</label>
+                  <input
+                    type="number"
+                    value={categoryForm.display_order}
+                    onChange={e => setCategoryForm({ ...categoryForm, display_order: e.target.value })}
+                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold"
+                  />
+                </div>
+                {editingCategory && (
+                  <label className="flex items-center gap-2 pt-4 font-bold text-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={categoryForm.is_active}
+                      onChange={e => setCategoryForm({ ...categoryForm, is_active: e.target.checked })}
+                      className="w-4 h-4 text-purple-700 rounded"
+                    />
+                    <span>Active</span>
+                  </label>
+                )}
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setCategoryModalOpen(false)}
+                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl cursor-pointer"
+                >
+                  Save Category
                 </button>
               </div>
             </form>

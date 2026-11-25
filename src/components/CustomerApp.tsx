@@ -31,7 +31,17 @@ import {
   Home,
   Grid,
   Phone,
-  Tag
+  Tag,
+  Store as StoreIcon,
+  ArrowLeft,
+  MessageSquare,
+  Crosshair,
+  Loader2,
+  RefreshCw,
+  Banknote,
+  ChevronLeft,
+  FileText,
+  BookmarkPlus
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import {
@@ -45,7 +55,10 @@ import {
   DeliverySettings,
   DeliveryQuote,
   CartQuoteItem,
-  CartQuoteResponse
+  CartQuoteResponse,
+  Store as StoreType,
+  Complaint,
+  SavedAddress
 } from '../types.ts';
 import { api, authStorage } from '../services/api.ts';
 import {
@@ -60,7 +73,7 @@ import { PWAInstallButton } from './PWAInstallButton.tsx';
 
 interface CustomerAppProps {
   currentUser: User | null;
-  onOpenAuth: () => void;
+  onOpenAuth: (mode?: 'login' | 'register' | 'store_register') => void;
   cart: CartItem[];
   onAddToCart: (product: Product, qty?: number) => void;
   onUpdateCartQty: (productId: number, qty: number) => void;
@@ -77,6 +90,87 @@ interface CustomerAppProps {
   onOpenOrders?: () => void;
   onOrderPlaced: (order: Order) => void;
   onLogout?: () => void;
+}
+
+function makeOrderIdempotencyKey(): string {
+  return `ord_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isOrderRejected(order: Order): boolean {
+  return (
+    order.status === 'cancelled' &&
+    (order.cancelled_by_role === 'store_owner' ||
+      order.cancelled_by_role === 'admin' ||
+      Boolean(order.rejection_reason))
+  );
+}
+
+function getCustomerOrderStatusMeta(order: Order): {
+  label: string;
+  hint: string;
+  step: number;
+  badgeClass: string;
+} {
+  if (order.status === 'placed') {
+    return {
+      label: 'Pending',
+      hint: 'Order sent to store. Waiting for confirmation.',
+      step: 1,
+      badgeClass: 'bg-blue-100 text-blue-800'
+    };
+  }
+  if (order.status === 'confirmed') {
+    return {
+      label: 'Accepted',
+      hint: 'Store accepted your order.',
+      step: 2,
+      badgeClass: 'bg-indigo-100 text-indigo-800'
+    };
+  }
+  if (order.status === 'packed') {
+    return {
+      label: 'Preparing',
+      hint: 'Store is packing your grocery items.',
+      step: 3,
+      badgeClass: 'bg-amber-100 text-amber-800'
+    };
+  }
+  if (order.status === 'dispatched') {
+    return {
+      label: 'Ready',
+      hint:
+        order.fulfillment_type === 'pickup'
+          ? 'Ready at store counter! Show your Pickup Code.'
+          : 'Ready & out for store delivery.',
+      step: 4,
+      badgeClass: 'bg-amber-100 text-amber-800 animate-pulse'
+    };
+  }
+  if (order.status === 'delivered') {
+    return {
+      label: 'Completed',
+      hint:
+        order.fulfillment_type === 'pickup'
+          ? 'Picked up & paid at store.'
+          : 'Delivered & paid.',
+      step: 5,
+      badgeClass: 'bg-emerald-100 text-emerald-800'
+    };
+  }
+  if (isOrderRejected(order)) {
+    return {
+      label: 'Rejected',
+      hint: order.rejection_reason || order.failure_reason || 'Order could not be fulfilled by store.',
+      step: 0,
+      badgeClass: 'bg-rose-100 text-rose-800'
+    };
+  }
+  return {
+    label: 'Cancelled',
+    hint: order.failure_reason || 'Cancelled by customer.',
+    step: 0,
+    badgeClass: 'bg-red-100 text-red-800'
+  };
 }
 
 export const CustomerApp: React.FC<CustomerAppProps> = ({
@@ -167,6 +261,48 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [showMapPicker, setShowMapPicker] = useState<boolean>(true);
 
+  // Hyperlocal Marketplace: Nearby Approved Stores & Store View
+  const [nearbyStores, setNearbyStores] = useState<StoreType[]>([]);
+  const [storesLoading, setStoresLoading] = useState<boolean>(true);
+  const [selectedStore, setSelectedStore] = useState<StoreType | null>(null);
+  const [storeProducts, setStoreProducts] = useState<Product[]>([]);
+  const [storeProductsLoading, setStoreProductsLoading] = useState<boolean>(false);
+  const [storeSearchQuery, setStoreSearchQuery] = useState<string>('');
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState<boolean>(false);
+  const [areaLabel, setAreaLabel] = useState<string>('Karanja Lad');
+  const [locatingCustomer, setLocatingCustomer] = useState<boolean>(false);
+  const [locationStatus, setLocationStatus] = useState<'default' | 'gps_detected' | 'manual' | 'permission_denied' | 'error'>('default');
+  const [locationNotice, setLocationNotice] = useState<{
+    type: 'success' | 'error';
+    title: string;
+    message: string;
+    steps?: string[];
+  } | null>(null);
+  const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
+  const [cartStore, setCartStore] = useState<StoreType | null>(null);
+  const [fulfillmentType, setFulfillmentType] = useState<'delivery' | 'pickup'>('delivery');
+  const [cancelConfirmOrderId, setCancelConfirmOrderId] = useState<number | null>(null);
+  const [cancelReasonInput, setCancelReasonInput] = useState<string>('Cancelled by customer');
+
+  // Saved Addresses & Order History/Detail State
+  const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([]);
+  const [selectedSavedAddressId, setSelectedSavedAddressId] = useState<number | 'new' | null>(null);
+  const [newAddressLabel, setNewAddressLabel] = useState<string>('Home');
+  const [savingNewAddress, setSavingNewAddress] = useState<boolean>(false);
+  const [addressSaveNotice, setAddressSaveNotice] = useState<string | null>(null);
+  const [checkoutIdempotencyKey, setCheckoutIdempotencyKey] = useState<string>(() => makeOrderIdempotencyKey());
+  const [orderFilter, setOrderFilter] = useState<'all' | 'active' | 'completed' | 'cancelled' | 'rejected'>('all');
+  const [selectedOrderDetail, setSelectedOrderDetail] = useState<Order | null>(null);
+  const [detailOrderLoading, setDetailOrderLoading] = useState<boolean>(false);
+
+  // Customer Problem Reporting (Complaints)
+  const [complaints, setComplaints] = useState<Complaint[]>([]);
+  const [showComplaintForm, setShowComplaintForm] = useState<boolean>(false);
+  const [complaintSubject, setComplaintSubject] = useState<string>('');
+  const [complaintDescription, setComplaintDescription] = useState<string>('');
+  const [complaintSubmitting, setComplaintSubmitting] = useState<boolean>(false);
+  const [complaintMsg, setComplaintMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+
   // Default fallback slots if server loading
   const defaultSlots = [
     '07:00 AM - 09:00 AM (Early Morning Fresh)',
@@ -232,31 +368,61 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     : localResolvedItems.filter(i => !i.valid && i.error).map(i => i.error as string);
   const hasCartPricingError = cartQuote ? !cartQuote.all_valid : cartValidationErrors.length > 0;
 
-  const deliveryCharge = cartSubtotal === 0
+  // Detect any backend price changes compared to when items were added to cart
+  const priceChangedItems = cartQuote
+    ? cart
+        .map(item => {
+          const snapshot = resolveProductQuantityPricing(item.product, item.quantity);
+          const live = cartQuoteMap[item.product.id];
+          if (!live || !live.valid) return null;
+          if (Math.abs(live.applied_unit_price - snapshot.applied_unit_price) > 0.009) {
+            return {
+              product_id: item.product.id,
+              name: item.product.name,
+              old_unit_price: snapshot.applied_unit_price,
+              new_unit_price: live.applied_unit_price
+            };
+          }
+          return null;
+        })
+        .filter((x): x is { product_id: number; name: string; old_unit_price: number; new_unit_price: number } => Boolean(x))
+    : [];
+
+  const cartStoreId = cart[0]?.product.store_id ?? null;
+  const isStorePickup = Boolean(cartStoreId && fulfillmentType === 'pickup');
+  const storeMinOrder = cartStore && Number(cartStore.min_order_amount) > 0 ? Number(cartStore.min_order_amount) : 0;
+  const belowMinOrder = storeMinOrder > 0 && cartSubtotal < storeMinOrder;
+
+  const deliveryCharge = cartSubtotal === 0 || isStorePickup
     ? 0
     : deliveryQuote && deliveryQuote.deliverable
     ? deliveryQuote.delivery_fee
     : 0;
-  const handlingCharge = cartSubtotal === 0
+  const handlingCharge = cartSubtotal === 0 || isStorePickup
     ? 0
     : deliveryQuote
     ? deliveryQuote.handling_fee
+    : cartStoreId
+    ? 0
     : handlingFeeConfig;
-  const totalAmount = Math.round((cartSubtotal + deliveryCharge + handlingCharge + (cartSubtotal === 0 ? 0 : tipAmount)) * 100) / 100;
+  const totalAmount = Math.round((cartSubtotal + deliveryCharge + handlingCharge + (cartSubtotal === 0 || isStorePickup ? 0 : tipAmount)) * 100) / 100;
   const cartItemCount = cart.length;
 
   // Load Catalog & Customer Data
   const loadCatalogData = async () => {
     setLoading(true);
+    setStoresLoading(true);
     try {
-      const [cats, prods, feeRes, slotsRes] = await Promise.all([
+      const [cats, prods, feeRes, slotsRes, storesRes] = await Promise.all([
         api.getCategories().catch(() => []),
         api.getProducts().catch(() => []),
         api.getDeliverySettings().catch(() => null),
-        api.getDeliverySlots().catch(() => [])
+        api.getDeliverySlots().catch(() => []),
+        api.getNearbyStores({ lat: customerLat, lng: customerLng }).catch(() => [])
       ]);
       if (cats && cats.length > 0) setCategories(cats);
       if (prods && prods.length > 0) setProducts(prods);
+      if (Array.isArray(storesRes)) setNearbyStores(storesRes);
       if (feeRes) {
         setDeliverySettings(feeRes);
         if (typeof feeRes.handling_fee === 'number') setHandlingFeeConfig(feeRes.handling_fee);
@@ -281,21 +447,26 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       console.error('Failed to load store catalog:', e);
     } finally {
       setLoading(false);
+      setStoresLoading(false);
     }
   };
 
   const loadUserData = async () => {
     if (!currentUser) return;
     try {
-      const [favs, notifs, ords] = await Promise.all([
+      const [favs, notifs, ords, myComplaints, addrs] = await Promise.all([
         api.getFavorites().catch(() => []),
         api.getNotifications().catch(() => []),
-        api.getOrders().catch(() => [])
+        api.getOrders().catch(() => []),
+        api.getMyComplaints().catch(() => []),
+        api.getAddresses().catch(() => [])
       ]);
       setFavorites(favs);
       setFavoriteIds(new Set(favs.map((f: Product) => f.id)));
       setNotifications(notifs);
       setOrders(ords);
+      if (Array.isArray(myComplaints)) setComplaints(myComplaints);
+      if (Array.isArray(addrs)) setSavedAddresses(addrs);
     } catch (e) {
       console.error('Failed to load customer profile data:', e);
     }
@@ -305,9 +476,201 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     loadCatalogData();
   }, []);
 
-  // Backend OSRM Distance & Fee Calculation (only after customer selects/confirms a delivery location)
+  // Refresh nearby store distances & selected store details whenever customer location changes
   useEffect(() => {
-    if (cart.length === 0 || !hasUserMovedPin) {
+    let cancelled = false;
+    api.getNearbyStores({ lat: customerLat, lng: customerLng })
+      .then(res => {
+        if (!cancelled && Array.isArray(res)) {
+          setNearbyStores(res);
+        }
+      })
+      .catch(() => {});
+
+    if (selectedStore) {
+      api.getStoreDetails(selectedStore.id, customerLat, customerLng)
+        .then(freshStore => {
+          if (!cancelled && freshStore) {
+            setSelectedStore(freshStore);
+          }
+        })
+        .catch(err => {
+          if (!cancelled && String(err?.message || '').toLowerCase().includes('not found')) {
+            setSelectedStore(null);
+            showCartNotice('Selected store is currently unavailable.');
+          }
+        });
+    }
+
+    return () => { cancelled = true; };
+  }, [customerLat, customerLng]);
+
+  // Open specific store details page & load authoritative store details + products from backend
+  const handleOpenStore = async (store: StoreType) => {
+    setSelectedStore(store);
+    setSelectedCategory('all');
+    setStoreSearchQuery('');
+    setStoreProductsLoading(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    try {
+      const [freshStore, prods] = await Promise.all([
+        api.getStoreDetails(store.id, customerLat, customerLng),
+        api.getStoreProducts(store.id)
+      ]);
+      setSelectedStore(freshStore || store);
+      setStoreProducts(Array.isArray(prods) ? prods : []);
+    } catch {
+      setStoreProducts([]);
+    } finally {
+      setStoreProductsLoading(false);
+    }
+  };
+
+  // Explicit user-initiated GPS location detection with graceful permission-denied handling
+  const handleDetectCustomerLocation = () => {
+    if (!window.isSecureContext) {
+      setLocationStatus('error');
+      setLocationNotice({
+        type: 'error',
+        title: 'HTTPS Required for Automatic GPS',
+        message: 'Automatic GPS detection requires a secure HTTPS connection. You can choose your location manually anytime.',
+        steps: ['Tap "Select Location Manually" to search your area or drop a pin on the map.']
+      });
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setLocationStatus('error');
+      setLocationNotice({
+        type: 'error',
+        title: 'GPS Not Supported',
+        message: 'Your browser does not support automatic location detection. Please pick your location manually.',
+        steps: ['Tap "Select Location Manually" to search your neighborhood or drop a pin on the map.']
+      });
+      return;
+    }
+
+    setLocatingCustomer(true);
+    setLocationNotice(null);
+
+    const onSuccess = async (pos: GeolocationPosition) => {
+      const newLat = Number(pos.coords.latitude.toFixed(6));
+      const newLng = Number(pos.coords.longitude.toFixed(6));
+      setHasUserMovedPin(true);
+      setCustomerLat(newLat);
+      setCustomerLng(newLng);
+      setLocationStatus('gps_detected');
+
+      try {
+        const rev = await api.reverseGeocodeLocation(newLat, newLng);
+        const revAddress = (rev?.formatted_address || rev?.display_name || '').trim();
+        const revLandmark = (rev?.landmark || '').trim();
+        if (revAddress) {
+          const cleaned = revAddress.split(',').map(s => s.trim()).filter(Boolean).slice(0, 4).join(', ');
+          if (cleaned) {
+            setDeliveryAddress(cleaned);
+            setAreaLabel(cleaned.split(',')[0] || 'Detected Location');
+          }
+        } else {
+          setAreaLabel(`${newLat.toFixed(3)}, ${newLng.toFixed(3)}`);
+        }
+        if (revLandmark) setLandmark(revLandmark);
+      } catch {
+        setAreaLabel(`${newLat.toFixed(3)}, ${newLng.toFixed(3)}`);
+      } finally {
+        setLocatingCustomer(false);
+        setLocationNotice({
+          type: 'success',
+          title: 'Current Location Detected',
+          message: 'Nearby grocery stores are now sorted by distance from your detected GPS location.'
+        });
+      }
+    };
+
+    const onFailure = (err: GeolocationPositionError, allowCoarseRetry: boolean) => {
+      if (err?.code === 3 && allowCoarseRetry) {
+        navigator.geolocation.getCurrentPosition(
+          onSuccess,
+          fallbackErr => {
+            setLocatingCustomer(false);
+            setLocationStatus(fallbackErr?.code === 1 ? 'permission_denied' : 'error');
+            setLocationNotice({
+              type: 'error',
+              title: fallbackErr?.code === 1 ? 'Location Permission Denied' : 'Location Lookup Timed Out',
+              message:
+                fallbackErr?.code === 1
+                  ? 'Location access was blocked. Nearby stores remain available — select your area manually below.'
+                  : 'GPS signal timed out. You can try again or select your area manually.',
+              steps:
+                fallbackErr?.code === 1
+                  ? [
+                      'To allow later: open browser site settings and set Location to Allow.',
+                      'Or tap "Select Location Manually" to search your area or move the map pin.'
+                    ]
+                  : ['Turn on device GPS/Location or tap "Select Location Manually".']
+            });
+          },
+          { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 }
+        );
+        return;
+      }
+
+      setLocatingCustomer(false);
+      const denied = err?.code === 1;
+      setLocationStatus(denied ? 'permission_denied' : 'error');
+      setLocationNotice({
+        type: 'error',
+        title: denied ? 'Location Permission Denied' : err?.code === 2 ? 'GPS / Location Services Off' : 'Location Timeout',
+        message: denied
+          ? 'You denied location access. No problem — you can select your location manually anytime.'
+          : 'Could not read your device GPS right now. Manual location selection is ready below.',
+        steps: denied
+          ? [
+              'Allow Location in your browser address bar or phone settings if you want automatic GPS later.',
+              'Tap "Select Location Manually" below to search your area, chowk, or pin your location on the map.'
+            ]
+          : ['Turn ON phone Location/GPS and try again, or tap "Select Location Manually".']
+      });
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      onSuccess,
+      err => onFailure(err, true),
+      { enableHighAccuracy: true, timeout: 9000, maximumAge: 15000 }
+    );
+  };
+
+  // Sync cartStore & allowed fulfillmentType
+  useEffect(() => {
+    if (!cartStoreId) {
+      setCartStore(null);
+      setFulfillmentType('delivery');
+      return;
+    }
+    const matched = nearbyStores.find(s => s.id === cartStoreId) || (selectedStore?.id === cartStoreId ? selectedStore : null);
+    if (matched) {
+      setCartStore(matched);
+      if (matched.service_type === 'pickup') setFulfillmentType('pickup');
+      else if (matched.service_type === 'delivery') setFulfillmentType('delivery');
+      return;
+    }
+    let cancelled = false;
+    api.getStoreDetails(cartStoreId)
+      .then(s => {
+        if (!cancelled && s) {
+          setCartStore(s);
+          if (s.service_type === 'pickup') setFulfillmentType('pickup');
+          else if (s.service_type === 'delivery') setFulfillmentType('delivery');
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [cartStoreId, nearbyStores, selectedStore]);
+
+  // Backend OSRM Distance & Fee Calculation (for Home Delivery; skipped for Store Pickup)
+  useEffect(() => {
+    if (cart.length === 0 || isStorePickup || !hasUserMovedPin) {
       setDeliveryQuote(null);
       setQuoteError(null);
       setQuoteLoading(false);
@@ -320,7 +683,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
     const timer = setTimeout(async () => {
       try {
-        const quote = await api.calculateDeliveryFee(customerLat, customerLng);
+        const quote = cartStoreId
+          ? await api.calculateStoreDeliveryQuote(cartStoreId, customerLat, customerLng)
+          : await api.calculateDeliveryFee(customerLat, customerLng);
         if (!cancelled) {
           setDeliveryQuote(quote);
           setQuoteError(null);
@@ -341,11 +706,12 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [cart.length, isCartOpen, customerLat, customerLng, hasUserMovedPin]);
+  }, [cart.length, isCartOpen, customerLat, customerLng, hasUserMovedPin, cartStoreId, isStorePickup]);
 
   // Authoritative Backend Cart Pricing Calculation (Quantity Slabs + Stock Validation)
   const cartSignature = cart.map(i => `${i.product.id}:${i.quantity}`).join('|');
   useEffect(() => {
+    setCheckoutIdempotencyKey(makeOrderIdempotencyKey());
     if (cart.length === 0) {
       setCartQuote(null);
       setCartQuoteLoading(false);
@@ -376,7 +742,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [cartSignature, isCartOpen]);
+  }, [cartSignature, isCartOpen, fulfillmentType, cartStoreId]);
 
   useEffect(() => {
     if (currentUser) {
@@ -394,6 +760,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       setFavoriteIds(new Set());
       setNotifications([]);
       setOrders([]);
+      setSavedAddresses([]);
+      setSelectedSavedAddressId(null);
+      setSelectedOrderDetail(null);
       setIsProfileOpen(false);
       setHasUserMovedPin(false);
       setDeliveryQuote(null);
@@ -409,6 +778,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         .then(res => setOrders(res))
         .catch(() => {})
         .finally(() => setOrdersLoading(false));
+    } else if (!isOrdersOpen) {
+      setSelectedOrderDetail(null);
     }
   }, [isOrdersOpen, currentUser]);
 
@@ -529,6 +900,75 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     }
   };
 
+  // Select saved address at checkout
+  const handleSelectSavedAddress = (addr: SavedAddress) => {
+    setSelectedSavedAddressId(addr.id);
+    setDeliveryAddress(addr.address);
+    if (addr.landmark) setLandmark(addr.landmark);
+    if (addr.recipient_name) setCustomerName(addr.recipient_name);
+    if (addr.phone) setCustomerPhone(addr.phone);
+    if (typeof addr.lat === 'number' && typeof addr.lng === 'number' && addr.lat !== 0 && addr.lng !== 0) {
+      setCustomerLat(addr.lat);
+      setCustomerLng(addr.lng);
+      setHasUserMovedPin(true);
+    }
+    setCheckoutError(null);
+    setAddressSaveNotice(null);
+  };
+
+  // Save current delivery form as a reusable customer address
+  const handleSaveNewCheckoutAddress = async () => {
+    if (!currentUser) {
+      onOpenAuth();
+      return;
+    }
+    const cleanAddr = deliveryAddress.trim();
+    const cleanPhone = customerPhone.trim().replace(/\D/g, '');
+    if (cleanAddr.length < 5) {
+      setCheckoutError('Please enter a complete street/house address (min 5 characters) before saving.');
+      return;
+    }
+    if (cleanPhone.length < 10) {
+      setCheckoutError('Please enter a valid 10-digit mobile number before saving address.');
+      return;
+    }
+    setSavingNewAddress(true);
+    setAddressSaveNotice(null);
+    setCheckoutError(null);
+    try {
+      const saved = await api.saveAddress({
+        label: newAddressLabel.trim() || 'Home',
+        recipient_name: customerName.trim() || currentUser.name,
+        phone: cleanPhone,
+        address: cleanAddr,
+        landmark: landmark.trim(),
+        pincode: cartStore?.pincode || '444105',
+        lat: hasUserMovedPin ? customerLat : null,
+        lng: hasUserMovedPin ? customerLng : null,
+        is_default: savedAddresses.length === 0
+      });
+      setSavedAddresses(prev => [saved, ...prev]);
+      setSelectedSavedAddressId(saved.id);
+      setAddressSaveNotice(`Saved "${saved.label}" address for faster checkout.`);
+    } catch (err: any) {
+      setCheckoutError(err.message || 'Could not save address.');
+    } finally {
+      setSavingNewAddress(false);
+    }
+  };
+
+  const handleDeleteSavedAddress = async (addrId: number) => {
+    try {
+      await api.deleteAddress(addrId);
+      setSavedAddresses(prev => prev.filter(a => a.id !== addrId));
+      if (selectedSavedAddressId === addrId) {
+        setSelectedSavedAddressId('new');
+      }
+    } catch (err: any) {
+      showCartNotice(err.message || 'Could not delete saved address.');
+    }
+  };
+
   // Submit Checkout
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -537,41 +977,55 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       return;
     }
 
-    if (cart.length === 0) return;
+    if (cart.length === 0 || checkoutSubmitting) return;
 
     const finalName = (customerName || currentUser.name || '').trim();
-    const finalPhone = (customerPhone || currentUser.phone || '').trim();
-    const finalAddress = (deliveryAddress || currentUser.address || 'Karanja Lad, Maharashtra').trim();
+    const finalPhone = (customerPhone || currentUser.phone || '').trim().replace(/\D/g, '');
+    const finalAddress = isStorePickup
+      ? (cartStore?.address || 'Store Pickup, Karanja Lad').trim()
+      : (deliveryAddress || currentUser.address || '').trim();
     const finalLandmark = (landmark || currentUser.landmark || 'Karanja Lad').trim();
 
-    if (!finalName || !finalPhone || !finalAddress) {
-      setCheckoutError('Please provide your name, mobile number, and delivery address.');
+    if (!finalName || finalPhone.length < 10) {
+      setCheckoutError('Please provide your full name and a valid 10-digit mobile number.');
       return;
     }
 
-    if (!hasUserMovedPin || !Number.isFinite(customerLat) || !Number.isFinite(customerLng)) {
-      setShowMapPicker(true);
-      setCheckoutError('Please select a valid delivery location by choosing a search suggestion, tapping "Use My Current Location", or tapping/dragging the map pin.');
+    if (!isStorePickup && (!finalAddress || finalAddress.length < 5)) {
+      setCheckoutError('Please enter a complete delivery address (house/plot no., street, and area).');
       return;
     }
 
-    if (quoteLoading) {
-      setCheckoutError('Calculating road distance and delivery fee. Please wait a moment.');
+    if (belowMinOrder) {
+      setCheckoutError(`Minimum order amount for ${cartStore?.name || 'this store'} is ₹${storeMinOrder}.`);
       return;
     }
 
-    if (quoteError || !deliveryQuote) {
-      setCheckoutError(quoteError || 'Unable to verify road distance for the selected pin. Please adjust your delivery location.');
-      return;
+    if (!isStorePickup) {
+      if (!hasUserMovedPin || !Number.isFinite(customerLat) || !Number.isFinite(customerLng)) {
+        setShowMapPicker(true);
+        setCheckoutError('Please select a valid delivery location by choosing a search suggestion, tapping "Use My Current Location", or tapping/dragging the map pin.');
+        return;
+      }
+
+      if (quoteLoading) {
+        setCheckoutError('Calculating road distance and delivery fee. Please wait a moment.');
+        return;
+      }
+
+      if (quoteError || !deliveryQuote) {
+        setCheckoutError(quoteError || 'Unable to verify road distance for the selected pin. Please adjust your delivery location.');
+        return;
+      }
+
+      if (!deliveryQuote.deliverable) {
+        setCheckoutError(deliveryQuote.reason || 'Delivery is unavailable at your selected location.');
+        return;
+      }
     }
 
     if (hasCartPricingError) {
       setCheckoutError(cartValidationErrors[0] || 'Please fix quantity or stock errors in your cart before checkout.');
-      return;
-    }
-
-    if (!deliveryQuote.deliverable) {
-      setCheckoutError(deliveryQuote.reason || 'Delivery is unavailable at your selected location.');
       return;
     }
 
@@ -581,17 +1035,21 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     try {
       const payload = {
         items: cart.map(i => ({ product_id: i.product.id, quantity: i.quantity })),
+        store_id: cartStoreId,
+        fulfillment_type: cartStoreId ? fulfillmentType : ('delivery' as const),
+        payment_mode: isStorePickup ? ('Pay at Store' as const) : ('COD' as const),
+        idempotency_key: checkoutIdempotencyKey,
         customer_name: finalName,
         customer_phone: finalPhone,
         delivery_address: finalAddress,
         landmark: finalLandmark,
-        pincode: '444105',
-        delivery_type: deliveryType,
-        scheduled_date: deliveryType === 'scheduled' ? scheduledDate : 'Immediate Express',
-        time_slot: deliveryType === 'scheduled' ? scheduledSlot : 'Within 30-45 mins',
-        tip_amount: tipAmount,
-        customer_lat: customerLat,
-        customer_lng: customerLng
+        pincode: cartStore?.pincode || '444105',
+        delivery_type: isStorePickup ? ('immediate' as const) : deliveryType,
+        scheduled_date: isStorePickup ? 'Store Pickup' : (deliveryType === 'scheduled' ? scheduledDate : 'Immediate Express'),
+        time_slot: isStorePickup ? 'Ready at Store Counter' : (deliveryType === 'scheduled' ? scheduledSlot : 'Within 30-45 mins'),
+        tip_amount: isStorePickup ? 0 : tipAmount,
+        customer_lat: isStorePickup ? (cartStore?.lat ?? customerLat) : customerLat,
+        customer_lng: isStorePickup ? (cartStore?.lng ?? customerLng) : customerLng
       };
 
       const res = await api.createOrder(payload);
@@ -604,6 +1062,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         });
       } catch (e) {}
 
+      setCheckoutIdempotencyKey(makeOrderIdempotencyKey());
       onClearCart();
       setTipAmount(0);
       setCustomTip('');
@@ -611,6 +1070,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       onCloseCart();
       onOrderPlaced(res.order);
       loadCatalogData();
+      if (selectedStore) {
+        api.getStoreProducts(selectedStore.id).then(p => setStoreProducts(Array.isArray(p) ? p : [])).catch(() => {});
+      }
       loadUserData();
     } catch (err: any) {
       const msg = err.message || '';
@@ -626,22 +1088,71 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     }
   };
 
-  // Cancel order
-  const handleCancelOrder = async (orderId: number) => {
-    if (!confirm('Cancel this order? All reserved grocery items will be returned to store stock.')) {
-      return;
+  // Open individual order details cleanly
+  const handleOpenOrderDetail = async (order: Order) => {
+    setSelectedOrderDetail(order);
+    setDetailOrderLoading(true);
+    try {
+      const fullOrder = await api.getOrderDetails(order.id);
+      setSelectedOrderDetail(fullOrder);
+    } catch {
+      // Keep summary card data if single fetch fails
+    } finally {
+      setDetailOrderLoading(false);
     }
+  };
 
+  // Cancel order (via in-app confirmation modal)
+  const executeCancelOrder = async (orderId: number) => {
+    const finalReason = cancelReasonInput.trim() || 'Cancelled by customer';
+    setCancelConfirmOrderId(null);
     setCancellingOrderId(orderId);
     try {
-      await api.cancelOrder(orderId, 'Cancelled by customer');
+      const res = await api.cancelOrder(orderId, finalReason);
       const updated = await api.getOrders();
       setOrders(updated);
+      if (selectedOrderDetail?.id === orderId) {
+        const refreshedDetail = updated.find(o => o.id === orderId) || res.order;
+        setSelectedOrderDetail(refreshedDetail);
+      }
       loadCatalogData();
+      if (selectedStore) {
+        api.getStoreProducts(selectedStore.id).then(p => setStoreProducts(Array.isArray(p) ? p : [])).catch(() => {});
+      }
+      showCartNotice('Order cancelled and reserved stock restored.');
+      setCancelReasonInput('Cancelled by customer');
     } catch (err: any) {
-      alert(err.message || 'Failed to cancel order.');
+      showCartNotice(err.message || 'Failed to cancel order.');
     } finally {
       setCancellingOrderId(null);
+    }
+  };
+
+  // Submit Problem / Complaint
+  const handleSubmitComplaint = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser) {
+      onOpenAuth();
+      return;
+    }
+    if (!complaintSubject.trim() || !complaintDescription.trim()) return;
+    setComplaintSubmitting(true);
+    setComplaintMsg(null);
+    try {
+      await api.submitComplaint({
+        subject: complaintSubject.trim(),
+        description: complaintDescription.trim(),
+        store_id: selectedStore?.id || null
+      });
+      setComplaintSubject('');
+      setComplaintDescription('');
+      setComplaintMsg({ text: 'Report submitted! Admin team will review it shortly.', type: 'success' });
+      const updated = await api.getMyComplaints().catch(() => []);
+      if (Array.isArray(updated)) setComplaints(updated);
+    } catch (err: any) {
+      setComplaintMsg({ text: err.message || 'Failed to submit report.', type: 'error' });
+    } finally {
+      setComplaintSubmitting(false);
     }
   };
 
@@ -651,16 +1162,52 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
   };
 
-  // Filter & Sort Products
-  const filteredProducts = products.filter(product => {
+  // Filter Nearby Stores (matches store name, address/landmark, and available products)
+  const filteredNearbyStores = nearbyStores.filter(store => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    const matchesStoreInfo =
+      store.name.toLowerCase().includes(q) ||
+      store.address.toLowerCase().includes(q) ||
+      (store.landmark || '').toLowerCase().includes(q) ||
+      (store.description || '').toLowerCase().includes(q);
+    const matchesAvailableProducts =
+      Array.isArray(store.available_product_names) &&
+      store.available_product_names.some(pName => pName.toLowerCase().includes(q));
+    return matchesStoreInfo || matchesAvailableProducts;
+  });
+
+  // Categories belonging to the selected store (or all active categories on home view)
+  const displayedCategories = selectedStore
+    ? Array.from(
+        new Map(
+          storeProducts
+            .filter(p => p.category_name)
+            .map(p => [
+              p.category_name as string,
+              {
+                id: p.category_id,
+                name: p.category_name as string,
+                slug: p.category_slug || String(p.category_name).toLowerCase().replace(/\s+/g, '-'),
+                display_order: 0
+              }
+            ])
+        ).values()
+      )
+    : categories;
+
+  // Filter & Sort Products (active store catalog uses storeSearchQuery; central catalog uses searchQuery)
+  const activeCatalog = selectedStore ? storeProducts : products;
+  const activeProductSearch = selectedStore ? storeSearchQuery : searchQuery;
+  const filteredProducts = activeCatalog.filter(product => {
     if (selectedCategory !== 'all' && product.category_name !== selectedCategory && product.category_slug !== selectedCategory) {
       return false;
     }
     if (onlyInStock && product.stock <= 0) {
       return false;
     }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
+    if (activeProductSearch.trim()) {
+      const q = activeProductSearch.toLowerCase();
       return (
         product.name.toLowerCase().includes(q) ||
         (product.category_name || '').toLowerCase().includes(q) ||
@@ -673,8 +1220,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     if (sortBy === 'price_high') return Number(b.price) - Number(a.price);
     if (sortBy === 'rating') return (Number(b.average_rating) || 0) - (Number(a.average_rating) || 0);
     if (sortBy === 'discount') {
-      const discA = ((Number(a.mrp) - Number(a.price)) / Number(a.mrp)) * 100;
-      const discB = ((Number(b.mrp) - Number(b.price)) / Number(b.mrp)) * 100;
+      const discA = Number(a.mrp) > 0 ? ((Number(a.mrp) - Number(a.price)) / Number(a.mrp)) * 100 : 0;
+      const discB = Number(b.mrp) > 0 ? ((Number(b.mrp) - Number(b.price)) / Number(b.mrp)) * 100 : 0;
       return discB - discA;
     }
     return 0; // featured default
@@ -694,6 +1241,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             {/* Logo */}
             <div
               onClick={() => {
+                setSelectedStore(null);
+                setStoreSearchQuery('');
                 setSelectedCategory('all');
                 setSearchQuery('');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -712,10 +1261,19 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     Karanja
                   </span>
                 </div>
-                <p className="text-[10px] sm:text-[11px] text-emerald-700 font-semibold flex items-center gap-0.5 truncate">
+                <button
+                  type="button"
+                  onClick={e => {
+                    e.stopPropagation();
+                    setIsLocationModalOpen(true);
+                  }}
+                  className="text-[10px] sm:text-[11px] text-emerald-700 hover:text-emerald-900 font-semibold flex items-center gap-0.5 truncate cursor-pointer"
+                  title="Change your area / delivery pin"
+                >
                   <MapPin className="w-3 h-3 text-emerald-600 shrink-0 inline" />
-                  <span>Karanja Lad</span>
-                </p>
+                  <span className="truncate max-w-[115px] sm:max-w-[170px]">{areaLabel}</span>
+                  <ChevronDown className="w-3 h-3 shrink-0" />
+                </button>
               </div>
             </div>
 
@@ -724,14 +1282,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
                 type="text"
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="Search atta, dal, fresh vegetables, milk, snacks..."
+                value={selectedStore ? storeSearchQuery : searchQuery}
+                onChange={e => selectedStore ? setStoreSearchQuery(e.target.value) : setSearchQuery(e.target.value)}
+                placeholder={selectedStore ? `Search inside ${selectedStore.name}...` : 'Search nearby grocery stores or available products...'}
                 className="w-full pl-10 pr-9 py-2.5 bg-gray-100 focus:bg-white border border-gray-200 focus:border-emerald-500 rounded-2xl text-xs font-medium text-gray-900 outline-hidden transition shadow-inner"
               />
-              {searchQuery && (
+              {(selectedStore ? storeSearchQuery : searchQuery) && (
                 <button
-                  onClick={() => setSearchQuery('')}
+                  onClick={() => selectedStore ? setStoreSearchQuery('') : setSearchQuery('')}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                 >
                   <X className="w-4 h-4" />
@@ -740,7 +1298,17 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             </div>
 
             {/* Header Right Actions */}
-            <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+              {(!currentUser || currentUser.role === 'customer') && (
+                <button
+                  type="button"
+                  onClick={() => onOpenAuth('store_register')}
+                  className="hidden lg:flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-[11px] font-bold transition cursor-pointer shrink-0"
+                >
+                  <StoreIcon className="w-3.5 h-3.5" />
+                  <span>List Store Free</span>
+                </button>
+              )}
               <PWAInstallButton variant="compact" className="hidden md:flex" />
 
               {/* Favorites (Desktop only - mobile accesses via bottom nav) */}
@@ -848,7 +1416,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 </button>
               ) : (
                 <button
-                  onClick={onOpenAuth}
+                  onClick={() => onOpenAuth('login')}
                   className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl sm:rounded-2xl font-bold text-xs transition cursor-pointer shrink-0"
                 >
                   Sign In
@@ -862,14 +1430,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search groceries, vegetables, dairy..."
+              value={selectedStore ? storeSearchQuery : searchQuery}
+              onChange={e => selectedStore ? setStoreSearchQuery(e.target.value) : setSearchQuery(e.target.value)}
+              placeholder={selectedStore ? `Search products in ${selectedStore.name}...` : 'Search nearby stores or available products...'}
               className="w-full pl-9 pr-8 py-2 bg-gray-100 focus:bg-white border border-gray-200 focus:border-emerald-500 rounded-xl text-xs text-gray-900 outline-hidden font-medium"
             />
-            {searchQuery && (
+            {(selectedStore ? storeSearchQuery : searchQuery) && (
               <button
-                onClick={() => setSearchQuery('')}
+                onClick={() => selectedStore ? setStoreSearchQuery('') : setSearchQuery('')}
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5"
               >
                 <X className="w-3.5 h-3.5" />
@@ -885,13 +1453,414 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       </div>
 
       {/* ======================================================== */}
-      {/* CATEGORIES HORIZONTAL PILLS */}
+      {/* HYPERLOCAL KIRANA STORES DISCOVERY OR SELECTED STORE PAGE */}
+      {/* ======================================================== */}
+      {!selectedStore ? (
+        <section className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 w-full min-w-0 space-y-3">
+          {/* Customer Location Controls Bar */}
+          <div className="bg-white rounded-2xl border border-gray-200 p-3 sm:p-4 shadow-2xs space-y-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="min-w-0">
+                <h2 className="font-extrabold text-sm sm:text-base text-gray-900 flex items-center gap-1.5">
+                  <StoreIcon className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Nearby Grocery &amp; Kirana Stores</span>
+                </h2>
+                <p className="text-[11px] text-gray-600 mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                  <MapPin className="w-3 h-3 text-emerald-600 shrink-0" />
+                  <span className="font-semibold text-gray-800">{areaLabel}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>
+                    {locationStatus === 'gps_detected'
+                      ? 'GPS location detected'
+                      : locationStatus === 'manual'
+                      ? 'Selected manually'
+                      : 'Sorted by distance'}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span>{nearbyStores.length} {nearbyStores.length === 1 ? 'store' : 'stores'} active</span>
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleDetectCustomerLocation}
+                  disabled={locatingCustomer}
+                  className="text-[11px] font-bold text-emerald-800 hover:bg-emerald-100 bg-emerald-50 border border-emerald-200 px-2.5 py-2 rounded-xl cursor-pointer flex items-center gap-1.5 disabled:opacity-60 whitespace-nowrap"
+                >
+                  {locatingCustomer ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span>{locatingCustomer ? 'Detecting...' : 'Use Current Location'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsLocationModalOpen(true)}
+                  className="text-[11px] font-bold text-gray-800 hover:bg-gray-100 bg-white border border-gray-300 px-2.5 py-2 rounded-xl cursor-pointer flex items-center gap-1 whitespace-nowrap"
+                >
+                  <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Change Location</span>
+                </button>
+              </div>
+            </div>
+
+            {locationNotice && (
+              <div
+                role={locationNotice.type === 'error' ? 'alert' : 'status'}
+                className={`rounded-xl p-2.5 border text-[11px] space-y-1.5 ${
+                  locationNotice.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-amber-50 border-amber-200 text-amber-950'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-extrabold">{locationNotice.title}</div>
+                    <p className="text-[11px] opacity-90 mt-0.5">{locationNotice.message}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLocationNotice(null)}
+                    aria-label="Dismiss location message"
+                    className="p-0.5 opacity-70 hover:opacity-100 cursor-pointer shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                {locationNotice.steps && locationNotice.steps.length > 0 && (
+                  <ul className="list-disc pl-4 space-y-0.5 text-[10px] opacity-90">
+                    {locationNotice.steps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                  </ul>
+                )}
+                {locationNotice.type === 'error' && (
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setIsLocationModalOpen(true)}
+                      className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold cursor-pointer"
+                    >
+                      Select Location Manually
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDetectCustomerLocation}
+                      className="px-2.5 py-1.5 bg-white hover:bg-gray-50 border border-gray-300 text-gray-800 rounded-lg text-[10px] font-bold cursor-pointer flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Try Again</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {storesLoading ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {[1, 2].map(i => (
+                <div key={i} className="bg-white rounded-2xl border border-gray-200 p-4 animate-pulse h-32" />
+              ))}
+            </div>
+          ) : filteredNearbyStores.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-dashed border-emerald-300 p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                  <StoreIcon className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="font-extrabold text-xs sm:text-sm text-gray-900">
+                    {searchQuery.trim()
+                      ? `No nearby stores or products matching "${searchQuery}"`
+                      : 'No verified local kirana stores active near your location yet'}
+                  </div>
+                  <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
+                    {searchQuery.trim()
+                      ? 'Try searching another store name or product, or change your selected area.'
+                      : 'FMP Central Catalog is available below. You can also change your location or register a local kirana store for free.'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0 w-full sm:w-auto">
+                {searchQuery.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-bold text-xs cursor-pointer"
+                  >
+                    Clear Search
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onOpenAuth('store_register')}
+                  className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-extrabold text-xs shadow-xs transition cursor-pointer flex-1 sm:flex-initial text-center"
+                >
+                  Register Store Free
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {filteredNearbyStores.map(store => {
+                const supportsDelivery = store.service_type === 'delivery' || store.service_type === 'both';
+                const supportsPickup = store.service_type === 'pickup' || store.service_type === 'both';
+                const withinRadius =
+                  typeof store.distance_km !== 'number' ||
+                  !store.delivery_radius_km ||
+                  store.distance_km <= store.delivery_radius_km;
+                const deliveryAvailable = supportsDelivery && withinRadius;
+                const hasStoreImage = Boolean(store.photos && store.photos.length > 0 && !brokenImages[`store-${store.id}`]);
+                const q = searchQuery.trim().toLowerCase();
+                const matchedProducts = q && Array.isArray(store.available_product_names)
+                  ? store.available_product_names.filter(p => p.toLowerCase().includes(q)).slice(0, 2)
+                  : [];
+
+                return (
+                  <button
+                    type="button"
+                    key={store.id}
+                    onClick={() => handleOpenStore(store)}
+                    className="bg-white rounded-2xl border border-gray-200 hover:border-emerald-500 hover:shadow-md transition p-3 text-left flex gap-3 cursor-pointer w-full min-w-0"
+                  >
+                    <div className="w-20 h-20 rounded-xl bg-amber-50 border border-gray-200 overflow-hidden shrink-0 flex items-center justify-center">
+                      {hasStoreImage ? (
+                        <img
+                          src={store.photos[0]}
+                          alt={store.name}
+                          referrerPolicy="no-referrer"
+                          onError={() => setBrokenImages(prev => ({ ...prev, [`store-${store.id}`]: true }))}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <StoreIcon className="w-7 h-7 text-amber-700" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0 flex flex-col justify-between gap-1.5">
+                      <div className="min-w-0">
+                        <div className="flex items-start justify-between gap-1.5">
+                          <h3 className="font-extrabold text-sm text-gray-900 truncate">{store.name}</h3>
+                          <span className={`text-[10px] font-extrabold uppercase shrink-0 ${
+                            store.is_open ? 'text-emerald-700' : 'text-red-700'
+                          }`}>
+                            {store.is_open ? 'Open' : 'Closed'}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-gray-500 truncate mt-0.5">{store.address}</p>
+                        <div className="flex items-center gap-1.5 text-[10px] text-gray-600 mt-1">
+                          <span className="font-bold text-gray-900 tabular-nums">
+                            {typeof store.distance_km === 'number' ? `${store.distance_km} km away` : 'Nearby'}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="truncate">{store.opening_hours}</span>
+                        </div>
+                      </div>
+
+                      <div className="pt-1.5 border-t border-gray-100 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px]">
+                        <span className={`font-semibold ${deliveryAvailable ? 'text-emerald-700' : 'text-gray-400'}`}>
+                          Delivery: {deliveryAvailable
+                            ? Number(store.delivery_fee) === 0 ? 'Free' : `₹${store.delivery_fee}`
+                            : supportsDelivery ? `Outside ${store.delivery_radius_km} km` : 'Unavailable'}
+                        </span>
+                        <span aria-hidden="true" className="text-gray-300">·</span>
+                        <span className={`font-semibold ${supportsPickup ? 'text-emerald-700' : 'text-gray-400'}`}>
+                          Pickup: {supportsPickup ? 'Available' : 'Unavailable'}
+                        </span>
+                      </div>
+
+                      {matchedProducts.length > 0 && (
+                        <div className="text-[10px] text-emerald-800 font-semibold truncate">
+                          Available: {matchedProducts.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      ) : (
+        <section className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 w-full min-w-0">
+          {(() => {
+            const supportsDelivery = selectedStore.service_type === 'delivery' || selectedStore.service_type === 'both';
+            const supportsPickup = selectedStore.service_type === 'pickup' || selectedStore.service_type === 'both';
+            const withinRadius =
+              typeof selectedStore.distance_km !== 'number' ||
+              !selectedStore.delivery_radius_km ||
+              selectedStore.distance_km <= selectedStore.delivery_radius_km;
+            const deliveryAvailable = supportsDelivery && withinRadius;
+            const hasBanner = Boolean(selectedStore.photos && selectedStore.photos.length > 0 && !brokenImages[`store-banner-${selectedStore.id}`]);
+
+            return (
+              <div className="bg-white rounded-2xl border border-emerald-200 overflow-hidden shadow-xs">
+                {hasBanner && (
+                  <div className="w-full h-36 sm:h-48 bg-gray-100 overflow-hidden relative">
+                    <img
+                      src={selectedStore.photos[0]}
+                      alt={selectedStore.name}
+                      referrerPolicy="no-referrer"
+                      onError={() => setBrokenImages(prev => ({ ...prev, [`store-banner-${selectedStore.id}`]: true }))}
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/25 to-transparent" />
+                    <div className="absolute top-3 left-3 right-3 flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedStore(null);
+                          setSelectedCategory('all');
+                          setStoreSearchQuery('');
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/95 hover:bg-white text-gray-900 font-bold text-xs cursor-pointer shadow-xs"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>All Nearby Stores</span>
+                      </button>
+                      <span className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold uppercase ${
+                        selectedStore.is_open ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
+                      }`}>
+                        {selectedStore.is_open ? 'Open Now' : 'Closed'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="p-3.5 sm:p-4 space-y-3">
+                  {!hasBanner && (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedStore(null);
+                          setSelectedCategory('all');
+                          setStoreSearchQuery('');
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold text-xs cursor-pointer"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>All Nearby Stores</span>
+                      </button>
+
+                      <span className={`text-xs font-extrabold uppercase ${
+                        selectedStore.is_open ? 'text-emerald-700' : 'text-red-700'
+                      }`}>
+                        {selectedStore.is_open ? 'Open Now' : 'Currently Closed'}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="flex items-start gap-3 min-w-0">
+                    {!hasBanner && (
+                      <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-amber-50 border border-gray-200 overflow-hidden shrink-0 flex items-center justify-center">
+                        <StoreIcon className="w-7 h-7 text-amber-700" />
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <h2 className="font-black text-base sm:text-xl text-gray-900 break-words">{selectedStore.name}</h2>
+                      {selectedStore.description && (
+                        <p className="text-xs text-gray-600 mt-0.5 line-clamp-2">{selectedStore.description}</p>
+                      )}
+                      <div className="text-xs text-gray-600 mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="inline-flex items-center gap-1 min-w-0">
+                          <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span className="break-words">
+                            {selectedStore.address}
+                            {selectedStore.landmark ? `, ${selectedStore.landmark}` : ''}
+                            {selectedStore.pincode ? ` - ${selectedStore.pincode}` : ''}
+                          </span>
+                        </span>
+                        {typeof selectedStore.distance_km === 'number' && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="font-bold text-gray-900 tabular-nums shrink-0">
+                              {selectedStore.distance_km} km from your location
+                            </span>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[11px] text-gray-700">
+                        <span className="inline-flex items-center gap-1 font-medium">
+                          <Clock className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                          <span>{selectedStore.opening_hours}</span>
+                        </span>
+                        <span aria-hidden="true" className="text-gray-300">·</span>
+                        <span className={`font-semibold ${deliveryAvailable ? 'text-emerald-700' : 'text-red-600'}`}>
+                          Delivery: {deliveryAvailable
+                            ? `${Number(selectedStore.delivery_fee) === 0 ? 'Free' : `₹${selectedStore.delivery_fee}`} (within ${selectedStore.delivery_radius_km} km)`
+                            : supportsDelivery
+                            ? `Unavailable beyond ${selectedStore.delivery_radius_km} km`
+                            : 'Unavailable'}
+                        </span>
+                        <span aria-hidden="true" className="text-gray-300">·</span>
+                        <span className={`font-semibold ${supportsPickup ? 'text-emerald-700' : 'text-gray-500'}`}>
+                          Store Pickup: {supportsPickup ? 'Available (Free)' : 'Unavailable'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {selectedStore.photos && selectedStore.photos.length > 1 && (
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      {selectedStore.photos.slice(1).map((photoUrl, pIdx) => (
+                        <img
+                          key={pIdx}
+                          src={photoUrl}
+                          alt={`${selectedStore.name} view ${pIdx + 2}`}
+                          referrerPolicy="no-referrer"
+                          className="w-20 h-14 object-cover rounded-xl border border-gray-200 shrink-0"
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Search Within Store */}
+                  <div className="relative w-full">
+                    <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      value={storeSearchQuery}
+                      onChange={e => setStoreSearchQuery(e.target.value)}
+                      placeholder={`Search products inside ${selectedStore.name}...`}
+                      className="w-full pl-9 pr-8 py-2 bg-gray-50 focus:bg-white border border-gray-200 focus:border-emerald-500 rounded-xl text-xs text-gray-900 outline-hidden font-medium"
+                    />
+                    {storeSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setStoreSearchQuery('')}
+                        aria-label="Clear store product search"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {!selectedStore.is_open && (
+                    <div className="bg-red-50 border border-red-200 text-red-800 rounded-xl p-2.5 text-xs font-semibold flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>This store is currently closed and not accepting orders.</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+        </section>
+      )}
+
+      {/* ======================================================== */}
+      {/* CATEGORIES HORIZONTAL FILTER BAR */}
       {/* ======================================================== */}
       <section id="categories-section" className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 w-full min-w-0">
         <div className="flex items-center justify-between mb-2">
           <h3 className="font-extrabold text-xs sm:text-base text-gray-900 flex items-center gap-1.5 sm:gap-2">
-            <span>Explore Categories</span>
-            <span className="text-[10px] sm:text-[11px] font-medium text-gray-400">({categories.length} sections)</span>
+            <span>{selectedStore ? `${selectedStore.name} Categories` : 'Explore Categories'}</span>
+            <span className="text-[10px] sm:text-[11px] font-medium text-gray-400">({displayedCategories.length} sections)</span>
           </h3>
           {selectedCategory !== 'all' && (
             <button
@@ -916,7 +1885,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             <span>All Items</span>
           </button>
 
-          {categories.map((category, idx) => {
+          {displayedCategories.map((category, idx) => {
             const isSelected = selectedCategory === category.name;
             return (
               <button
@@ -983,22 +1952,27 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       {/* PRODUCT GRID - RESPONSIVE 2-COL MOBILE, 3-5 COL DESKTOP */}
       {/* ======================================================== */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-5 flex-1">
-        {loading ? (
+        {(loading && !selectedStore) || (selectedStore && storeProductsLoading) ? (
           <div className="py-20 text-center text-gray-500">
             <div className="w-8 h-8 border-4 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
-            <p className="text-xs font-medium">Loading FMP Supermart catalog...</p>
+            <p className="text-xs font-medium">
+              {selectedStore ? `Loading ${selectedStore.name} products...` : 'Loading FMP Supermart catalog...'}
+            </p>
           </div>
         ) : filteredProducts.length === 0 ? (
-          <div className="bg-white rounded-3xl p-12 text-center border border-gray-200 shadow-xs max-w-md mx-auto my-8 space-y-3">
+          <div className="bg-white rounded-3xl p-10 sm:p-12 text-center border border-gray-200 shadow-xs max-w-md mx-auto my-8 space-y-3">
             <ShoppingBag className="w-12 h-12 text-gray-300 mx-auto" />
             <h4 className="font-extrabold text-gray-900 text-sm">No Products Found</h4>
             <p className="text-xs text-gray-500">
-              No products match "{searchQuery}" in {selectedCategory}. Try resetting filters.
+              {selectedStore && activeCatalog.length === 0
+                ? `${selectedStore.name} has not added any products yet.`
+                : `No products match "${activeProductSearch}" in ${selectedCategory}. Try resetting filters.`}
             </p>
             <button
               onClick={() => {
                 setSelectedCategory('all');
-                setSearchQuery('');
+                if (selectedStore) setStoreSearchQuery('');
+                else setSearchQuery('');
                 setOnlyInStock(false);
               }}
               className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 cursor-pointer"
@@ -1012,6 +1986,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               const inCart = cart.find(i => i.product.id === product.id);
               const isFavorite = favoriteIds.has(product.id);
               const isOutOfStock = product.stock <= 0;
+              const isStoreClosed = Boolean(selectedStore && !selectedStore.is_open);
               const pType = normalizeProductType(product.product_type, product.unit);
               const slabs = normalizeProductPriceSlabs(product.pricing_slabs, pType === 'loose' ? 'kg' : '');
               const lowestSlabPrice = slabs.length > 0 ? Math.min(...slabs.map(s => s.price_per_unit)) : null;
@@ -1019,6 +1994,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               const minQty = Math.max(Number(product.min_order_qty) || 1, pType === 'loose' ? 0.1 : 1);
               const stepQty = pType === 'loose' && minQty < 1 ? 0.5 : 1;
               const hasDiscount = Number(product.mrp) > Number(product.price);
+              const hasProdImg = Boolean(product.image_url && !brokenImages[`prod-${product.id}`]);
 
               return (
                 <div
@@ -1028,14 +2004,23 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   {/* Top Image Box (Click to view Product Details & Quantity Slabs) */}
                   <div
                     onClick={() => handleOpenReviewsModal(product)}
-                    className="relative aspect-square bg-gray-50 overflow-hidden cursor-pointer"
+                    className="relative aspect-square bg-gray-50 overflow-hidden cursor-pointer flex items-center justify-center"
                   >
-                    <img
-                      src={product.image_url}
-                      alt={product.name}
-                      loading="lazy"
-                      className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                    />
+                    {hasProdImg ? (
+                      <img
+                        src={product.image_url}
+                        alt={product.name}
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        onError={() => setBrokenImages(prev => ({ ...prev, [`prod-${product.id}`]: true }))}
+                        className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center text-gray-300 bg-gray-50 p-3 text-center">
+                        <Package className="w-8 h-8 mb-1" />
+                        <span className="text-[10px] font-semibold text-gray-400 line-clamp-1">{product.name}</span>
+                      </div>
+                    )}
 
                     {/* Subtle favorite heart button */}
                     <button
@@ -1062,13 +2047,13 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     {isOutOfStock && (
                       <div className="absolute inset-0 bg-white/85 backdrop-blur-2xs flex items-center justify-center">
                         <span className="bg-gray-800 text-white font-bold text-[10px] uppercase px-2.5 py-1 rounded-md tracking-wider">
-                          Out of Stock
+                          Unavailable
                         </span>
                       </div>
                     )}
                   </div>
 
-                  {/* Clean Card Content: Name, Unit, Price, Add Button */}
+                  {/* Clean Card Content: Name, Unit, Availability, Price, Add Button */}
                   <div className="p-2 sm:p-3 flex-1 flex flex-col justify-between space-y-1.5 sm:space-y-2 min-w-0">
                     <div
                       onClick={() => handleOpenReviewsModal(product)}
@@ -1079,13 +2064,18 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       </h3>
                       <div className="flex items-center justify-between gap-1 mt-0.5">
                         <p className="text-[10px] sm:text-[11px] text-gray-500 font-medium truncate">
-                          {product.unit} {pType === 'loose' ? '• Loose' : ''}
+                          {product.unit} {pType === 'loose' ? '· Loose' : ''}
                         </p>
                         {slabs.length > 0 && (
                           <span className="text-[9px] font-bold text-emerald-700 shrink-0 underline">
                             {slabs.length} qty rates
                           </span>
                         )}
+                      </div>
+                      <div className={`text-[10px] font-semibold mt-0.5 ${isOutOfStock ? 'text-red-600' : 'text-emerald-700'}`}>
+                        {isOutOfStock
+                          ? 'Unavailable · Out of Stock'
+                          : `Available (${product.stock} ${pType === 'loose' ? 'kg' : 'in stock'})`}
                       </div>
                     </div>
 
@@ -1101,11 +2091,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     <div className="pt-1.5 sm:pt-2 border-t border-gray-100 flex items-center justify-between gap-1 min-w-0">
                       <div className="min-w-0">
                         <div className="flex items-baseline gap-1">
-                          <span className="text-xs sm:text-sm md:text-base font-black text-gray-900">
+                          <span className="text-xs sm:text-sm md:text-base font-black text-gray-900 tabular-nums">
                             ₹{inCartResolved ? inCartResolved.applied_unit_price : product.price}
                           </span>
                           {hasDiscount && (
-                            <span className="text-[9px] sm:text-[10px] text-gray-400 line-through">
+                            <span className="text-[9px] sm:text-[10px] text-gray-400 line-through tabular-nums">
                               ₹{product.mrp}
                             </span>
                           )}
@@ -1119,7 +2109,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                             disabled
                             className="px-2 py-1 rounded-xl bg-gray-100 text-gray-400 text-[10px] sm:text-xs font-semibold cursor-not-allowed"
                           >
-                            Sold out
+                            Unavailable
+                          </button>
+                        ) : isStoreClosed ? (
+                          <button
+                            disabled
+                            className="px-2 py-1 rounded-xl bg-red-50 text-red-500 text-[10px] sm:text-xs font-semibold cursor-not-allowed"
+                          >
+                            Closed
                           </button>
                         ) : inCart ? (
                           <div className="flex items-center bg-emerald-50 border border-emerald-300 rounded-xl overflow-hidden text-emerald-800">
@@ -1273,7 +2270,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   {cartItemCount} {cartItemCount === 1 ? 'item' : 'items'} • ₹{totalAmount}
                 </div>
                 <div className="text-[10px] text-emerald-200">
-                  {deliveryQuote
+                  {isStorePickup
+                    ? `Store Pickup (${cartStore?.name || 'Store'}) • Zero Delivery Fee`
+                    : deliveryQuote
                     ? !deliveryQuote.deliverable
                       ? `Out of delivery range (${deliveryQuote.distance_km} km)`
                       : deliveryQuote.delivery_fee === 0
@@ -1301,6 +2300,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
           <button
             onClick={() => {
               setActiveNav('home');
+              setSelectedStore(null);
+              setStoreSearchQuery('');
               setSelectedCategory('all');
               setSearchQuery('');
               window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1385,20 +2386,20 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       {/* CUSTOMER PROFILE DRAWER / MODAL */}
       {/* ======================================================== */}
       {isProfileOpen && currentUser && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-sm w-full space-y-4 shadow-2xl border border-gray-100">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-sm w-full space-y-4 shadow-2xl border border-gray-100 max-h-[90vh] overflow-y-auto my-4">
             <div className="flex items-center justify-between">
               <h3 className="font-extrabold text-gray-900 text-base">My Customer Account</h3>
               <button
                 onClick={() => setIsProfileOpen(false)}
-                className="text-gray-400 hover:text-gray-600 p-1"
+                className="text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="p-4 bg-emerald-50 rounded-2xl flex items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-600 text-white font-black text-lg flex items-center justify-center">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-600 text-white font-black text-lg flex items-center justify-center shrink-0">
                 {currentUser.name.charAt(0)}
               </div>
               <div className="min-w-0">
@@ -1485,10 +2486,85 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               >
                 <div className="flex items-center gap-2">
                   <Package className="w-4 h-4 text-emerald-600" />
-                  <span>View Order History & Delivery OTP</span>
+                  <span>View Order History &amp; Delivery OTP</span>
                 </div>
                 <ChevronRight className="w-4 h-4 text-gray-400" />
               </button>
+
+              {/* Collapsible Report a Problem / Complaints */}
+              <div className="border border-gray-100 rounded-xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowComplaintForm(!showComplaintForm)}
+                  className="w-full text-left p-3 hover:bg-gray-50 flex items-center justify-between font-bold text-gray-800 cursor-pointer"
+                >
+                  <div className="flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4 text-amber-600" />
+                    <span>Report a Problem / Help ({complaints.length})</span>
+                  </div>
+                  <ChevronDown className={`w-4 h-4 text-gray-400 transition ${showComplaintForm ? 'rotate-180' : ''}`} />
+                </button>
+
+                {showComplaintForm && (
+                  <div className="p-3 bg-gray-50 border-t border-gray-100 space-y-2.5">
+                    <form onSubmit={handleSubmitComplaint} className="space-y-2">
+                      <input
+                        type="text"
+                        required
+                        value={complaintSubject}
+                        onChange={e => setComplaintSubject(e.target.value)}
+                        placeholder="Issue subject (e.g. Missing item / Store issue)"
+                        className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs"
+                      />
+                      <textarea
+                        rows={2}
+                        required
+                        value={complaintDescription}
+                        onChange={e => setComplaintDescription(e.target.value)}
+                        placeholder="Describe your issue..."
+                        className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs"
+                      />
+                      {complaintMsg && (
+                        <div className={`text-[11px] font-bold ${complaintMsg.type === 'success' ? 'text-emerald-700' : 'text-red-600'}`}>
+                          {complaintMsg.text}
+                        </div>
+                      )}
+                      <button
+                        type="submit"
+                        disabled={complaintSubmitting}
+                        className="w-full py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs cursor-pointer disabled:opacity-50"
+                      >
+                        {complaintSubmitting ? 'Submitting...' : 'Submit Report to Admin'}
+                      </button>
+                    </form>
+
+                    {complaints.length > 0 && (
+                      <div className="space-y-1.5 pt-2 border-t border-gray-200 max-h-32 overflow-y-auto">
+                        <div className="text-[10px] font-bold uppercase text-gray-400">Your Reports</div>
+                        {complaints.map(c => (
+                          <div key={c.id} className="bg-white p-2 rounded-lg border border-gray-200 text-[11px]">
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-bold text-gray-900 truncate">{c.subject}</span>
+                              <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-extrabold uppercase shrink-0 ${
+                                c.status === 'resolved'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : c.status === 'in_review'
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}>
+                                {c.status.replace('_', ' ')}
+                              </span>
+                            </div>
+                            {c.admin_notes && (
+                              <div className="text-[10px] text-emerald-700 mt-1">Admin Note: {c.admin_notes}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
 
               {/* PWA App Install option in Profile */}
               <div className="pt-1">
@@ -1530,17 +2606,29 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         const resolved = resolveProductQuantityPricing(selectedProduct, detailQty);
         const existingInCart = cart.find(i => i.product.id === selectedProduct.id);
         const stepSize = pType === 'loose' ? 0.5 : 1;
+        const isClosedForSelected = Boolean(
+          selectedStore && selectedProduct.store_id === selectedStore.id && !selectedStore.is_open
+        );
+        const hasDetailImg = Boolean(selectedProduct.image_url && !brokenImages[`prod-${selectedProduct.id}`]);
 
         return (
           <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
             <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-gray-100 space-y-4 my-6 max-h-[92vh] overflow-y-auto">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-3 min-w-0">
-                  <img
-                    src={selectedProduct.image_url}
-                    alt={selectedProduct.name}
-                    className="w-16 h-16 rounded-2xl object-cover border border-gray-200 shrink-0"
-                  />
+                  {hasDetailImg ? (
+                    <img
+                      src={selectedProduct.image_url}
+                      alt={selectedProduct.name}
+                      referrerPolicy="no-referrer"
+                      onError={() => setBrokenImages(prev => ({ ...prev, [`prod-${selectedProduct.id}`]: true }))}
+                      className="w-16 h-16 rounded-2xl object-cover border border-gray-200 shrink-0"
+                    />
+                  ) : (
+                    <div className="w-16 h-16 rounded-2xl bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center text-gray-400">
+                      <Package className="w-6 h-6" />
+                    </div>
+                  )}
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <h3 className="font-extrabold text-gray-900 text-base leading-snug">
@@ -1752,9 +2840,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                 <button
                   type="button"
-                  disabled={!resolved.valid}
+                  disabled={!resolved.valid || isClosedForSelected}
                   onClick={() => {
-                    if (!resolved.valid) return;
+                    if (!resolved.valid || isClosedForSelected) return;
                     if (existingInCart) {
                       onUpdateCartQty(selectedProduct.id, resolved.quantity);
                       showCartNotice(`Updated ${selectedProduct.name} quantity to ${resolved.quantity} ${unitSuffix}`);
@@ -1768,7 +2856,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 >
                   <ShoppingCart className="w-4 h-4" />
                   <span>
-                    {existingInCart
+                    {isClosedForSelected
+                      ? 'Store Currently Closed'
+                      : existingInCart
                       ? `Update Cart Qty (${resolved.quantity} ${unitSuffix}) • ₹${resolved.line_total}`
                       : `Add ${resolved.quantity} ${unitSuffix} to Cart • ₹${resolved.line_total}`}
                   </span>
@@ -1906,22 +2996,54 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 </div>
               ) : (
                 <>
-                  {/* Cart Items List (With Dynamic Slab Pricing & Direct Qty Input) */}
+                  {/* Price Update Notice if backend live price changed since adding to cart */}
+                  {priceChangedItems.length > 0 && (
+                    <div className="mx-4 mt-3 bg-amber-50 border border-amber-200 rounded-2xl p-3 text-xs space-y-1">
+                      <div className="font-extrabold text-amber-900 flex items-center gap-1.5">
+                        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>Price Updated by Store</span>
+                      </div>
+                      <p className="text-[11px] text-amber-800 leading-snug">
+                        Live store pricing updated for {priceChangedItems.length} item{priceChangedItems.length > 1 ? 's' : ''} in your cart before checkout:
+                      </p>
+                      <ul className="text-[11px] text-amber-900 font-semibold space-y-0.5 pl-1">
+                        {priceChangedItems.map(pc => (
+                          <li key={pc.product_id}>
+                            • {pc.name}: <span className="line-through text-amber-700">₹{pc.old_unit_price}</span> → <span className="font-black">₹{pc.new_unit_price}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Cart Items List (With Dynamic Slab Pricing, Stock Guards & Direct Qty Input) */}
                   <div className="p-4 divide-y divide-gray-100">
                     {cart.map((item, idx) => {
                       const pType = normalizeProductType(item.product.product_type, item.product.unit);
-                      const unitSuffix = pType === 'loose' ? 'kg' : 'u';
                       const qItem = cartQuoteMap[item.product.id] || resolveProductQuantityPricing(item.product, item.quantity);
                       const stepSize = pType === 'loose' && (item.product.min_order_qty || 1) < 1 ? 0.5 : 1;
+                      const minOrderQty = Math.max(Number(item.product.min_order_qty) || (pType === 'loose' ? 0.5 : 1), 0.1);
+                      const maxOrderLimit = item.product.max_order_qty ? Math.min(qItem.stock, Number(item.product.max_order_qty)) : qItem.stock;
+                      const isAtMaxStock = maxOrderLimit > 0 && item.quantity >= maxOrderLimit;
+                      const snapshotPricing = resolveProductQuantityPricing(item.product, item.quantity);
+                      const hasItemPriceShift = qItem.valid && Math.abs(qItem.applied_unit_price - snapshotPricing.applied_unit_price) > 0.009;
 
                       return (
                         <div key={item.product?.id || `cart-${idx}`} className="py-3 space-y-1.5 text-xs">
                           <div className="flex items-start gap-3">
-                            <img
-                              src={item.product.image_url}
-                              alt={item.product.name}
-                              className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
-                            />
+                            {item.product.image_url && !brokenImages[`prod-${item.product.id}`] ? (
+                              <img
+                                src={item.product.image_url}
+                                alt={item.product.name}
+                                referrerPolicy="no-referrer"
+                                onError={() => setBrokenImages(prev => ({ ...prev, [`prod-${item.product.id}`]: true }))}
+                                className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-12 h-12 rounded-xl bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center text-gray-400">
+                                <Package className="w-5 h-5" />
+                              </div>
+                            )}
                             <div className="flex-1 min-w-0">
                               <div className="font-bold text-gray-900 truncate">{item.product.name}</div>
                               <div className="text-gray-500 text-[11px] flex items-center gap-1.5 flex-wrap">
@@ -1931,8 +3053,18 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                                     Slab: {qItem.applied_slab_label}
                                   </span>
                                 )}
+                                {hasItemPriceShift && (
+                                  <span className="bg-amber-100 text-amber-800 text-[9px] font-extrabold px-1.5 py-0.2 rounded">
+                                    Price updated
+                                  </span>
+                                )}
                               </div>
                               <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                {hasItemPriceShift && (
+                                  <span className="text-[10px] text-amber-700 line-through">
+                                    ₹{snapshotPricing.applied_unit_price}
+                                  </span>
+                                )}
                                 <span className="font-extrabold text-emerald-700">
                                   ₹{qItem.applied_unit_price} × {item.quantity}{pType === 'loose' ? 'kg' : ''} = ₹{qItem.line_total}
                                 </span>
@@ -1949,12 +3081,20 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                               </div>
                             </div>
 
-                            {/* Stepper with editable qty input */}
+                            {/* Stepper with stock & min/max guardrails */}
                             <div className="flex items-center bg-gray-100 rounded-xl overflow-hidden font-bold shrink-0">
                               <button
                                 type="button"
-                                onClick={() => onUpdateCartQty(item.product.id, item.quantity - stepSize)}
+                                onClick={() => {
+                                  const nextQty = Math.round((item.quantity - stepSize) * 100) / 100;
+                                  if (nextQty < minOrderQty && item.quantity <= minOrderQty) {
+                                    onRemoveFromCart(item.product.id);
+                                  } else {
+                                    onUpdateCartQty(item.product.id, Math.max(minOrderQty, nextQty));
+                                  }
+                                }}
                                 className="px-2 py-1.5 hover:bg-gray-200 transition cursor-pointer"
+                                title="Decrease quantity"
                               >
                                 -
                               </button>
@@ -1966,7 +3106,12 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                                 onChange={e => {
                                   const v = Number(e.target.value);
                                   if (Number.isFinite(v) && v > 0) {
-                                    onUpdateCartQty(item.product.id, v);
+                                    if (maxOrderLimit > 0 && v > maxOrderLimit) {
+                                      showCartNotice(`Maximum ${maxOrderLimit} available for ${item.product.name}.`);
+                                      onUpdateCartQty(item.product.id, maxOrderLimit);
+                                    } else {
+                                      onUpdateCartQty(item.product.id, v);
+                                    }
                                   }
                                 }}
                                 aria-label={`Quantity for ${item.product.name}`}
@@ -1974,8 +3119,19 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                               />
                               <button
                                 type="button"
-                                onClick={() => onUpdateCartQty(item.product.id, item.quantity + stepSize)}
-                                className="px-2 py-1.5 hover:bg-gray-200 transition cursor-pointer"
+                                onClick={() => {
+                                  if (isAtMaxStock) {
+                                    showCartNotice(`Only ${maxOrderLimit} available for ${item.product.name}.`);
+                                    return;
+                                  }
+                                  const nextQty = Math.round((item.quantity + stepSize) * 100) / 100;
+                                  onUpdateCartQty(item.product.id, maxOrderLimit > 0 ? Math.min(nextQty, maxOrderLimit) : nextQty);
+                                }}
+                                disabled={qItem.stock <= 0}
+                                className={`px-2 py-1.5 transition cursor-pointer ${
+                                  isAtMaxStock || qItem.stock <= 0 ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-200'
+                                }`}
+                                title="Increase quantity"
                               >
                                 +
                               </button>
@@ -1997,9 +3153,29 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                           )}
 
                           {!qItem.valid && qItem.error && (
-                            <div className="text-[10px] text-red-700 bg-red-50 border border-red-200 px-2.5 py-1 rounded-lg font-bold flex items-center gap-1">
-                              <AlertCircle className="w-3 h-3 shrink-0" />
-                              <span>{qItem.error}</span>
+                            <div className="text-[10px] text-red-700 bg-red-50 border border-red-200 px-2.5 py-1.5 rounded-lg font-bold flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1 min-w-0">
+                                <AlertCircle className="w-3 h-3 shrink-0" />
+                                <span>{qItem.error}</span>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {qItem.stock > 0 && item.quantity > qItem.stock && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onUpdateCartQty(item.product.id, qItem.stock)}
+                                    className="px-2 py-0.5 bg-white border border-red-300 text-red-700 rounded-md hover:bg-red-100 cursor-pointer"
+                                  >
+                                    Set Max ({qItem.stock})
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => onRemoveFromCart(item.product.id)}
+                                  className="px-2 py-0.5 bg-red-600 text-white rounded-md hover:bg-red-700 cursor-pointer"
+                                >
+                                  Remove
+                                </button>
+                              </div>
                             </div>
                           )}
                         </div>
@@ -2009,7 +3185,74 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                   {/* Checkout Form Section */}
                   <div className="border-t border-gray-200 p-4 bg-gray-50 space-y-3">
-                    {/* Delivery Preference */}
+                    {/* Store Header & Home Delivery vs Store Pickup Selector */}
+                    {cartStore && (
+                      <div className="bg-white rounded-2xl p-3 border border-emerald-200 space-y-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 font-extrabold text-gray-900 min-w-0">
+                            <StoreIcon className="w-4 h-4 text-amber-700 shrink-0" />
+                            <span className="truncate">{cartStore.name}</span>
+                          </div>
+                          {storeMinOrder > 0 && (
+                            <span className="text-[10px] font-bold text-gray-500 shrink-0">
+                              Min: ₹{storeMinOrder}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          {cartStore.service_type !== 'pickup' && (
+                            <button
+                              type="button"
+                              onClick={() => setFulfillmentType('delivery')}
+                              className={`p-2 rounded-xl border text-left font-bold transition cursor-pointer ${
+                                fulfillmentType === 'delivery'
+                                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                                  : 'bg-gray-50 text-gray-700 border-gray-200'
+                              }`}
+                            >
+                              <div>🚚 Home Delivery</div>
+                              <div className={`text-[10px] font-normal ${fulfillmentType === 'delivery' ? 'text-emerald-100' : 'text-gray-500'}`}>
+                                Store-managed ({cartStore.delivery_radius_km} km)
+                              </div>
+                            </button>
+                          )}
+                          {cartStore.service_type !== 'delivery' && (
+                            <button
+                              type="button"
+                              onClick={() => setFulfillmentType('pickup')}
+                              className={`p-2 rounded-xl border text-left font-bold transition cursor-pointer ${
+                                fulfillmentType === 'pickup'
+                                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                                  : 'bg-gray-50 text-gray-700 border-gray-200'
+                              }`}
+                            >
+                              <div>🏪 Store Pickup</div>
+                              <div className={`text-[10px] font-normal ${fulfillmentType === 'pickup' ? 'text-emerald-100' : 'text-gray-500'}`}>
+                                ₹0 delivery fee
+                              </div>
+                            </button>
+                          )}
+                        </div>
+
+                        {isStorePickup && (
+                          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900 space-y-1">
+                            <div className="font-extrabold">Store Pickup Counter</div>
+                            <div><span className="font-bold">Address:</span> {cartStore.address}</div>
+                            {cartStore.opening_hours && (
+                              <div><span className="font-bold">Store Hours:</span> {cartStore.opening_hours}</div>
+                            )}
+                            {cartStore.delivery_info && (
+                              <div><span className="font-bold">Instructions:</span> {cartStore.delivery_info}</div>
+                            )}
+                            <div className="text-emerald-800">Zero delivery or handling fees — collect directly from the shop using your Pickup Code.</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Delivery Preference (Hidden for Store Pickup) */}
+                    {!isStorePickup && (
                     <div className="space-y-1 text-xs">
                       <div className="font-bold text-gray-900 text-[11px]">Select Delivery Timing:</div>
                       <div className="grid grid-cols-2 gap-2">
@@ -2065,8 +3308,10 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         </div>
                       )}
                     </div>
+                    )}
 
-                    {/* Interactive OpenStreetMap Pin Picker */}
+                    {/* Interactive OpenStreetMap Pin Picker (Home Delivery Only) */}
+                    {!isStorePickup && (
                     <div
                       className={`bg-white rounded-2xl p-3 space-y-2 shadow-xs border ${
                         hasUserMovedPin ? 'border-emerald-200' : 'border-amber-300'
@@ -2096,7 +3341,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                                 : quoteLoading
                                 ? 'Calculating road distance & delivery fee via OSRM...'
                                 : deliveryQuote
-                                ? `${deliveryQuote.distance_km} km from Warehouse • ${
+                                ? `${deliveryQuote.distance_km} km from ${cartStore ? cartStore.name : 'Warehouse'} • ${
                                     !deliveryQuote.deliverable
                                       ? 'Outside Zone'
                                       : deliveryQuote.delivery_fee === 0
@@ -2121,9 +3366,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         <OsmMapPicker
                           lat={customerLat}
                           lng={customerLng}
-                          warehouseLat={deliverySettings?.warehouse_lat ?? 20.4839}
-                          warehouseLng={deliverySettings?.warehouse_lng ?? 77.4877}
-                          warehouseLabel="FMP Warehouse"
+                          warehouseLat={cartStore ? cartStore.lat : (deliverySettings?.warehouse_lat ?? 20.4839)}
+                          warehouseLng={cartStore ? cartStore.lng : (deliverySettings?.warehouse_lng ?? 77.4877)}
+                          warehouseLabel={cartStore ? cartStore.name : 'FMP Warehouse'}
                           pinLabel="Your Location"
                           pinColor="emerald"
                           heightClass="h-44"
@@ -2142,6 +3387,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                                 .join(', ');
                               if (cleaned) {
                                 setDeliveryAddress(cleaned);
+                                setAreaLabel(cleaned.split(',')[0] || 'Karanja Lad');
                               }
                             }
                             if (meta?.landmark && meta.landmark.trim()) {
@@ -2151,8 +3397,80 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         />
                       )}
                     </div>
+                    )}
 
-                    {/* Delivery Address fields */}
+                    {/* Saved Delivery Addresses Selector (Home Delivery Only) */}
+                    {!isStorePickup && currentUser && (
+                      <div className="bg-white rounded-2xl p-3 border border-gray-200 space-y-2 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-extrabold text-gray-900 flex items-center gap-1.5">
+                            <Home className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>Saved Delivery Addresses</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedSavedAddressId('new');
+                              setAddressSaveNotice(null);
+                            }}
+                            className="text-[10px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded-lg cursor-pointer"
+                          >
+                            + Add New Address
+                          </button>
+                        </div>
+
+                        {savedAddresses.length > 0 ? (
+                          <div className="space-y-1.5 max-h-36 overflow-y-auto pr-0.5">
+                            {savedAddresses.map(addr => {
+                              const isSelected = selectedSavedAddressId === addr.id;
+                              return (
+                                <div
+                                  key={addr.id}
+                                  className={`p-2 rounded-xl border flex items-start justify-between gap-2 transition ${
+                                    isSelected
+                                      ? 'border-emerald-500 bg-emerald-50/70'
+                                      : 'border-gray-200 bg-gray-50/50 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSelectSavedAddress(addr)}
+                                    className="flex-1 text-left min-w-0 cursor-pointer"
+                                  >
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-extrabold text-gray-900 text-[11px]">{addr.label}</span>
+                                      {addr.phone && (
+                                        <span className="text-[10px] text-gray-500 font-semibold">• {addr.phone}</span>
+                                      )}
+                                      {isSelected && (
+                                        <span className="text-[9px] font-extrabold bg-emerald-600 text-white px-1.5 py-0.2 rounded">
+                                          Selected
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[11px] text-gray-600 truncate mt-0.5">{addr.address}</div>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteSavedAddress(addr.id)}
+                                    title="Delete saved address"
+                                    className="text-gray-400 hover:text-red-600 p-1 cursor-pointer shrink-0"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-gray-500">
+                            No saved addresses yet. Enter your delivery details below and save them for faster checkout.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Delivery / Contact fields */}
                     <div className="space-y-2 text-xs">
                       <div>
                         <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Customer Name</label>
@@ -2166,7 +3484,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         />
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className={`grid gap-2 ${isStorePickup ? 'grid-cols-1' : 'grid-cols-2'}`}>
                         <div>
                           <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Mobile Number</label>
                           <input
@@ -2178,6 +3496,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                             className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
                           />
                         </div>
+                        {!isStorePickup && (
                         <div>
                           <label className="block text-[10px] font-bold text-gray-600 mb-0.5">Landmark</label>
                           <input
@@ -2188,24 +3507,80 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                             className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
                           />
                         </div>
+                        )}
                       </div>
 
-                      <div>
-                        <label className="block text-[10px] font-bold text-gray-600 mb-0.5">
-                          Delivery Address in Karanja Lad
-                        </label>
-                        <textarea
-                          rows={2}
-                          required
-                          value={deliveryAddress}
-                          onChange={e => setDeliveryAddress(e.target.value)}
-                          placeholder="House/Plot no., Street name, Karanja Lad (444105)"
-                          className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
-                        />
+                      {!isStorePickup && (
+                      <div className="space-y-2">
+                        <div>
+                          <label className="block text-[10px] font-bold text-gray-600 mb-0.5">
+                            Delivery Address in Karanja Lad
+                          </label>
+                          <textarea
+                            rows={2}
+                            required
+                            value={deliveryAddress}
+                            onChange={e => setDeliveryAddress(e.target.value)}
+                            placeholder="House/Plot no., Street name, Karanja Lad (444105)"
+                            className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
+                          />
+                        </div>
+
+                        {currentUser && (
+                          <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl p-2">
+                            <select
+                              value={newAddressLabel}
+                              onChange={e => setNewAddressLabel(e.target.value)}
+                              className="bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 text-[11px] font-bold text-gray-700"
+                            >
+                              <option value="Home">Home</option>
+                              <option value="Work">Work</option>
+                              <option value="Shop">Shop</option>
+                              <option value="Other">Other</option>
+                            </select>
+                            <button
+                              type="button"
+                              onClick={handleSaveNewCheckoutAddress}
+                              disabled={savingNewAddress}
+                              className="flex-1 py-1 px-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              <BookmarkPlus className="w-3.5 h-3.5" />
+                              <span>{savingNewAddress ? 'Saving...' : 'Save Address for Future Orders'}</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {addressSaveNotice && (
+                          <div className="text-[11px] text-emerald-700 font-bold bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg">
+                            {addressSaveNotice}
+                          </div>
+                        )}
                       </div>
+                      )}
                     </div>
 
-                    {/* Delivery Partner Tip Selection */}
+                    {/* Payment Method Summary (COD / Pay at Store Only — No Online Gateways) */}
+                    <div className="bg-white rounded-2xl p-3 border border-emerald-200 flex items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
+                          <Banknote className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="font-extrabold text-gray-900">
+                            {isStorePickup ? 'Pay at Store (Cash / Counter)' : 'Cash on Delivery (COD)'}
+                          </div>
+                          <div className="text-[10px] text-gray-500">
+                            Payment Status: Pending (Pay upon {isStorePickup ? 'store pickup' : 'order handover'})
+                          </div>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-extrabold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full shrink-0">
+                        Active
+                      </span>
+                    </div>
+
+                    {/* Delivery Partner Tip Selection (Central / Delivery Orders Only) */}
+                    {!isStorePickup && !cartStoreId && (
                     <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3 space-y-2 text-xs">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-1.5 font-bold text-amber-900 text-xs">
@@ -2298,6 +3673,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         </div>
                       )}
                     </div>
+                    )}
 
                     {/* Zomato-Style Bill Summary Breakdown (Backend Distance & Fee Calculated) */}
                     <div className="p-3.5 bg-white rounded-2xl border border-gray-200 text-xs space-y-2 shadow-xs">
@@ -2306,7 +3682,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                           <Truck className="w-3.5 h-3.5 text-emerald-600" />
                           <span>Bill Summary</span>
                         </span>
-                        {quoteLoading ? (
+                        {isStorePickup ? (
+                          <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                            Store Pickup • ₹0 Fee
+                          </span>
+                        ) : quoteLoading ? (
                           <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
                             Calculating route...
                           </span>
@@ -2317,9 +3697,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         ) : null}
                       </div>
 
-                      {deliveryQuote && (
+                      {!isStorePickup && deliveryQuote && (
                         <div className="flex justify-between items-center text-[11px] text-gray-500">
-                          <span>Warehouse to Pin Road Distance:</span>
+                          <span>{cartStore ? `${cartStore.name} to Pin Distance:` : 'Warehouse to Pin Road Distance:'}</span>
                           <span className="font-bold text-gray-800">
                             {deliveryQuote.distance_km} km ({deliveryQuote.distance_source === 'osrm' ? 'OSRM Road' : 'Estimated'})
                           </span>
@@ -2346,13 +3726,15 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                       <div className="flex justify-between items-start text-gray-600 gap-2">
                         <div>
-                          <div>Delivery Charge:</div>
-                          {deliveryQuote?.matched_slab_label && (
+                          <div>{isStorePickup ? 'Store Pickup Fee:' : 'Delivery Charge:'}</div>
+                          {!isStorePickup && deliveryQuote?.matched_slab_label && (
                             <div className="text-[10px] text-gray-400">{deliveryQuote.matched_slab_label}</div>
                           )}
                         </div>
                         <span className="shrink-0">
-                          {!hasUserMovedPin ? (
+                          {isStorePickup ? (
+                            <span className="text-emerald-700 font-bold">FREE</span>
+                          ) : !hasUserMovedPin ? (
                             <span className="text-amber-700 font-semibold">Select location</span>
                           ) : quoteLoading ? (
                             <span className="text-gray-400 font-medium">Calculating...</span>
@@ -2366,12 +3748,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         </span>
                       </div>
 
-                      <div className="flex justify-between text-gray-600">
-                        <span>Handling Fee:</span>
-                        <span className="text-gray-900 font-semibold">₹{handlingCharge}</span>
-                      </div>
+                      {handlingCharge > 0 && (
+                        <div className="flex justify-between text-gray-600">
+                          <span>Handling Fee:</span>
+                          <span className="text-gray-900 font-semibold">₹{handlingCharge}</span>
+                        </div>
+                      )}
 
-                      {tipAmount > 0 && (
+                      {!isStorePickup && !cartStoreId && tipAmount > 0 && (
                         <div className="flex justify-between text-amber-800 font-semibold">
                           <span className="flex items-center gap-1">
                             <Heart className="w-3.5 h-3.5 text-red-500 fill-red-500" />
@@ -2387,7 +3771,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       </div>
 
                       <div className="text-[10px] text-gray-400 font-medium pt-0.5">
-                        • Calculated securely on server • Pay cash upon delivery
+                        • Calculated securely on server • {isStorePickup ? 'Pay cash upon store pickup' : 'Pay cash upon delivery'}
                       </div>
                     </div>
                   </div>
@@ -2405,7 +3789,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </div>
                 )}
 
-                {!hasUserMovedPin && (
+                {belowMinOrder && (
+                  <div className="text-xs text-amber-900 bg-amber-50 p-2.5 rounded-xl border border-amber-200 flex items-start gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                    <span>Minimum order for {cartStore?.name} is ₹{storeMinOrder}. Add ₹{Math.round((storeMinOrder - cartSubtotal) * 100) / 100} more.</span>
+                  </div>
+                )}
+
+                {!isStorePickup && !hasUserMovedPin && (
                   <div className="text-xs text-amber-900 bg-amber-50 p-2.5 rounded-xl border border-amber-200 flex items-start gap-2 font-semibold">
                     <MapPin className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
                     <span>
@@ -2414,7 +3805,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </div>
                 )}
 
-                {deliveryQuote && !deliveryQuote.deliverable && (
+                {!isStorePickup && deliveryQuote && !deliveryQuote.deliverable && (
                   <div className="text-xs text-red-700 bg-red-50 p-2.5 rounded-xl border border-red-200 flex items-start gap-2 font-semibold">
                     <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
                     <span>
@@ -2424,7 +3815,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </div>
                 )}
 
-                {quoteError && (
+                {!isStorePickup && quoteError && (
                   <div className="text-xs text-amber-800 bg-amber-50 p-2.5 rounded-xl border border-amber-200">
                     {quoteError}
                   </div>
@@ -2439,29 +3830,36 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 <button
                   onClick={handleCheckoutSubmit}
                   disabled={
-                    !hasUserMovedPin ||
                     checkoutSubmitting ||
-                    quoteLoading ||
                     cartQuoteLoading ||
                     hasCartPricingError ||
-                    !deliveryQuote ||
-                    !deliveryQuote.deliverable
+                    belowMinOrder ||
+                    (!isStorePickup && (
+                      !hasUserMovedPin ||
+                      quoteLoading ||
+                      !deliveryQuote ||
+                      !deliveryQuote.deliverable
+                    ))
                   }
                   className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span>
                     {checkoutSubmitting
                       ? 'Placing Order...'
-                      : !hasUserMovedPin
-                      ? 'Select Delivery Location to Order'
+                      : belowMinOrder
+                      ? `Min Order ₹${storeMinOrder} Required`
                       : hasCartPricingError
                       ? 'Fix Quantity / Stock Errors'
-                      : cartQuoteLoading || quoteLoading
+                      : !isStorePickup && !hasUserMovedPin
+                      ? 'Select Delivery Location to Order'
+                      : cartQuoteLoading || (!isStorePickup && quoteLoading)
                       ? 'Calculating Prices & Delivery...'
-                      : deliveryQuote && !deliveryQuote.deliverable
+                      : !isStorePickup && deliveryQuote && !deliveryQuote.deliverable
                       ? 'Outside Delivery Zone'
-                      : !deliveryQuote
+                      : !isStorePickup && !deliveryQuote
                       ? 'Verify Delivery Location to Order'
+                      : isStorePickup
+                      ? `Confirm Store Pickup Order (₹${totalAmount})`
                       : `Place COD Order (₹${totalAmount})`}
                   </span>
                   <ArrowRight className="w-4 h-4" />
@@ -2473,185 +3871,558 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       )}
 
       {/* ======================================================== */}
-      {/* MY ORDERS DRAWER (WITH DELIVERY OTP CARD) */}
+      {/* MY ORDERS DRAWER (LIST, FILTERS & DEDICATED ORDER DETAILS) */}
       {/* ======================================================== */}
       {isOrdersOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex justify-end">
           <div className="bg-white w-full max-w-md h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-200">
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between bg-emerald-50">
-              <div className="flex items-center gap-2">
-                <Package className="w-5 h-5 text-emerald-700" />
-                <h3 className="font-extrabold text-gray-900 text-base">My Orders & Live Status</h3>
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between bg-emerald-50 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                {selectedOrderDetail ? (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOrderDetail(null)}
+                    className="p-1 -ml-1 rounded-lg text-emerald-800 hover:bg-emerald-100 cursor-pointer flex items-center gap-1 text-xs font-extrabold"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    <span>Back</span>
+                  </button>
+                ) : (
+                  <Package className="w-5 h-5 text-emerald-700 shrink-0" />
+                )}
+                <h3 className="font-extrabold text-gray-900 text-base truncate">
+                  {selectedOrderDetail ? `Order ${selectedOrderDetail.order_number}` : 'My Orders & Live Status'}
+                </h3>
               </div>
-              <button onClick={onCloseOrders} className="text-gray-500 p-1">
+              <button onClick={onCloseOrders} className="text-gray-500 hover:text-gray-700 p-1 cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {ordersLoading ? (
-                <div className="p-8 text-center text-gray-400 text-xs">Loading orders...</div>
-              ) : orders.length === 0 ? (
-                <div className="p-12 text-center text-gray-400 text-xs space-y-2">
-                  <Package className="w-12 h-12 text-gray-300 mx-auto" />
-                  <p className="font-bold text-gray-900">No Orders Placed Yet</p>
-                  <p>When you place an order, you can view your live delivery OTP right here.</p>
-                </div>
-              ) : (
-                orders.map((order, idx) => {
-                  const isDispatched = order.status === 'dispatched';
-                  const isDelivered = order.status === 'delivered';
-                  const canCancel = ['placed', 'confirmed', 'packed'].includes(order.status);
+              {selectedOrderDetail ? (
+                (() => {
+                  const detail = orders.find(o => o.id === selectedOrderDetail.id) || selectedOrderDetail;
+                  const meta = getCustomerOrderStatusMeta(detail);
+                  const rejected = isOrderRejected(detail);
+                  const isCancelled = detail.status === 'cancelled';
+                  const canCancelDetail = ['placed', 'confirmed', 'packed'].includes(detail.status);
+                  const progressSteps = [
+                    { step: 1, label: 'Pending' },
+                    { step: 2, label: 'Accepted' },
+                    { step: 3, label: 'Preparing' },
+                    { step: 4, label: 'Ready' },
+                    { step: 5, label: 'Completed' }
+                  ];
+                  const effectivePaymentMode =
+                    detail.payment_mode || (detail.fulfillment_type === 'pickup' ? 'Pay at Store' : 'COD');
+                  const isPaid = detail.payment_status === 'paid' || detail.status === 'delivered' || detail.cod_collected;
 
                   return (
-                    <div
-                      key={order.id || `order-${order.order_number || idx}`}
-                      className={`p-4 rounded-2xl border space-y-3 shadow-xs ${
-                        isDispatched
-                          ? 'border-amber-300 bg-amber-50/20 ring-2 ring-amber-100'
-                          : isDelivered
-                          ? 'border-emerald-200 bg-emerald-50/20'
-                          : 'border-gray-200'
-                      }`}
-                    >
-                      <div className="flex justify-between items-center text-xs">
-                        <div>
-                          <div className="font-extrabold text-gray-900">{order.order_number}</div>
-                          <div className="text-[10px] text-gray-400">
-                            {new Date(order.created_at).toLocaleString([], {
-                              month: 'short',
-                              day: 'numeric',
-                              hour: '2-digit',
-                              minute: '2-digit'
+                    <div className="space-y-4 text-xs">
+                      {detailOrderLoading && (
+                        <div className="text-[11px] text-emerald-700 font-semibold flex items-center gap-1.5">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Refreshing latest order updates...</span>
+                        </div>
+                      )}
+
+                      {/* Status Header & 5-Stage Progress Tracker */}
+                      <div className="bg-gray-50 border border-gray-200 rounded-2xl p-3.5 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="font-black text-gray-900 text-sm">{detail.order_number}</div>
+                            <div className="text-[11px] text-gray-500">
+                              Placed on{' '}
+                              {new Date(detail.created_at).toLocaleString([], {
+                                month: 'short',
+                                day: 'numeric',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              })}
+                            </div>
+                          </div>
+                          <span className={`text-[10px] font-extrabold uppercase px-2.5 py-1 rounded-full ${meta.badgeClass}`}>
+                            {meta.label}
+                          </span>
+                        </div>
+
+                        <p className="text-[11px] font-semibold text-gray-700 bg-white border border-gray-100 rounded-xl px-3 py-2">
+                          {meta.hint}
+                        </p>
+
+                        {!isCancelled ? (
+                          <div className="grid grid-cols-5 gap-1 pt-1">
+                            {progressSteps.map(s => {
+                              const done = meta.step >= s.step;
+                              const current = meta.step === s.step;
+                              return (
+                                <div key={s.step} className="text-center space-y-1">
+                                  <div
+                                    className={`h-1.5 rounded-full transition ${
+                                      done ? 'bg-emerald-600' : 'bg-gray-200'
+                                    }`}
+                                  />
+                                  <div
+                                    className={`text-[9px] font-bold leading-tight ${
+                                      current ? 'text-emerald-800' : done ? 'text-gray-700' : 'text-gray-400'
+                                    }`}
+                                  >
+                                    {s.label}
+                                  </div>
+                                </div>
+                              );
                             })}
                           </div>
-                        </div>
-
-                        <span
-                          className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
-                            order.status === 'delivered'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : order.status === 'dispatched'
-                              ? 'bg-amber-100 text-amber-800 animate-pulse'
-                              : order.status === 'cancelled'
-                              ? 'bg-red-100 text-red-800'
-                              : 'bg-blue-100 text-blue-800'
-                          }`}
-                        >
-                          {order.status === 'dispatched' ? 'Out for Delivery 🛵' : order.status}
-                        </span>
-                      </div>
-
-                      {/* Scheduled slot & saved road distance info */}
-                      <div className="text-[11px] text-gray-600 bg-white p-2.5 rounded-xl border border-gray-100 space-y-1">
-                        <div>
-                          <span className="font-bold">Delivery Slot: </span>
-                          <span>{order.time_slot || 'Express Delivery'}</span>
-                        </div>
-                        {typeof order.distance_km === 'number' && (
-                          <div className="flex items-center justify-between text-[10px] text-emerald-800 font-semibold pt-0.5 border-t border-gray-100">
-                            <span>📍 Road Distance: {order.distance_km} km</span>
-                            <span>
-                              Delivery Fee: {order.delivery_fee === 0 ? 'FREE' : `₹${order.delivery_fee}`}
-                            </span>
+                        ) : (
+                          <div className="bg-red-50 border border-red-200 rounded-xl p-2.5 text-[11px] text-red-900 space-y-1">
+                            <div className="font-extrabold">
+                              {rejected ? 'Order Rejected by Store' : 'Order Cancelled'}
+                            </div>
+                            {detail.rejection_reason && (
+                              <div>
+                                <span className="font-bold">Reason:</span> {detail.rejection_reason}
+                              </div>
+                            )}
+                            <div className="text-red-700">Reserved items have been returned to store inventory.</div>
                           </div>
                         )}
                       </div>
 
-                      {/* CUSTOMER-ONLY DELIVERY OTP CARD */}
-                      {isDispatched && order.delivery_otp && (
+                      {/* Pickup Code or Delivery OTP */}
+                      {detail.fulfillment_type === 'pickup' && detail.pickup_code && !isCancelled && detail.status !== 'delivered' && (
+                        <div className="bg-emerald-700 text-white rounded-2xl p-3.5 shadow-sm space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="font-bold uppercase tracking-wider text-emerald-100">Store Pickup Code</span>
+                            <span className="text-[9px] bg-white/20 px-2 py-0.5 rounded-full font-semibold">Show at counter</span>
+                          </div>
+                          <div className="text-2xl font-black tracking-widest text-center py-1.5 bg-emerald-800/60 rounded-xl">
+                            {detail.pickup_code}
+                          </div>
+                        </div>
+                      )}
+
+                      {detail.status === 'dispatched' && detail.fulfillment_type !== 'pickup' && detail.delivery_otp && (
                         <div className="bg-linear-to-r from-amber-500 to-amber-600 text-white rounded-2xl p-4 shadow-md space-y-1">
                           <div className="flex items-center justify-between text-[11px]">
                             <span className="font-bold uppercase tracking-wider text-amber-100 flex items-center gap-1">
                               <ShieldCheck className="w-4 h-4" />
                               <span>Customer-Only Delivery OTP</span>
                             </span>
-                            <span className="text-[9px] bg-white/20 px-2 py-0.5 rounded-full font-semibold">
-                              Share only upon delivery
-                            </span>
+                            <span className="text-[9px] bg-white/20 px-2 py-0.5 rounded-full font-semibold">Share on delivery</span>
                           </div>
                           <div className="text-3xl font-black tracking-widest text-center py-2 bg-amber-700/40 rounded-xl my-1 border border-amber-300/30">
-                            {order.delivery_otp.split('').join('  ')}
+                            {detail.delivery_otp.split('').join('  ')}
                           </div>
                           <p className="text-[11px] text-amber-100 text-center">
-                            Give this 4-digit OTP to rider <strong className="text-white">{order.rider_name || 'Sunil'}</strong> only after receiving your package and paying ₹{order.total_amount} COD.
+                            Share this OTP only after receiving your groceries and paying ₹{detail.total_amount}.
                           </p>
                         </div>
                       )}
 
-                      {/* GOOGLE MAPS REAL-TIME GPS TRACKING COMPONENT */}
-                      {isDispatched && (
-                        <div className="pt-1">
-                          <OrderLiveTrackingMap order={order} />
-                        </div>
+                      {detail.status === 'dispatched' && !detail.store_id && detail.fulfillment_type !== 'pickup' && (
+                        <OrderLiveTrackingMap order={detail} />
                       )}
 
-                      {/* Ordered Items Snapshot (Historical Applied Slab Prices) */}
-                      {order.items && order.items.length > 0 && (
-                        <div className="bg-white p-2.5 rounded-xl border border-gray-100 space-y-1 text-[11px]">
-                          {order.items.map((oi, oIdx) => (
-                            <div key={oi.id || `oi-${oIdx}`} className="flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <span className="font-bold text-gray-800">{oi.product_name}</span>
-                                <span className="text-gray-500 ml-1">
-                                  ({oi.quantity}{oi.product_type === 'loose' ? ' kg' : ' u'} × ₹{oi.price})
-                                </span>
-                                {oi.applied_slab_label && (
-                                  <span className="ml-1 text-[9px] bg-emerald-100 text-emerald-800 px-1 py-0.2 rounded font-bold">
-                                    {oi.applied_slab_label}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="font-bold text-gray-900 shrink-0">
-                                ₹{oi.total}
-                                {Number(oi.savings || 0) > 0 && (
-                                  <span className="ml-1 text-[9px] text-emerald-700 font-bold">
-                                    (Saved ₹{oi.savings})
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          ))}
+                      {/* Store & Fulfillment Details */}
+                      <div className="bg-white border border-gray-200 rounded-2xl p-3.5 space-y-2">
+                        <div className="font-extrabold text-gray-900 flex items-center gap-1.5">
+                          <StoreIcon className="w-4 h-4 text-amber-700" />
+                          <span>{detail.store_name || 'FMP Supermart Central Store'}</span>
                         </div>
-                      )}
-
-                      {/* Summary and Cancel action */}
-                      <div className="flex items-center justify-between pt-2 border-t border-gray-100 text-xs">
-                        <div>
-                          <span className="text-gray-500">COD Total: </span>
-                          <span className="font-black text-gray-900 text-sm">₹{order.total_amount}</span>
-                          {Number(order.total_savings || 0) > 0 && (
-                            <span className="block text-[10px] text-emerald-700 font-bold">
-                              Wholesale Slab Savings: ₹{order.total_savings}
-                            </span>
-                          )}
-                          {Number(order.tip_amount) > 0 && (
-                            <span className="block text-[10px] text-amber-700 font-semibold">
-                              (Includes ₹{order.tip_amount} tip for delivery partner 💖)
-                            </span>
-                          )}
-                        </div>
-
-                        {canCancel && (
-                          <button
-                            disabled={cancellingOrderId === order.id}
-                            onClick={() => handleCancelOrder(order.id)}
-                            className="text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded-lg border border-red-200 hover:bg-red-50 text-xs cursor-pointer"
-                          >
-                            {cancellingOrderId === order.id ? 'Cancelling...' : 'Cancel Order'}
-                          </button>
+                        {detail.store_address && (
+                          <div className="text-[11px] text-gray-600">
+                            <span className="font-bold text-gray-800">Store Address:</span> {detail.store_address}
+                          </div>
                         )}
-
-                        {isDelivered && (
-                          <span className="text-emerald-700 font-bold flex items-center gap-1 text-xs">
-                            <CheckCircle2 className="w-4 h-4" />
-                            <span>Delivered & Paid</span>
+                        <div className="flex flex-wrap gap-1.5 text-[10px] font-bold">
+                          <span className="bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded-md">
+                            {detail.fulfillment_type === 'pickup' ? 'Store Pickup' : 'Home Delivery'}
                           </span>
+                          <span className="bg-gray-100 text-gray-700 px-2 py-0.5 rounded-md">
+                            {detail.time_slot || (detail.fulfillment_type === 'pickup' ? 'Store Counter' : 'Express Delivery')}
+                          </span>
+                        </div>
+                        {detail.fulfillment_type !== 'pickup' ? (
+                          <div className="pt-1.5 border-t border-gray-100 text-[11px] text-gray-600 space-y-0.5">
+                            <div>
+                              <span className="font-bold text-gray-800">Delivery Address:</span> {detail.delivery_address}
+                              {detail.landmark ? `, ${detail.landmark}` : ''}
+                            </div>
+                            {typeof detail.distance_km === 'number' && (
+                              <div className="text-emerald-800 font-semibold">
+                                Road Distance: {detail.distance_km} km
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          detail.store_delivery_info && (
+                            <div className="pt-1.5 border-t border-gray-100 text-[11px] text-gray-600">
+                              <span className="font-bold text-gray-800">Pickup Instructions:</span> {detail.store_delivery_info}
+                            </div>
+                          )
                         )}
                       </div>
+
+                      {/* Ordered Items List */}
+                      <div className="bg-white border border-gray-200 rounded-2xl p-3.5 space-y-2">
+                        <div className="font-extrabold text-gray-900 flex items-center justify-between">
+                          <span>Items ({detail.items?.length || 0})</span>
+                          <span className="text-[10px] text-gray-500 font-semibold">Saved historical prices</span>
+                        </div>
+                        {detail.items && detail.items.length > 0 ? (
+                          <div className="divide-y divide-gray-100">
+                            {detail.items.map((oi, oIdx) => (
+                              <div key={oi.id || `det-oi-${oIdx}`} className="py-2 flex items-center justify-between gap-2 text-[11px]">
+                                <div className="min-w-0">
+                                  <div className="font-bold text-gray-900 truncate">{oi.product_name}</div>
+                                  <div className="text-gray-500">
+                                    {oi.quantity} {oi.product_type === 'loose' ? 'kg' : oi.unit || 'unit'} × ₹{oi.price}
+                                  </div>
+                                  {oi.applied_slab_label && (
+                                    <span className="inline-block mt-0.5 text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded font-bold">
+                                      {oi.applied_slab_label}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <div className="font-extrabold text-gray-900">₹{oi.total}</div>
+                                  {Number(oi.savings || 0) > 0 && (
+                                    <div className="text-[9px] text-emerald-700 font-bold">Saved ₹{oi.savings}</div>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-gray-400">Item breakdown unavailable.</div>
+                        )}
+                      </div>
+
+                      {/* Bill Breakdown & Payment Status */}
+                      <div className="bg-white border border-gray-200 rounded-2xl p-3.5 space-y-1.5">
+                        <div className="font-extrabold text-gray-900 pb-1 border-b border-gray-100 flex items-center justify-between">
+                          <span>Payment & Bill Summary</span>
+                          <span
+                            className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                              isCancelled
+                                ? 'bg-red-100 text-red-700'
+                                : isPaid
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            {isCancelled ? 'Cancelled' : isPaid ? 'Paid' : 'Pending'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[11px] text-gray-600">
+                          <span>Payment Method:</span>
+                          <span className="font-bold text-gray-900">{effectivePaymentMode}</span>
+                        </div>
+                        <div className="flex justify-between text-[11px] text-gray-600">
+                          <span>Items Subtotal:</span>
+                          <span className="font-semibold text-gray-900">₹{detail.subtotal}</span>
+                        </div>
+                        <div className="flex justify-between text-[11px] text-gray-600">
+                          <span>{detail.fulfillment_type === 'pickup' ? 'Pickup Fee:' : 'Delivery Charge:'}</span>
+                          <span className="font-semibold text-gray-900">
+                            {Number(detail.delivery_fee || 0) === 0 ? 'FREE' : `₹${detail.delivery_fee}`}
+                          </span>
+                        </div>
+                        {Number(detail.handling_fee || 0) > 0 && (
+                          <div className="flex justify-between text-[11px] text-gray-600">
+                            <span>Handling Fee:</span>
+                            <span className="font-semibold text-gray-900">₹{detail.handling_fee}</span>
+                          </div>
+                        )}
+                        {Number(detail.tip_amount || 0) > 0 && (
+                          <div className="flex justify-between text-[11px] text-amber-800 font-semibold">
+                            <span>Delivery Partner Tip:</span>
+                            <span>₹{detail.tip_amount}</span>
+                          </div>
+                        )}
+                        {Number(detail.total_savings || 0) > 0 && (
+                          <div className="flex justify-between text-[11px] text-emerald-700 font-bold">
+                            <span>Wholesale Slab Savings:</span>
+                            <span>-₹{detail.total_savings}</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between font-black text-gray-900 text-sm pt-2 border-t border-gray-100">
+                          <span>Final Order Total:</span>
+                          <span className="text-emerald-700">₹{detail.total_amount}</span>
+                        </div>
+                      </div>
+
+                      {canCancelDetail && (
+                        <button
+                          type="button"
+                          disabled={cancellingOrderId === detail.id}
+                          onClick={() => setCancelConfirmOrderId(detail.id)}
+                          className="w-full py-2.5 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-xl font-extrabold text-xs cursor-pointer"
+                        >
+                          {cancellingOrderId === detail.id ? 'Cancelling Order...' : 'Cancel Order'}
+                        </button>
+                      )}
                     </div>
                   );
-                })
+                })()
+              ) : ordersLoading ? (
+                <div className="p-8 text-center text-gray-400 text-xs">Loading orders...</div>
+              ) : orders.length === 0 ? (
+                <div className="p-12 text-center text-gray-400 text-xs space-y-2">
+                  <Package className="w-12 h-12 text-gray-300 mx-auto" />
+                  <p className="font-bold text-gray-900">No Orders Placed Yet</p>
+                  <p>When you place an order, you can track its live status and view full details right here.</p>
+                </div>
+              ) : (
+                <>
+                  {/* Status Filter Tabs */}
+                  {(() => {
+                    const filterCounts = {
+                      all: orders.length,
+                      active: orders.filter(o => !['delivered', 'cancelled'].includes(o.status)).length,
+                      completed: orders.filter(o => o.status === 'delivered').length,
+                      cancelled: orders.filter(o => o.status === 'cancelled' && !isOrderRejected(o)).length,
+                      rejected: orders.filter(o => isOrderRejected(o)).length
+                    };
+                    const filteredOrders = orders.filter(o => {
+                      if (orderFilter === 'active') return !['delivered', 'cancelled'].includes(o.status);
+                      if (orderFilter === 'completed') return o.status === 'delivered';
+                      if (orderFilter === 'cancelled') return o.status === 'cancelled' && !isOrderRejected(o);
+                      if (orderFilter === 'rejected') return isOrderRejected(o);
+                      return true;
+                    });
+
+                    return (
+                      <>
+                        <div className="flex flex-wrap gap-1.5 pb-1">
+                          {(
+                            [
+                              { id: 'all', label: 'All' },
+                              { id: 'active', label: 'Active' },
+                              { id: 'completed', label: 'Completed' },
+                              { id: 'cancelled', label: 'Cancelled' },
+                              { id: 'rejected', label: 'Rejected' }
+                            ] as const
+                          ).map(tab => (
+                            <button
+                              key={tab.id}
+                              type="button"
+                              onClick={() => setOrderFilter(tab.id)}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                                orderFilter === tab.id
+                                  ? 'bg-emerald-600 text-white shadow-xs'
+                                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                              }`}
+                            >
+                              {tab.label} ({filterCounts[tab.id]})
+                            </button>
+                          ))}
+                        </div>
+
+                        {filteredOrders.length === 0 ? (
+                          <div className="p-8 text-center text-gray-400 text-xs">
+                            No orders match this filter.
+                          </div>
+                        ) : (
+                          filteredOrders.map((order, idx) => {
+                            const isDispatched = order.status === 'dispatched';
+                            const isDelivered = order.status === 'delivered';
+                            const canCancel = ['placed', 'confirmed', 'packed'].includes(order.status);
+                            const meta = getCustomerOrderStatusMeta(order);
+                            const paymentLabel =
+                              order.payment_mode || (order.fulfillment_type === 'pickup' ? 'Pay at Store' : 'COD');
+
+                            return (
+                              <div
+                                key={order.id || `order-${order.order_number || idx}`}
+                                className={`p-4 rounded-2xl border space-y-3 shadow-xs ${
+                                  isDispatched
+                                    ? 'border-amber-300 bg-amber-50/20 ring-2 ring-amber-100'
+                                    : isDelivered
+                                    ? 'border-emerald-200 bg-emerald-50/20'
+                                    : order.status === 'cancelled'
+                                    ? 'border-red-200 bg-red-50/10'
+                                    : 'border-gray-200'
+                                }`}
+                              >
+                                <div className="flex justify-between items-start text-xs gap-2">
+                                  <div>
+                                    <div className="font-extrabold text-gray-900">{order.order_number}</div>
+                                    <div className="text-[10px] text-gray-400">
+                                      {new Date(order.created_at).toLocaleString([], {
+                                        month: 'short',
+                                        day: 'numeric',
+                                        hour: '2-digit',
+                                        minute: '2-digit'
+                                      })}
+                                    </div>
+                                  </div>
+
+                                  <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full ${meta.badgeClass}`}>
+                                    {meta.label}
+                                  </span>
+                                </div>
+
+                                <div className="text-[11px] text-gray-600 font-medium">{meta.hint}</div>
+
+                                {/* Store, Fulfillment & Payment Badges */}
+                                <div className="text-[11px] text-gray-600 bg-white p-2.5 rounded-xl border border-gray-100 space-y-1">
+                                  <div className="flex flex-wrap items-center gap-1.5 pb-1 border-b border-gray-100">
+                                    {order.store_name && (
+                                      <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-900 font-bold px-2 py-0.5 rounded-md text-[10px]">
+                                        <StoreIcon className="w-3 h-3" />
+                                        <span>{order.store_name}</span>
+                                      </span>
+                                    )}
+                                    <span className="bg-emerald-50 text-emerald-800 font-bold px-2 py-0.5 rounded-md text-[10px]">
+                                      {order.fulfillment_type === 'pickup' ? 'Store Pickup' : 'Home Delivery'}
+                                    </span>
+                                    <span className="bg-gray-100 text-gray-700 font-bold px-2 py-0.5 rounded-md text-[10px]">
+                                      {paymentLabel}
+                                    </span>
+                                  </div>
+                                  <div>
+                                    <span className="font-bold">{order.fulfillment_type === 'pickup' ? 'Pickup Status: ' : 'Delivery Slot: '}</span>
+                                    <span>{order.time_slot || (order.fulfillment_type === 'pickup' ? 'Store Counter Pickup' : 'Express Delivery')}</span>
+                                  </div>
+                                  {order.fulfillment_type !== 'pickup' && typeof order.distance_km === 'number' && (
+                                    <div className="flex items-center justify-between text-[10px] text-emerald-800 font-semibold pt-0.5 border-t border-gray-100">
+                                      <span>📍 Road Distance: {order.distance_km} km</span>
+                                      <span>
+                                        Delivery Fee: {order.delivery_fee === 0 ? 'FREE' : `₹${order.delivery_fee}`}
+                                      </span>
+                                    </div>
+                                  )}
+                                  {order.rejection_reason && (
+                                    <div className="text-[10px] text-red-700 font-bold pt-0.5 border-t border-gray-100">
+                                      Reason: {order.rejection_reason}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* STORE PICKUP CODE CARD */}
+                                {order.fulfillment_type === 'pickup' && order.pickup_code && order.status !== 'cancelled' && order.status !== 'delivered' && (
+                                  <div className="bg-emerald-700 text-white rounded-2xl p-3.5 shadow-sm space-y-1">
+                                    <div className="flex items-center justify-between text-[11px]">
+                                      <span className="font-bold uppercase tracking-wider text-emerald-100">
+                                        Store Pickup Code
+                                      </span>
+                                      <span className="text-[9px] bg-white/20 px-2 py-0.5 rounded-full font-semibold">
+                                        Show at store counter
+                                      </span>
+                                    </div>
+                                    <div className="text-2xl font-black tracking-widest text-center py-1.5 bg-emerald-800/60 rounded-xl">
+                                      {order.pickup_code}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* CUSTOMER-ONLY DELIVERY OTP CARD (Central Fleet) */}
+                                {isDispatched && order.fulfillment_type !== 'pickup' && order.delivery_otp && (
+                                  <div className="bg-linear-to-r from-amber-500 to-amber-600 text-white rounded-2xl p-4 shadow-md space-y-1">
+                                    <div className="flex items-center justify-between text-[11px]">
+                                      <span className="font-bold uppercase tracking-wider text-amber-100 flex items-center gap-1">
+                                        <ShieldCheck className="w-4 h-4" />
+                                        <span>Customer-Only Delivery OTP</span>
+                                      </span>
+                                      <span className="text-[9px] bg-white/20 px-2 py-0.5 rounded-full font-semibold">
+                                        Share only upon delivery
+                                      </span>
+                                    </div>
+                                    <div className="text-3xl font-black tracking-widest text-center py-2 bg-amber-700/40 rounded-xl my-1 border border-amber-300/30">
+                                      {order.delivery_otp.split('').join('  ')}
+                                    </div>
+                                    <p className="text-[11px] text-amber-100 text-center">
+                                      Give this 4-digit OTP to rider <strong className="text-white">{order.rider_name || 'Sunil'}</strong> only after receiving your package and paying ₹{order.total_amount} COD.
+                                    </p>
+                                  </div>
+                                )}
+
+                                {/* GOOGLE MAPS REAL-TIME GPS TRACKING COMPONENT (Central Fleet) */}
+                                {isDispatched && !order.store_id && order.fulfillment_type !== 'pickup' && (
+                                  <div className="pt-1">
+                                    <OrderLiveTrackingMap order={order} />
+                                  </div>
+                                )}
+
+                                {/* Ordered Items Snapshot (Historical Applied Slab Prices) */}
+                                {order.items && order.items.length > 0 && (
+                                  <div className="bg-white p-2.5 rounded-xl border border-gray-100 space-y-1 text-[11px]">
+                                    {order.items.map((oi, oIdx) => (
+                                      <div key={oi.id || `oi-${oIdx}`} className="flex items-center justify-between gap-2">
+                                        <div className="min-w-0">
+                                          <span className="font-bold text-gray-800">{oi.product_name}</span>
+                                          <span className="text-gray-500 ml-1">
+                                            ({oi.quantity}{oi.product_type === 'loose' ? ' kg' : ' u'} × ₹{oi.price})
+                                          </span>
+                                          {oi.applied_slab_label && (
+                                            <span className="ml-1 text-[9px] bg-emerald-100 text-emerald-800 px-1 py-0.2 rounded font-bold">
+                                              {oi.applied_slab_label}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="font-bold text-gray-900 shrink-0">
+                                          ₹{oi.total}
+                                          {Number(oi.savings || 0) > 0 && (
+                                            <span className="ml-1 text-[9px] text-emerald-700 font-bold">
+                                              (Saved ₹{oi.savings})
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {/* Summary, View Details and Cancel action */}
+                                <div className="flex items-center justify-between pt-2 border-t border-gray-100 text-xs gap-2">
+                                  <div>
+                                    <span className="text-gray-500">Total: </span>
+                                    <span className="font-black text-gray-900 text-sm">₹{order.total_amount}</span>
+                                    {Number(order.total_savings || 0) > 0 && (
+                                      <span className="block text-[10px] text-emerald-700 font-bold">
+                                        Wholesale Slab Savings: ₹{order.total_savings}
+                                      </span>
+                                    )}
+                                    {Number(order.tip_amount) > 0 && (
+                                      <span className="block text-[10px] text-amber-700 font-semibold">
+                                        (Includes ₹{order.tip_amount} tip for delivery partner 💖)
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenOrderDetail(order)}
+                                      className="text-emerald-700 hover:text-emerald-800 font-bold px-2.5 py-1 rounded-lg border border-emerald-200 hover:bg-emerald-50 text-xs cursor-pointer flex items-center gap-1"
+                                    >
+                                      <FileText className="w-3.5 h-3.5" />
+                                      <span>Details</span>
+                                    </button>
+
+                                    {canCancel && (
+                                      <button
+                                        type="button"
+                                        disabled={cancellingOrderId === order.id}
+                                        onClick={() => setCancelConfirmOrderId(order.id)}
+                                        className="text-red-600 hover:text-red-700 font-semibold px-2 py-1 rounded-lg border border-red-200 hover:bg-red-50 text-xs cursor-pointer"
+                                      >
+                                        {cancellingOrderId === order.id ? 'Cancelling...' : 'Cancel'}
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </>
+                    );
+                  })()}
+                </>
               )}
             </div>
           </div>
@@ -2687,11 +4458,19 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               ) : (
                 favorites.map((fav, idx) => (
                   <div key={fav.id || `fav-${idx}`} className="py-3 flex items-center gap-3 text-xs">
-                    <img
-                      src={fav.image_url}
-                      alt={fav.name}
-                      className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
-                    />
+                    {fav.image_url && !brokenImages[`prod-${fav.id}`] ? (
+                      <img
+                        src={fav.image_url}
+                        alt={fav.name}
+                        referrerPolicy="no-referrer"
+                        onError={() => setBrokenImages(prev => ({ ...prev, [`prod-${fav.id}`]: true }))}
+                        className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-xl bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center text-gray-400">
+                        <Package className="w-5 h-5" />
+                      </div>
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="font-bold text-gray-900 truncate">{fav.name}</div>
                       <div className="text-gray-500 text-[11px]">{fav.unit}</div>
@@ -2709,6 +4488,134 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 ))
               )}
             </div>
+          </div>
+        </div>
+      )}
+      {/* ======================================================== */}
+      {/* CANCEL ORDER CONFIRMATION MODAL */}
+      {/* ======================================================== */}
+      {cancelConfirmOrderId !== null && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-gray-100 space-y-3">
+            <h3 className="font-extrabold text-gray-900 text-base">Cancel this order?</h3>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              All reserved grocery items will be returned to store stock immediately.
+            </p>
+
+            <div className="space-y-2">
+              <div className="text-[11px] font-bold text-gray-700">Reason for cancellation:</div>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  'Ordered by mistake',
+                  'Need to change items',
+                  'Delivery address changed',
+                  'Store taking too long'
+                ].map(chip => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => setCancelReasonInput(chip)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border cursor-pointer transition ${
+                      cancelReasonInput === chip
+                        ? 'bg-red-50 border-red-300 text-red-700'
+                        : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="text"
+                value={cancelReasonInput}
+                onChange={e => setCancelReasonInput(e.target.value)}
+                placeholder="Optional cancellation note..."
+                className="w-full p-2 bg-gray-50 border border-gray-200 rounded-xl text-xs"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setCancelConfirmOrderId(null);
+                  setCancelReasonInput('Cancelled by customer');
+                }}
+                className="flex-1 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Keep Order
+              </button>
+              <button
+                type="button"
+                onClick={() => executeCancelOrder(cancelConfirmOrderId)}
+                className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-extrabold cursor-pointer"
+              >
+                Yes, Cancel Order
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* AREA / LOCATION PICKER MODAL */}
+      {/* ======================================================== */}
+      {isLocationModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-md w-full p-5 shadow-2xl border border-gray-100 space-y-3 my-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <MapPin className="w-5 h-5 text-emerald-600" />
+                <h3 className="font-extrabold text-gray-900 text-base">Select Your Area</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsLocationModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Search your neighborhood, landmark, or tap GPS to sort nearby kirana stores by distance.
+            </p>
+            <OsmMapPicker
+              lat={customerLat}
+              lng={customerLng}
+              pinColor="emerald"
+              pinLabel="Your Area"
+              heightClass="h-56"
+              isLocationConfirmed={hasUserMovedPin}
+              onChange={(newLat, newLng, displayAddress, meta) => {
+                setHasUserMovedPin(true);
+                setCustomerLat(newLat);
+                setCustomerLng(newLng);
+                setLocationStatus(meta?.source === 'gps' ? 'gps_detected' : 'manual');
+                setLocationNotice(null);
+                if (displayAddress && displayAddress.trim()) {
+                  const cleaned = displayAddress
+                    .split(',')
+                    .map(s => s.trim())
+                    .filter(Boolean)
+                    .slice(0, 4)
+                    .join(', ');
+                  if (cleaned) {
+                    setDeliveryAddress(cleaned);
+                    setAreaLabel(cleaned.split(',')[0] || 'Karanja Lad');
+                  }
+                }
+                if (meta?.landmark && meta.landmark.trim()) {
+                  setLandmark(meta.landmark.trim());
+                }
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => setIsLocationModalOpen(false)}
+              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-xs cursor-pointer"
+            >
+              Confirm Location
+            </button>
           </div>
         </div>
       )}
