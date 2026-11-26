@@ -74,7 +74,7 @@ export interface StoreOwnerStats {
   total_revenue: number;
 }
 
-export type ComplaintStatus = 'open' | 'in_review' | 'resolved';
+export type ComplaintStatus = 'open' | 'in_review' | 'resolved' | 'rejected';
 
 export interface Complaint {
   id: number;
@@ -86,6 +86,8 @@ export interface Complaint {
   store_name?: string | null;
   order_id?: number | null;
   order_number?: string | null;
+  product_id?: number | null;
+  product_name?: string | null;
   subject: string;
   description: string;
   status: ComplaintStatus;
@@ -286,6 +288,24 @@ export interface NotificationItem {
   created_at: string;
 }
 
+export interface AdminPlatformOverview {
+  total_customers: number;
+  total_stores: number;
+  approved_stores: number;
+  pending_stores: number;
+  rejected_stores: number;
+  suspended_stores: number;
+  total_products: number;
+  active_products: number;
+  total_orders: number;
+  pending_orders: number;
+  dispatched_orders: number;
+  completed_orders: number;
+  cancelled_orders: number;
+  total_complaints: number;
+  open_complaints: number;
+}
+
 export interface AdminStats {
   orders: {
     total_orders: number;
@@ -305,8 +325,40 @@ export interface AdminStats {
     low_stock: number;
     total_units_in_stock: number;
   };
+  platform?: AdminPlatformOverview;
   lowStockItems: Product[];
   recentOrders: Order[];
+}
+
+export interface PlatformSettings {
+  platform_name: string;
+  support_phone: string;
+  support_email: string;
+  city: string;
+  require_store_approval: boolean;
+  store_visibility_rule: 'approved_active_valid_location' | 'approved_active_open_only';
+  service_available: boolean;
+  maintenance_message: string;
+  // Future monetization architecture flags (strictly disabled during initial free launch)
+  monetization_enabled: boolean;
+  subscriptions_enabled: boolean;
+  featured_stores_enabled: boolean;
+  store_ads_enabled: boolean;
+  admob_enabled: boolean;
+  adsense_enabled: boolean;
+  updated_at?: string;
+}
+
+export interface AuditLogEntry {
+  id: number;
+  user_id: number | null;
+  user_role: string | null;
+  action: string;
+  entity: string;
+  entity_id: string | null;
+  details: string;
+  ip_address?: string;
+  created_at: string;
 }
 
 export interface RiderSummary {

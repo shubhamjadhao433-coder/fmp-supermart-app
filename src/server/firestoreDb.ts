@@ -337,9 +337,11 @@ export interface ComplaintDoc {
   store_name?: string | null;
   order_id?: number | null;
   order_number?: string | null;
+  product_id?: number | null;
+  product_name?: string | null;
   subject: string;
   description: string;
-  status: 'open' | 'in_review' | 'resolved';
+  status: 'open' | 'in_review' | 'resolved' | 'rejected';
   admin_notes?: string | null;
   created_at: string;
   resolved_at?: string | null;
@@ -610,6 +612,12 @@ export const productsRepo = {
     const updated = { ...snap.data(), ...data, updated_at: new Date().toISOString() };
     await setDoc(ref, updated, { merge: true });
     return updated as ProductDoc;
+  },
+
+  async isProductReferencedInOrders(id: number): Promise<boolean> {
+    const q = query(collection(firestoreDb, 'order_items'), where('product_id', '==', id), limit(1));
+    const snap = await getDocs(q);
+    return !snap.empty;
   },
 
   async softDelete(id: number): Promise<boolean> {
@@ -1624,8 +1632,83 @@ export const settingsRepo = {
     };
     await setDoc(ref, updated);
     return updated;
+  },
+
+  async getPlatformSettings(): Promise<PlatformSettingsDoc> {
+    const ref = doc(firestoreDb, 'settings', 'platform_config');
+    const snap = await getDoc(ref);
+    const defaults: PlatformSettingsDoc = {
+      platform_name: 'FMP Supermart',
+      support_phone: '9699925206',
+      support_email: 'support@fmpsupermart.in',
+      city: 'Karanja Lad, Maharashtra 444105',
+      require_store_approval: true,
+      store_visibility_rule: 'approved_active_valid_location',
+      service_available: true,
+      maintenance_message: '',
+      monetization_enabled: false,
+      subscriptions_enabled: false,
+      featured_stores_enabled: false,
+      store_ads_enabled: false,
+      admob_enabled: false,
+      adsense_enabled: false,
+      updated_at: new Date().toISOString()
+    };
+
+    if (!snap.exists()) {
+      await setDoc(ref, defaults);
+      return defaults;
+    }
+
+    const existing = snap.data() as Partial<PlatformSettingsDoc>;
+    return {
+      ...defaults,
+      ...existing,
+      require_store_approval: existing.require_store_approval !== false,
+      store_visibility_rule:
+        existing.store_visibility_rule === 'approved_active_open_only'
+          ? 'approved_active_open_only'
+          : 'approved_active_valid_location',
+      service_available: existing.service_available !== false,
+      monetization_enabled: Boolean(existing.monetization_enabled),
+      subscriptions_enabled: Boolean(existing.subscriptions_enabled),
+      featured_stores_enabled: Boolean(existing.featured_stores_enabled),
+      store_ads_enabled: Boolean(existing.store_ads_enabled),
+      admob_enabled: Boolean(existing.admob_enabled),
+      adsense_enabled: Boolean(existing.adsense_enabled)
+    };
+  },
+
+  async updatePlatformSettings(data: Partial<PlatformSettingsDoc>): Promise<PlatformSettingsDoc> {
+    const ref = doc(firestoreDb, 'settings', 'platform_config');
+    const current = await this.getPlatformSettings();
+    const updated: PlatformSettingsDoc = {
+      ...current,
+      ...data,
+      updated_at: new Date().toISOString()
+    };
+    await setDoc(ref, updated, { merge: true });
+    return updated;
   }
 };
+
+export interface PlatformSettingsDoc {
+  platform_name: string;
+  support_phone: string;
+  support_email: string;
+  city: string;
+  require_store_approval: boolean;
+  store_visibility_rule: 'approved_active_valid_location' | 'approved_active_open_only';
+  service_available: boolean;
+  maintenance_message: string;
+  monetization_enabled: boolean;
+  subscriptions_enabled: boolean;
+  featured_stores_enabled: boolean;
+  store_ads_enabled: boolean;
+  admob_enabled: boolean;
+  adsense_enabled: boolean;
+  updated_at: string;
+}
 
 // ----------------------------------------------------
 // DELIVERY SLOTS REPOSITORY
@@ -2387,8 +2470,9 @@ export async function seedFirestoreIfEmpty(): Promise<void> {
     }
   }
 
-  // 4. Ensure Delivery Settings
+  // 4. Ensure Delivery Settings & Platform Settings
   await settingsRepo.getDeliverySettings();
+  await settingsRepo.getPlatformSettings();
 
   // 5. Ensure Delivery Slots
   const existingSlots = await deliverySlotsRepo.list();

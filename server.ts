@@ -230,9 +230,32 @@ function formatTime12h(hhmm: string): string {
   return `${String(h).padStart(2, '0')}:${mins} ${ampm}`;
 }
 
+function maskPhone(rawPhone?: string | null): string {
+  const digits = String(rawPhone || '').replace(/\D/g, '');
+  if (digits.length < 4) return '****';
+  return `${digits.slice(0, 2)}${'*'.repeat(Math.max(4, digits.length - 4))}${digits.slice(-2)}`;
+}
+
+function maskAddress(rawAddress?: string | null): string {
+  const addr = String(rawAddress || '').trim();
+  if (!addr) return '';
+  if (addr.length <= 12) return `${addr.slice(0, 4)}****`;
+  const parts = addr.split(',').map(p => p.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    return `***, ${parts.slice(-2).join(', ')}`;
+  }
+  return `${addr.slice(0, 6)}...${addr.slice(-6)}`;
+}
+
 app.post('/api/auth/register', async (req: Request, res: Response) => {
   try {
     const { phone, name, email, password, address, landmark, pincode, role } = req.body;
+
+    if (role !== undefined && ['admin', 'super_admin', 'superadmin'].includes(String(role).trim().toLowerCase())) {
+      return res.status(403).json({
+        error: 'Forbidden: Admin accounts cannot be created through public registration.'
+      });
+    }
 
     const cleanPhone = normalizePhone(phone);
     const cleanPassword = typeof password === 'string' ? password.trim() : '';
@@ -478,6 +501,16 @@ app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) 
 
 app.put('/api/auth/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    if (
+      req.body.role !== undefined ||
+      req.body.is_active !== undefined ||
+      req.body.store_id !== undefined
+    ) {
+      return res.status(403).json({
+        error: 'Forbidden: Account role, store ownership, and active status cannot be modified via profile editing.'
+      });
+    }
+
     const { name, address, landmark, email } = req.body;
     const updatedUser = await usersRepo.update(req.user!.id, {
       ...(name ? { name: name.trim() } : {}),
@@ -490,8 +523,9 @@ app.put('/api/auth/profile', requireAuth, async (req: AuthenticatedRequest, res:
       return res.status(404).json({ error: 'User not found.' });
     }
 
+    const { password_hash: _pw, ...safeUser } = updatedUser;
     await logAudit(req.user!.id, req.user!.role, 'PROFILE_UPDATED', 'users', req.user!.id, `User updated profile information`);
-    res.json({ message: 'Profile updated successfully', user: updatedUser });
+    res.json({ message: 'Profile updated successfully', user: safeUser });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -589,6 +623,95 @@ app.get(['/api/settings/delivery', '/api/admin/settings/delivery'], async (req: 
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Public minimal platform status (NEVER exposes monetization flags)
+app.get('/api/settings/platform', async (req: Request, res: Response) => {
+  try {
+    const settings = await settingsRepo.getPlatformSettings();
+    res.json({
+      platform_name: settings.platform_name,
+      support_phone: settings.support_phone,
+      support_email: settings.support_email,
+      city: settings.city,
+      service_available: settings.service_available,
+      maintenance_message: settings.maintenance_message
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin-only full Platform Settings & Future Monetization Architecture controls
+app.get('/api/admin/settings/platform', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const settings = await settingsRepo.getPlatformSettings();
+    res.json(settings);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/settings/platform', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const {
+      platform_name,
+      support_phone,
+      support_email,
+      city,
+      require_store_approval,
+      store_visibility_rule,
+      service_available,
+      maintenance_message,
+      monetization_enabled,
+      subscriptions_enabled,
+      featured_stores_enabled,
+      store_ads_enabled,
+      admob_enabled,
+      adsense_enabled
+    } = req.body;
+
+    if (
+      store_visibility_rule !== undefined &&
+      !['approved_active_valid_location', 'approved_active_open_only'].includes(store_visibility_rule)
+    ) {
+      return res.status(400).json({ error: 'Invalid store visibility rule.' });
+    }
+
+    const updated = await settingsRepo.updatePlatformSettings({
+      ...(platform_name !== undefined && String(platform_name).trim()
+        ? { platform_name: String(platform_name).trim().slice(0, 80) }
+        : {}),
+      ...(support_phone !== undefined ? { support_phone: String(support_phone).trim().slice(0, 20) } : {}),
+      ...(support_email !== undefined ? { support_email: String(support_email).trim().slice(0, 120) } : {}),
+      ...(city !== undefined && String(city).trim() ? { city: String(city).trim().slice(0, 120) } : {}),
+      ...(require_store_approval !== undefined ? { require_store_approval: Boolean(require_store_approval) } : {}),
+      ...(store_visibility_rule !== undefined ? { store_visibility_rule } : {}),
+      ...(service_available !== undefined ? { service_available: Boolean(service_available) } : {}),
+      ...(maintenance_message !== undefined
+        ? { maintenance_message: String(maintenance_message).trim().slice(0, 300) }
+        : {}),
+      ...(monetization_enabled !== undefined ? { monetization_enabled: Boolean(monetization_enabled) } : {}),
+      ...(subscriptions_enabled !== undefined ? { subscriptions_enabled: Boolean(subscriptions_enabled) } : {}),
+      ...(featured_stores_enabled !== undefined ? { featured_stores_enabled: Boolean(featured_stores_enabled) } : {}),
+      ...(store_ads_enabled !== undefined ? { store_ads_enabled: Boolean(store_ads_enabled) } : {}),
+      ...(admob_enabled !== undefined ? { admob_enabled: Boolean(admob_enabled) } : {}),
+      ...(adsense_enabled !== undefined ? { adsense_enabled: Boolean(adsense_enabled) } : {})
+    });
+
+    await logAudit(
+      req.user!.id,
+      'admin',
+      'PLATFORM_SETTINGS_UPDATED',
+      'settings',
+      'platform_config',
+      `Updated platform settings: service_available=${updated.service_available}, require_approval=${updated.require_store_approval}, visibility=${updated.store_visibility_rule}, monetization=${updated.monetization_enabled}`
+    );
+
+    res.json({ message: 'Platform settings updated successfully.', settings: updated });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -1200,13 +1323,28 @@ app.put('/api/products/:id', requireAuth, requireRole(['admin']), async (req: Au
 app.delete('/api/products/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
+    const referencedInOrders = await productsRepo.isProductReferencedInOrders(id);
     const ok = await productsRepo.softDelete(id);
     if (!ok) {
       return res.status(404).json({ error: 'Product not found.' });
     }
 
-    await logAudit(req.user!.id, 'admin', 'PRODUCT_DELETED', 'products', id, `Deactivated product #${id}`);
-    res.json({ message: 'Product removed successfully.' });
+    await logAudit(
+      req.user!.id,
+      'admin',
+      'PRODUCT_DELETED',
+      'products',
+      id,
+      referencedInOrders
+        ? `Soft-deactivated product #${id} (preserved historical order references)`
+        : `Deactivated product #${id}`
+    );
+    res.json({
+      message: referencedInOrders
+        ? 'Product is referenced in past orders and was safely deactivated without affecting historical orders.'
+        : 'Product removed successfully.',
+      referenced_in_orders: referencedInOrders
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1257,6 +1395,15 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Your cart is empty. Please add items to checkout.' });
+    }
+
+    const platformSettings = await settingsRepo.getPlatformSettings();
+    if (platformSettings.service_available === false) {
+      return res.status(503).json({
+        error:
+          platformSettings.maintenance_message ||
+          'Platform ordering is temporarily paused by administrator. Please try again shortly.'
+      });
     }
 
     if (payment_mode !== undefined && !['COD', 'Pay at Store'].includes(payment_mode)) {
@@ -1806,8 +1953,13 @@ app.post('/api/orders/:id/dispatch', requireAuth, requireRole(['admin']), async 
 // Admin Dashboard Analytics & Statistics
 app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const orders = await ordersRepo.list();
-    const products = await productsRepo.list();
+    const [orders, allProducts, stores, customers, complaints] = await Promise.all([
+      ordersRepo.list(),
+      productsRepo.list({ includeInactive: true, includeWholesale: true }),
+      storesRepo.listAll(),
+      usersRepo.listCustomers(),
+      complaintsRepo.listAll()
+    ]);
 
     const placedCount = orders.filter(o => o.status === 'placed').length;
     const confirmedCount = orders.filter(o => o.status === 'confirmed').length;
@@ -1822,7 +1974,7 @@ app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: Aut
       .filter(o => o.cod_collected === true && !o.cod_reconciled)
       .reduce((sum, o) => sum + Number(o.total_amount), 0);
 
-    const activeProducts = products.filter(p => p.is_active !== false);
+    const activeProducts = allProducts.filter(p => p.is_active !== false && !p.is_deleted);
     const outOfStock = activeProducts.filter(p => p.stock === 0).length;
     const lowStock = activeProducts.filter(p => p.stock > 0 && p.stock <= 10).length;
     const totalUnits = activeProducts.reduce((sum, p) => sum + Number(p.stock), 0);
@@ -1833,6 +1985,13 @@ app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: Aut
       .slice(0, 10);
 
     const recentOrders = orders.slice(0, 8);
+
+    const approvedStores = stores.filter(s => s.approval_status === 'approved').length;
+    const pendingStores = stores.filter(s => s.approval_status === 'pending').length;
+    const rejectedStores = stores.filter(s => s.approval_status === 'rejected').length;
+    const suspendedStores = stores.filter(s => s.approval_status === 'approved' && s.is_active === false).length;
+    const pendingOrdersCount = placedCount + confirmedCount + packedCount;
+    const openComplaintsCount = complaints.filter(c => c.status === 'open' || c.status === 'in_review').length;
 
     res.json({
       orders: {
@@ -1852,6 +2011,23 @@ app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: Aut
         out_of_stock: outOfStock,
         low_stock: lowStock,
         total_units_in_stock: totalUnits
+      },
+      platform: {
+        total_customers: customers.length,
+        total_stores: stores.length,
+        approved_stores: approvedStores,
+        pending_stores: pendingStores,
+        rejected_stores: rejectedStores,
+        suspended_stores: suspendedStores,
+        total_products: allProducts.length,
+        active_products: activeProducts.length,
+        total_orders: orders.length,
+        pending_orders: pendingOrdersCount,
+        dispatched_orders: dispatchedCount,
+        completed_orders: deliveredCount,
+        cancelled_orders: cancelledCount,
+        total_complaints: complaints.length,
+        open_complaints: openComplaintsCount
       },
       lowStockItems,
       recentOrders
@@ -1907,7 +2083,9 @@ app.get('/api/admin/reports', requireAuth, requireRole(['admin']), async (req: A
 // Audit Logs
 app.get('/api/admin/audit-logs', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const logs = await auditLogsRepo.list(50);
+    const requestedLimit = Number(req.query.limit) || 100;
+    const safeLimit = Math.min(200, Math.max(10, requestedLimit));
+    const logs = await auditLogsRepo.list(safeLimit);
     res.json(logs);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -2454,9 +2632,14 @@ app.get('/api/stores/nearby', async (req: Request, res: Response) => {
     const refLat = isValidCoordinate(qLat, qLng) ? qLat : DEFAULT_WAREHOUSE_LAT;
     const refLng = isValidCoordinate(qLat, qLng) ? qLng : DEFAULT_WAREHOUSE_LNG;
 
-    const approvedStores = (await storesRepo.listApprovedActive()).filter(
-      st => isValidCoordinate(st.lat, st.lng) && Boolean(st.address && st.address.trim())
-    );
+    const platformSettings = await settingsRepo.getPlatformSettings();
+    const approvedStores = (await storesRepo.listApprovedActive()).filter(st => {
+      if (!isValidCoordinate(st.lat, st.lng) || !st.address?.trim()) return false;
+      if (platformSettings.store_visibility_rule === 'approved_active_open_only' && st.is_open === false) {
+        return false;
+      }
+      return true;
+    });
     const allProducts = await productsRepo.list({ includeWholesale: false });
 
     const productCountMap: Record<number, number> = {};
@@ -3192,7 +3375,7 @@ app.put('/api/store-owner/orders/:id/status', requireAuth, requireRole(['store_o
 // ----------------------------------------------------
 app.post('/api/complaints', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { subject, description, store_id, order_id } = req.body;
+    const { subject, description, store_id, order_id, product_id } = req.body;
     if (!subject?.trim() || !description?.trim()) {
       return res.status(400).json({ error: 'Subject and problem description are required.' });
     }
@@ -3209,6 +3392,12 @@ app.post('/api/complaints', requireAuth, async (req: AuthenticatedRequest, res: 
       orderNumber = order?.order_number || null;
     }
 
+    let productName: string | null = null;
+    if (product_id) {
+      const prod = await productsRepo.findById(Number(product_id));
+      productName = prod?.name || null;
+    }
+
     const complaint = await complaintsRepo.create({
       reporter_id: req.user!.id,
       reporter_name: req.user!.name,
@@ -3218,6 +3407,8 @@ app.post('/api/complaints', requireAuth, async (req: AuthenticatedRequest, res: 
       store_name: storeName,
       order_id: order_id ? Number(order_id) : null,
       order_number: orderNumber,
+      product_id: product_id ? Number(product_id) : null,
+      product_name: productName,
       subject: String(subject).trim(),
       description: String(description).trim(),
       status: 'open',
@@ -3281,6 +3472,40 @@ app.get('/api/admin/stores', requireAuth, requireRole(['admin']), async (req: Au
   }
 });
 
+app.get('/api/admin/stores/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const store = await storesRepo.findById(id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+
+    const [products, orders, itemsMap, allComplaints] = await Promise.all([
+      productsRepo.list({ store_id: id, includeInactive: true, includeWholesale: false }),
+      ordersRepo.list({ store_id: id }),
+      ordersRepo.listItemsMap(),
+      complaintsRepo.listAll()
+    ]);
+
+    const enrichedOrders = orders.map(o => ({
+      ...o,
+      items: itemsMap.get(o.id) || []
+    }));
+    const storeComplaints = allComplaints.filter(c => c.store_id === id);
+
+    res.json({
+      store: {
+        ...store,
+        product_count: products.length,
+        order_count: orders.length
+      },
+      products,
+      orders: enrichedOrders,
+      complaints: storeComplaints
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.put('/api/admin/stores/:id/approval', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -3322,6 +3547,10 @@ app.put('/api/admin/stores/:id/status', requireAuth, requireRole(['admin']), asy
     const existing = await storesRepo.findById(id);
     if (!existing) return res.status(404).json({ error: 'Store not found.' });
 
+    if (Boolean(is_active) && existing.approval_status !== 'approved') {
+      return res.status(400).json({ error: 'Only approved stores can be activated.' });
+    }
+
     const updated = await storesRepo.update(id, { is_active: Boolean(is_active) });
     await notificationsRepo.create({
       user_id: existing.owner_id,
@@ -3356,11 +3585,68 @@ app.get('/api/admin/customers', requireAuth, requireRole(['admin']), async (req:
 
     res.json(
       customers.map(({ password_hash: _pw, ...safeUser }) => ({
-        ...safeUser,
+        id: safeUser.id,
+        name: safeUser.name,
+        role: safeUser.role,
+        phone: maskPhone(safeUser.phone),
+        masked_phone: maskPhone(safeUser.phone),
+        address: maskAddress(safeUser.address),
+        masked_address: maskAddress(safeUser.address),
+        city: safeUser.city,
+        pincode: safeUser.pincode,
+        is_active: safeUser.is_active,
+        created_at: safeUser.created_at,
         order_count: statsByCustomer[safeUser.id]?.orders || 0,
         total_spent: Math.round((statsByCustomer[safeUser.id]?.total_spent || 0) * 100) / 100
       }))
     );
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/customers/:id/orders', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const customer = await usersRepo.findById(id);
+    if (!customer || customer.role !== 'customer') {
+      return res.status(404).json({ error: 'Customer not found.' });
+    }
+
+    const [orders, itemsMap, allComplaints] = await Promise.all([
+      ordersRepo.list({ customer_id: id }),
+      ordersRepo.listItemsMap(),
+      complaintsRepo.listByReporter(id)
+    ]);
+
+    const totalSpent = orders
+      .filter(o => o.status !== 'cancelled')
+      .reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+
+    res.json({
+      customer: {
+        id: customer.id,
+        name: customer.name,
+        role: customer.role,
+        phone: maskPhone(customer.phone),
+        masked_phone: maskPhone(customer.phone),
+        address: maskAddress(customer.address),
+        masked_address: maskAddress(customer.address),
+        city: customer.city,
+        pincode: customer.pincode,
+        is_active: customer.is_active,
+        created_at: customer.created_at,
+        order_count: orders.length,
+        total_spent: Math.round(totalSpent * 100) / 100
+      },
+      orders: orders.map(o => ({
+        ...o,
+        customer_phone: maskPhone(o.customer_phone),
+        delivery_otp: undefined,
+        items: itemsMap.get(o.id) || []
+      })),
+      complaints: allComplaints
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -3376,9 +3662,19 @@ app.put('/api/admin/customers/:id/status', requireAuth, requireRole(['admin']), 
     }
     const updated = await usersRepo.update(id, { is_active: Boolean(is_active) });
     if (!updated) return res.status(404).json({ error: 'Customer not found.' });
-    const { password_hash: _pw, ...safe } = updated;
     await logAudit(req.user!.id, 'admin', 'CUSTOMER_STATUS_UPDATED', 'users', id, `Customer ${customer.name} is_active=${Boolean(is_active)}`);
-    res.json(safe);
+    res.json({
+      id: updated.id,
+      name: updated.name,
+      role: updated.role,
+      phone: maskPhone(updated.phone),
+      masked_phone: maskPhone(updated.phone),
+      address: maskAddress(updated.address),
+      city: updated.city,
+      pincode: updated.pincode,
+      is_active: updated.is_active,
+      created_at: updated.created_at
+    });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -3420,6 +3716,9 @@ app.post('/api/admin/categories', requireAuth, requireRole(['admin']), async (re
 app.put('/api/admin/categories/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
+    const existing = await categoriesRepo.findById(id);
+    if (!existing) return res.status(404).json({ error: 'Category not found.' });
+
     const { name, description, image_url, display_order, is_active } = req.body;
     const cleanImg = image_url !== undefined ? (image_url ? sanitizeImageValue(image_url) : '') : undefined;
     const updated = await categoriesRepo.update(id, {
@@ -3430,7 +3729,13 @@ app.put('/api/admin/categories/:id', requireAuth, requireRole(['admin']), async 
       ...(is_active !== undefined ? { is_active: Boolean(is_active) } : {})
     });
     if (!updated) return res.status(404).json({ error: 'Category not found.' });
-    await logAudit(req.user!.id, 'admin', 'CATEGORY_UPDATED', 'categories', id, `Updated category ${updated.name}`);
+    const actionName =
+      is_active !== undefined && Boolean(is_active) !== (existing.is_active !== false)
+        ? Boolean(is_active)
+          ? 'CATEGORY_ACTIVATED'
+          : 'CATEGORY_DEACTIVATED'
+        : 'CATEGORY_UPDATED';
+    await logAudit(req.user!.id, 'admin', actionName, 'categories', id, `Updated category ${updated.name} (active=${updated.is_active !== false})`);
     res.json(updated);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -3440,6 +3745,12 @@ app.put('/api/admin/categories/:id', requireAuth, requireRole(['admin']), async 
 app.delete('/api/admin/categories/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
+    const allProducts = await productsRepo.list({ includeInactive: true, includeWholesale: true });
+    if (allProducts.some(p => Number(p.category_id) === id)) {
+      return res.status(400).json({
+        error: 'Cannot delete a category linked to existing products. Deactivate it instead so existing products remain intact.'
+      });
+    }
     const ok = await categoriesRepo.remove(id);
     if (!ok) return res.status(404).json({ error: 'Category not found.' });
     await logAudit(req.user!.id, 'admin', 'CATEGORY_DELETED', 'categories', id, `Deleted category #${id}`);
@@ -3462,13 +3773,13 @@ app.put('/api/admin/complaints/:id', requireAuth, requireRole(['admin']), async 
   try {
     const id = parseInt(req.params.id, 10);
     const { status, admin_notes } = req.body;
-    if (!['open', 'in_review', 'resolved'].includes(status)) {
+    if (!['open', 'in_review', 'resolved', 'rejected'].includes(status)) {
       return res.status(400).json({ error: 'Invalid complaint status.' });
     }
     const updated = await complaintsRepo.update(id, {
       status,
       ...(admin_notes !== undefined ? { admin_notes: String(admin_notes).trim() } : {}),
-      resolved_at: status === 'resolved' ? new Date().toISOString() : null
+      resolved_at: status === 'resolved' || status === 'rejected' ? new Date().toISOString() : null
     });
     if (!updated) return res.status(404).json({ error: 'Complaint not found.' });
 

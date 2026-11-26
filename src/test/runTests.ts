@@ -2575,6 +2575,397 @@ async function main() {
       }
     });
 
+    // 44. ADMIN AUTHENTICATION & STRICT BACKEND RBAC ENFORCEMENT
+    await test('Admin RBAC Enforcement: Block non-admins on Admin routes and block role self-promotion', async () => {
+      // Unauthenticated -> 401
+      const unauthRes = await fetch(`${baseUrl}/api/admin/stats`);
+      assert.strictEqual(unauthRes.status, 401);
+
+      // Customer -> 403 on all sensitive admin routes
+      for (const path of [
+        '/api/admin/stats',
+        '/api/admin/stores',
+        '/api/admin/customers',
+        '/api/admin/settings/platform',
+        '/api/admin/audit-logs'
+      ]) {
+        const custRes = await fetch(`${baseUrl}${path}`, {
+          headers: { Authorization: `Bearer ${testCustomerToken}` }
+        });
+        assert.strictEqual(custRes.status, 403, `Customer must receive 403 on ${path}`);
+
+        const riderRes = await fetch(`${baseUrl}${path}`, {
+          headers: { Authorization: `Bearer ${riderToken}` }
+        });
+        assert.strictEqual(riderRes.status, 403, `Rider must receive 403 on ${path}`);
+      }
+
+      // Registration role tampering -> 403
+      const hijackReg = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: `989${Math.floor(1000000 + Math.random() * 9000000)}`,
+          name: 'Fake Admin',
+          password: 'Password@123',
+          role: 'admin'
+        })
+      });
+      assert.strictEqual(hijackReg.status, 403, 'Registration must reject role="admin"');
+
+      // Profile edit role tampering -> 403
+      const hijackProf = await fetch(`${baseUrl}/api/auth/profile`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+        body: JSON.stringify({ role: 'admin' })
+      });
+      assert.strictEqual(hijackProf.status, 403, 'Profile update must reject role escalation');
+    });
+
+    // 45. ADMIN OVERVIEW METRICS, STORE DETAILS, APPROVAL & SUSPENSION RULES
+    const admStorePhone = `986${Math.floor(1000000 + Math.random() * 9000000)}`;
+    let admTestStoreId = 0;
+    let admStoreOwnerToken = '';
+    let admStoreProdId = 0;
+    let admStoreOrderId = 0;
+
+    await test('Admin Overview 12 Metrics, Store Inspection (GET /api/admin/stores/:id), Activation Guard & Suspension Preservation', async () => {
+      try {
+        const reg = await fetch(`${baseUrl}/api/stores/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            owner_name: 'Admin Inspect Kirana Owner',
+            phone: admStorePhone,
+            password: 'StorePass@123',
+            store_name: 'Shree Ganesh Admin Inspect Store',
+            address: 'Tilak Chowk, Karanja Lad',
+            lat: 20.4841,
+            lng: 77.4881,
+            opening_hours: '08:00 AM - 09:00 PM',
+            service_type: 'both',
+            delivery_radius_km: 5,
+            delivery_fee: 10
+          })
+        });
+        assert.strictEqual(reg.status, 201);
+        const regData = await reg.json();
+        admTestStoreId = regData.store.id;
+        admStoreOwnerToken = regData.token;
+
+        // Overview stats include all 12 core platform fields
+        const statsRes = await fetch(`${baseUrl}/api/admin/stats`, {
+          headers: { Authorization: `Bearer ${adminToken}` }
+        });
+        assert.strictEqual(statsRes.status, 200);
+        const statsData = await statsRes.json();
+        assert.ok(statsData.platform, 'stats.platform must be present');
+        for (const k of [
+          'total_customers',
+          'total_stores',
+          'approved_stores',
+          'pending_stores',
+          'rejected_stores',
+          'suspended_stores',
+          'total_products',
+          'active_products',
+          'total_orders',
+          'pending_orders',
+          'completed_orders',
+          'cancelled_orders'
+        ]) {
+          assert.strictEqual(typeof statsData.platform[k], 'number', `stats.platform.${k} must be numeric`);
+        }
+
+        // Cannot activate non-approved pending store -> 400
+        const badActivate = await fetch(`${baseUrl}/api/admin/stores/${admTestStoreId}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ is_active: true })
+        });
+        assert.strictEqual(badActivate.status, 400, 'Admin cannot activate a pending store without approving it first');
+
+        // Approve store
+        const appRes = await fetch(`${baseUrl}/api/admin/stores/${admTestStoreId}/approval`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ approval_status: 'approved' })
+        });
+        assert.strictEqual(appRes.status, 200);
+
+        // Owner adds product & customer places an order
+        const pRes = await fetch(`${baseUrl}/api/store-owner/products`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${admStoreOwnerToken}` },
+          body: JSON.stringify({ category_id: 1, name: 'Admin Inspect Moong Dal', unit: '1 kg', price: 125, stock: 10 })
+        });
+        assert.strictEqual(pRes.status, 201);
+        admStoreProdId = (await pRes.json()).id;
+
+        const oRes = await fetch(`${baseUrl}/api/orders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+          body: JSON.stringify({
+            store_id: admTestStoreId,
+            fulfillment_type: 'pickup',
+            payment_mode: 'Pay at Store',
+            customer_phone: uniquePhone,
+            items: [{ product_id: admStoreProdId, quantity: 2 }],
+            delivery_address: 'Tilak Chowk, Karanja Lad'
+          })
+        });
+        assert.strictEqual(oRes.status, 201);
+        admStoreOrderId = (await oRes.json()).order.id;
+
+        // Admin suspends store -> blocks future orders, disappears from public nearby list, but historical orders remain intact in store details
+        const suspRes = await fetch(`${baseUrl}/api/admin/stores/${admTestStoreId}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ is_active: false })
+        });
+        assert.strictEqual(suspRes.status, 200);
+
+        const nearbyAfterSusp = await (await fetch(`${baseUrl}/api/stores/nearby`)).json();
+        assert.ok(!nearbyAfterSusp.some((s: any) => s.id === admTestStoreId), 'Suspended store must be hidden from customers');
+
+        const blockedOrd = await fetch(`${baseUrl}/api/orders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+          body: JSON.stringify({
+            store_id: admTestStoreId,
+            fulfillment_type: 'pickup',
+            items: [{ product_id: admStoreProdId, quantity: 1 }],
+            delivery_address: 'Tilak Chowk, Karanja Lad'
+          })
+        });
+        assert.ok(blockedOrd.status === 400 || blockedOrd.status === 403, 'New orders to suspended store must be rejected');
+
+        // Store detail view preserves profile, products, and historical order
+        const detRes = await fetch(`${baseUrl}/api/admin/stores/${admTestStoreId}`, {
+          headers: { Authorization: `Bearer ${adminToken}` }
+        });
+        assert.strictEqual(detRes.status, 200);
+        const det = await detRes.json();
+        assert.strictEqual(det.store.id, admTestStoreId);
+        assert.ok(det.products.some((p: any) => p.id === admStoreProdId));
+        assert.ok(det.orders.some((o: any) => o.id === admStoreOrderId));
+      } finally {
+        if (admTestStoreId) {
+          await storesRepo.update(admTestStoreId, { is_active: false }).catch(() => {});
+        }
+      }
+    });
+
+    // 46. CUSTOMER PII MASKING, ORDER HISTORY & SUSPENSION ENFORCEMENT
+    await test('Admin Customer List PII Masking, Order History Endpoint & Suspension Enforcement', async () => {
+      const custsRes = await fetch(`${baseUrl}/api/admin/customers`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(custsRes.status, 200);
+      const custs = await custsRes.json();
+      assert.ok(custs.length > 0);
+      const targetCust = custs.find((c: any) => c.id === testCustomerId) || custs[0];
+      assert.strictEqual(targetCust.password_hash, undefined, 'password_hash must never be returned');
+      assert.ok(targetCust.phone.includes('******'), 'Phone must be masked in admin customers list');
+
+      // Customer Order History endpoint
+      const histRes = await fetch(`${baseUrl}/api/admin/customers/${targetCust.id}/orders`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(histRes.status, 200);
+      const hist = await histRes.json();
+      assert.ok(hist.customer.phone.includes('******'));
+      assert.ok(Array.isArray(hist.orders));
+      for (const o of hist.orders) {
+        assert.strictEqual(o.delivery_otp, undefined, 'delivery_otp must be stripped in admin customer history');
+      }
+
+      // Suspend & reactivate a disposable customer account
+      const tempPhone = `985${Math.floor(1000000 + Math.random() * 9000000)}`;
+      const tempReg = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: tempPhone,
+          name: 'Suspend Test Customer',
+          password: 'Password@123',
+          address: 'Line 2, Karanja Lad'
+        })
+      });
+      const tempCustId = (await tempReg.json()).user.id;
+
+      try {
+        const susp = await fetch(`${baseUrl}/api/admin/customers/${tempCustId}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ is_active: false })
+        });
+        assert.strictEqual(susp.status, 200);
+        const suspendedLogin = await fetch(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: tempPhone, password: 'Password@123' })
+        });
+        assert.strictEqual(suspendedLogin.status, 403, 'Suspended customer must be blocked from login');
+      } finally {
+        await fetch(`${baseUrl}/api/admin/customers/${tempCustId}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ is_active: true })
+        }).catch(() => {});
+      }
+    });
+
+    // 47. CATEGORY DEACTIVATE/DELETE SAFETY & ORDERED PRODUCT SOFT-DELETE PROTECTION
+    await test('Category Deactivation, Referenced Category Delete Guard & Ordered Product Soft-Deactivation', async () => {
+      // Category 1 has seeded/existing products -> DELETE must be blocked (400)
+      const delCatRes = await fetch(`${baseUrl}/api/admin/categories/1`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(delCatRes.status, 400, 'Deleting category referenced by products must be blocked');
+
+      // Deactivate and reactivate a newly created category safely
+      const newCatRes = await fetch(`${baseUrl}/api/admin/categories`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify({ name: `Temp Admin Cat ${Date.now()}`, description: 'Test cat', display_order: 99 })
+      });
+      assert.strictEqual(newCatRes.status, 201);
+      const newCatId = (await newCatRes.json()).id;
+      try {
+        const deactCat = await fetch(`${baseUrl}/api/admin/categories/${newCatId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ is_active: false })
+        });
+        assert.strictEqual(deactCat.status, 200);
+        assert.strictEqual((await deactCat.json()).is_active, false);
+      } finally {
+        await fetch(`${baseUrl}/api/admin/categories/${newCatId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` }
+        }).catch(() => {});
+      }
+
+      // Soft-delete product referenced in historical order_items (admStoreProdId from Test 45)
+      if (admStoreProdId) {
+        const delProdRes = await fetch(`${baseUrl}/api/products/${admStoreProdId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` }
+        });
+        assert.strictEqual(delProdRes.status, 200);
+        const delProdData = await delProdRes.json();
+        assert.strictEqual(delProdData.referenced_in_orders, true, 'Ordered product delete must safely soft-deactivate');
+        const storeDetAfter = await (await fetch(`${baseUrl}/api/admin/stores/${admTestStoreId}`, {
+          headers: { Authorization: `Bearer ${adminToken}` }
+        })).json();
+        const histOrder = storeDetAfter.orders.find((o: any) => o.id === admStoreOrderId);
+        assert.ok(histOrder && histOrder.items && histOrder.items.length > 0, 'Historical order_items must remain preserved');
+      }
+    });
+
+    // 48. COMPLAINTS WITH PRODUCT LINKING & ALL 4 STATUSES
+    await test('Complaints Linked to Product/Store/Order & All Status Transitions (open -> in_review -> rejected/resolved)', async () => {
+      const cRes = await fetch(`${baseUrl}/api/complaints`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+        body: JSON.stringify({
+          subject: 'Packaging damaged item',
+          description: 'Seal was broken on delivery.',
+          store_id: admTestStoreId || null,
+          order_id: admStoreOrderId || null,
+          product_id: admStoreProdId || null
+        })
+      });
+      assert.strictEqual(cRes.status, 201);
+      const comp = await cRes.json();
+      assert.strictEqual(comp.status, 'open');
+      if (admStoreProdId) {
+        assert.strictEqual(comp.product_id, admStoreProdId);
+        assert.ok(comp.product_name, 'Complaint must enrich product_name');
+      }
+
+      for (const nextStatus of ['in_review', 'rejected', 'resolved'] as const) {
+        const upRes = await fetch(`${baseUrl}/api/admin/complaints/${comp.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ status: nextStatus, admin_notes: `Admin set ${nextStatus}` })
+        });
+        assert.strictEqual(upRes.status, 200);
+        const updated = await upRes.json();
+        assert.strictEqual(updated.status, nextStatus);
+      }
+    });
+
+    // 49. PLATFORM SETTINGS GOVERNANCE, FREE-MODE ISOLATION & AUDIT LOGS
+    await test('Admin Platform Settings, Monetization Isolation, Service Availability Enforcement & Audit Logs', async () => {
+      // Public endpoint never exposes monetization flags
+      const pubRes = await fetch(`${baseUrl}/api/settings/platform`);
+      assert.strictEqual(pubRes.status, 200);
+      const pubData = await pubRes.json();
+      assert.strictEqual(pubData.monetization_enabled, undefined, 'Public endpoint must never expose monetization flags');
+      assert.strictEqual(pubData.subscriptions_enabled, undefined);
+      assert.strictEqual(pubData.admob_enabled, undefined);
+      assert.strictEqual(pubData.adsense_enabled, undefined);
+
+      // Admin endpoint returns platform & monetization flags (disabled by default)
+      const admSetRes = await fetch(`${baseUrl}/api/admin/settings/platform`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(admSetRes.status, 200);
+      const admSet = await admSetRes.json();
+      assert.strictEqual(admSet.monetization_enabled, false);
+      assert.strictEqual(admSet.subscriptions_enabled, false);
+      assert.strictEqual(admSet.service_available, true);
+
+      try {
+        // Temporarily pause service_available -> POST /api/orders must return 503
+        const pauseRes = await fetch(`${baseUrl}/api/admin/settings/platform`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ service_available: false, maintenance_message: 'Scheduled test pause' })
+        });
+        assert.strictEqual(pauseRes.status, 200);
+
+        const pausedOrder = await fetch(`${baseUrl}/api/orders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+          body: JSON.stringify({
+            items: [{ product_id: createdProductId, quantity: 1 }],
+            delivery_address: 'Tilak Chowk, Karanja Lad'
+          })
+        });
+        assert.strictEqual(pausedOrder.status, 503, 'Orders must be blocked with 503 when service_available=false');
+      } finally {
+        // Immediately restore clean default settings
+        await fetch(`${baseUrl}/api/admin/settings/platform`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({
+            service_available: true,
+            maintenance_message: 'FMP Supermart is temporarily paused for scheduled maintenance. Please check back shortly.',
+            store_visibility_rule: 'approved_active_valid_location',
+            monetization_enabled: false,
+            subscriptions_enabled: false,
+            featured_stores_enabled: false,
+            store_ads_enabled: false,
+            admob_enabled: false,
+            adsense_enabled: false
+          })
+        }).catch(() => {});
+      }
+
+      // Audit logs reflect recent admin actions
+      const auditRes = await fetch(`${baseUrl}/api/admin/audit-logs?limit=50`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      assert.strictEqual(auditRes.status, 200);
+      const logs = await auditRes.json();
+      assert.ok(logs.some((l: any) => l.action === 'PLATFORM_SETTINGS_UPDATED'), 'Audit log must record PLATFORM_SETTINGS_UPDATED');
+      assert.ok(logs.some((l: any) => l.action === 'STORE_APPROVAL_UPDATED'), 'Audit log must record STORE_APPROVAL_UPDATED');
+    });
+
   } finally {
     server.close();
   }

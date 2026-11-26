@@ -20,7 +20,9 @@ import {
   StoreApprovalStatus,
   Complaint,
   ComplaintStatus,
-  SavedAddress
+  SavedAddress,
+  PlatformSettings,
+  AuditLogEntry
 } from '../types.ts';
 
 const TOKEN_KEY = 'fmp_supermart_token';
@@ -332,8 +334,8 @@ export const api = {
   getAdminReports: (): Promise<{ categorySales: any[]; inventoryLogs: any[] }> =>
     fetchWithAuth('/api/admin/reports'),
 
-  getAdminAuditLogs: (): Promise<any[]> =>
-    fetchWithAuth('/api/admin/audit-logs'),
+  getAdminAuditLogs: (limit = 100): Promise<AuditLogEntry[]> =>
+    fetchWithAuth(`/api/admin/audit-logs?limit=${encodeURIComponent(String(limit))}`),
 
   getAdminRiders: (): Promise<any[]> =>
     fetchWithAuth('/api/admin/riders'),
@@ -546,6 +548,7 @@ export const api = {
     description: string;
     store_id?: number | null;
     order_id?: number | null;
+    product_id?: number | null;
   }): Promise<Complaint> =>
     fetchWithAuth('/api/complaints', { method: 'POST', body: JSON.stringify(payload) }),
 
@@ -555,6 +558,13 @@ export const api = {
   // Admin Marketplace Control
   getAdminStores: (): Promise<(Store & { order_count?: number })[]> =>
     fetchWithAuth('/api/admin/stores'),
+
+  getAdminStoreDetails: (storeId: number): Promise<{
+    store: Store & { order_count?: number; product_count?: number };
+    products: Product[];
+    orders: Order[];
+    complaints: Complaint[];
+  }> => fetchWithAuth(`/api/admin/stores/${storeId}`),
 
   updateStoreApproval: (
     storeId: number,
@@ -572,10 +582,16 @@ export const api = {
       body: JSON.stringify({ is_active })
     }),
 
-  getAdminCustomers: (): Promise<(User & { order_count: number; total_spent: number })[]> =>
+  getAdminCustomers: (): Promise<(User & { order_count: number; total_spent: number; masked_phone?: string; masked_address?: string | null })[]> =>
     fetchWithAuth('/api/admin/customers'),
 
-  toggleCustomerStatus: (customerId: number, is_active: boolean): Promise<User> =>
+  getAdminCustomerOrders: (customerId: number): Promise<{
+    customer: User & { masked_phone?: string; masked_address?: string | null };
+    orders: Order[];
+    complaints: Complaint[];
+  }> => fetchWithAuth(`/api/admin/customers/${customerId}/orders`),
+
+  toggleCustomerStatus: (customerId: number, is_active: boolean): Promise<User & { masked_phone?: string; masked_address?: string | null }> =>
     fetchWithAuth(`/api/admin/customers/${customerId}/status`, {
       method: 'PUT',
       body: JSON.stringify({ is_active })
@@ -600,5 +616,14 @@ export const api = {
     fetchWithAuth(`/api/admin/complaints/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ status, admin_notes })
+    }),
+
+  getAdminPlatformSettings: (): Promise<PlatformSettings> =>
+    fetchWithAuth('/api/admin/settings/platform'),
+
+  updateAdminPlatformSettings: (payload: Partial<PlatformSettings>): Promise<{ message: string; settings: PlatformSettings }> =>
+    fetchWithAuth('/api/admin/settings/platform', {
+      method: 'PUT',
+      body: JSON.stringify(payload)
     }),
 };
