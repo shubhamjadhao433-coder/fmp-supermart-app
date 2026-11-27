@@ -361,7 +361,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 {mode === 'forgot' && 'Password Assistance'}
               </h3>
               <p className="text-[11px] sm:text-xs text-gray-500">
-                {mode === 'login' && 'Login for Customers, Store Owners, Riders & Admin'}
+                {mode === 'login' && 'Login for Customers, Store Owners & Admin'}
                 {mode === 'register' && 'Order from nearby grocery & kirana stores'}
                 {mode === 'store_register' && 'Free Store Onboarding • Admin Verified Marketplace'}
                 {mode === 'forgot' && 'Store-Assisted Password Recovery'}

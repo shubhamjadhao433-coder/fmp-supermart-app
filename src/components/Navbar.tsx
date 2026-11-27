@@ -18,8 +18,8 @@ import {
 import { User, NotificationItem } from '../types.ts';
 
 interface NavbarProps {
-  currentRole: 'customer' | 'admin' | 'rider';
-  onRoleChange: (role: 'customer' | 'admin' | 'rider') => void;
+  currentRole: 'customer' | 'admin' | 'store_owner';
+  onRoleChange: (role: 'customer' | 'admin' | 'store_owner') => void;
   currentUser: User | null;
   onLogout: () => void;
   onOpenAuth: () => void;
@@ -71,7 +71,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               onClick={onOpenAuth}
               className="text-emerald-200 hover:text-white underline text-[10px] cursor-pointer"
             >
-              Staff & Delivery Portal
+              Partner &amp; Admin Login
             </button>
           )}
         </div>
@@ -101,62 +101,33 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* If an Admin or Delivery Rider is logged in, show their portal controls cleanly */}
-          {currentUser && (currentUser.role === 'admin' || currentUser.role === 'rider') && (
+          {/* If an Admin or Store Owner is logged in, show their portal controls cleanly */}
+          {currentUser && currentUser.role === 'admin' && (
             <div className="flex items-center gap-2">
-              {currentUser.role === 'admin' && (
-                <div className="flex items-center bg-purple-50 border border-purple-200 rounded-xl p-1">
-                  <button
-                    onClick={() => onRoleChange('admin')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
-                      currentRole === 'admin'
-                        ? 'bg-purple-600 text-white shadow-xs'
-                        : 'text-purple-700 hover:bg-purple-100'
-                    }`}
-                  >
-                    <Store className="w-3.5 h-3.5" />
-                    <span>Admin Dashboard</span>
-                  </button>
-                  <button
-                    onClick={() => onRoleChange('customer')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
-                      currentRole === 'customer'
-                        ? 'bg-white text-gray-900 shadow-xs'
-                        : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  >
-                    <ShoppingBag className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Customer View</span>
-                  </button>
-                </div>
-              )}
-
-              {currentUser.role === 'rider' && (
-                <div className="flex items-center bg-amber-50 border border-amber-200 rounded-xl p-1">
-                  <button
-                    onClick={() => onRoleChange('rider')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
-                      currentRole === 'rider'
-                        ? 'bg-amber-600 text-white shadow-xs'
-                        : 'text-amber-800 hover:bg-amber-100'
-                    }`}
-                  >
-                    <Truck className="w-3.5 h-3.5" />
-                    <span>Delivery App</span>
-                  </button>
-                  <button
-                    onClick={() => onRoleChange('customer')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
-                      currentRole === 'customer'
-                        ? 'bg-white text-gray-900 shadow-xs'
-                        : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  >
-                    <ShoppingBag className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Customer View</span>
-                  </button>
-                </div>
-              )}
+              <div className="flex items-center bg-purple-50 border border-purple-200 rounded-xl p-1">
+                <button
+                  onClick={() => onRoleChange('admin')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                    currentRole === 'admin'
+                      ? 'bg-purple-600 text-white shadow-xs'
+                      : 'text-purple-700 hover:bg-purple-100'
+                  }`}
+                >
+                  <Store className="w-3.5 h-3.5" />
+                  <span>Admin Dashboard</span>
+                </button>
+                <button
+                  onClick={() => onRoleChange('customer')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${
+                    currentRole === 'customer'
+                      ? 'bg-white text-gray-900 shadow-xs'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  <ShoppingBag className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Customer View</span>
+                </button>
+              </div>
             </div>
           )}
 
@@ -258,7 +229,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <div className={`w-7 h-7 rounded-lg font-bold text-xs flex items-center justify-center ${
                     currentUser.role === 'admin'
                       ? 'bg-purple-100 text-purple-800'
-                      : currentUser.role === 'rider'
+                      : currentUser.role === 'store_owner'
                       ? 'bg-amber-100 text-amber-800'
                       : 'bg-emerald-100 text-emerald-800'
                   }`}>
@@ -278,11 +249,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <span className={`inline-block mt-1 text-[10px] uppercase font-bold px-1.5 py-0.2 rounded ${
                         currentUser.role === 'admin'
                           ? 'bg-purple-100 text-purple-800'
-                          : currentUser.role === 'rider'
+                          : currentUser.role === 'store_owner'
                           ? 'bg-amber-100 text-amber-800'
                           : 'bg-emerald-100 text-emerald-800'
                       }`}>
-                        {currentUser.role === 'admin' ? 'Store Administrator' : currentUser.role === 'rider' ? 'Delivery Partner' : 'Customer Account'}
+                        {currentUser.role === 'admin' ? 'Platform Admin' : currentUser.role === 'store_owner' ? 'Store Owner' : 'Customer Account'}
                       </span>
                     </div>
 
@@ -292,7 +263,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                         className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2 text-gray-700 font-medium"
                       >
                         <Clock className="w-4 h-4 text-emerald-600" />
-                        <span>My Orders & Delivery OTP</span>
+                        <span>My Orders &amp; Pickup Codes</span>
                       </button>
                     )}
 
@@ -303,16 +274,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                       >
                         <Store className="w-4 h-4" />
                         <span>Admin Dashboard</span>
-                      </button>
-                    )}
-
-                    {currentUser.role === 'rider' && (
-                      <button
-                        onClick={() => { onRoleChange('rider'); setShowUserMenu(false); }}
-                        className="w-full text-left px-3 py-2 hover:bg-amber-50 flex items-center gap-2 text-amber-700 font-medium"
-                      >
-                        <Truck className="w-4 h-4" />
-                        <span>My Assigned Deliveries</span>
                       </button>
                     )}
 

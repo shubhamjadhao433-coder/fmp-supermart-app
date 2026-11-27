@@ -361,6 +361,19 @@ export interface AuditLogEntry {
   created_at: string;
 }
 
+export interface InventoryLogEntry {
+  id: number;
+  product_id: number;
+  product_name: string;
+  store_id?: number | null;
+  change_type: string;
+  quantity_change: number;
+  stock_after: number;
+  reference_id?: string | null;
+  notes?: string | null;
+  created_at: string;
+}
+
 export interface RiderSummary {
   summary: {
     total_collected_orders: number;

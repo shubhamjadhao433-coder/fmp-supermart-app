@@ -1,37 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import {
   Package,
-  DollarSign,
-  Truck,
   Plus,
   Edit2,
   Trash2,
-  CheckCircle,
   XCircle,
-  Clock,
   Phone,
   Search,
   RefreshCw,
   ShieldCheck,
   AlertCircle,
   CheckCircle2,
-  ArrowRight,
   LogOut,
   ShoppingBag,
-  Layers,
   Key,
   Boxes,
-  MapPin,
   Calendar,
   X,
   Star,
   Settings,
-  UserCheck,
-  ClipboardList,
   Bell,
   Navigation,
-  Building2,
-  Percent,
   Store as StoreIcon,
   Users,
   FolderKanban,
@@ -51,10 +40,6 @@ import {
   Product,
   Category,
   User,
-  Supplier,
-  DeliverySettings,
-  DeliverySlab,
-  ProductPriceSlab,
   Store as StoreType,
   Complaint,
   ComplaintStatus,
@@ -62,8 +47,6 @@ import {
   AuditLogEntry
 } from '../types.ts';
 import { api } from '../services/api.ts';
-import { normalizeProductType } from '../shared/quantityPricing.ts';
-import { OsmMapPicker } from './OsmMapPicker.tsx';
 
 interface AdminDashboardProps {
   currentUser?: User | null;
@@ -78,9 +61,6 @@ type AdminTab =
   | 'customers'
   | 'categories'
   | 'complaints'
-  | 'pricing'
-  | 'riders'
-  | 'settlement'
   | 'settings'
   | 'reviews'
   | 'inventory'
@@ -95,8 +75,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [riders, setRiders] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [auditSearch, setAuditSearch] = useState<string>('');
   const [auditActionFilter, setAuditActionFilter] = useState<string>('all');
@@ -156,6 +134,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     adsense_enabled: false
   });
   const [savingPlatformSettings, setSavingPlatformSettings] = useState<boolean>(false);
+  const [passwordResetRequests, setPasswordResetRequests] = useState<any[]>([]);
+  const [resetPassByReqId, setResetPassByReqId] = useState<Record<number, string>>({});
+  const [resettingReqId, setResettingReqId] = useState<number | null>(null);
 
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -169,90 +150,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Tab 1: Orders Dispatch state
+  // Tab 1: Orders Management state
   const [orderStatusFilter, setOrderStatusFilter] = useState<string>('all');
   const [orderStoreFilter, setOrderStoreFilter] = useState<string>('all');
   const [orderSearch, setOrderSearch] = useState<string>('');
   const [selectedOrderDetail, setSelectedOrderDetail] = useState<Order | null>(null);
-  const [selectedRiderByOrder, setSelectedRiderByOrder] = useState<Record<number, number>>({});
-  const [dispatchingOrderId, setDispatchingOrderId] = useState<number | null>(null);
-  const [reassigningOrderId, setReassigningOrderId] = useState<number | null>(null);
-  const [editingFeeOrderId, setEditingFeeOrderId] = useState<number | null>(null);
-  const [orderFeeInput, setOrderFeeInput] = useState<number>(25);
-  const [updatingFee, setUpdatingFee] = useState<boolean>(false);
 
-  // Tab 2: Daily Pricing state
-  const [productCategoryFilter, setProductCategoryFilter] = useState<string>('all');
-  const [productStoreFilter, setProductStoreFilter] = useState<string>('all');
-  const [productSearch, setProductSearch] = useState<string>('');
-  const [isAddProductOpen, setIsAddProductOpen] = useState<boolean>(false);
-  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
-  const [stockAdjustProduct, setStockAdjustProduct] = useState<Product | null>(null);
-  const [newStockValue, setNewStockValue] = useState<number>(0);
-
-  // Product Form state (includes wholesale cost, margin, and private supplier details)
-  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [productForm, setProductForm] = useState({
-    name: '',
-    category_id: 1,
-    unit: '1 kg',
-    price: '',
-    mrp: '',
-    purchase_cost: '',
-    stock: '50',
-    image_url: '',
-    description: '',
-    supplier_id: '',
-    supplier_name: '',
-    supplier_phone: '',
-    supplier_address: '',
-    product_type: 'packaged' as 'loose' | 'packaged',
-    min_order_qty: '1',
-    max_order_qty: '',
-    pricing_slabs: [] as Array<{ id: string; min_qty: string; max_qty: string; price_per_unit: string }>
-  });
-
-  // Tab 3: Rider Cash Settlement state
-  const [reconcileModalRider, setReconcileModalRider] = useState<any | null>(null);
-  const [reconcileNotes, setReconcileNotes] = useState<string>('Cash handed over at Karanja central cash counter');
-  const [reconciling, setReconciling] = useState<boolean>(false);
-
-  // Tab 4: Delivery Partners Fleet Management
-  const [isAddRiderOpen, setIsAddRiderOpen] = useState<boolean>(false);
-  const [riderForm, setRiderForm] = useState({ name: '', phone: '', password: '', address: 'Karanja Lad' });
-  const [resetPasswordRider, setResetPasswordRider] = useState<any | null>(null);
-  const [newRiderPassword, setNewRiderPassword] = useState<string>('');
-  const [submittingRider, setSubmittingRider] = useState<boolean>(false);
-
-  // Tab 5: Delivery Settings & Slots
-  const defaultSlabs: DeliverySlab[] = [
-    { id: 'slab-1', min_km: 0, max_km: 2, charge_type: 'free', charge: 0, label: '0–2 km' },
-    { id: 'slab-2', min_km: 2, max_km: 4, charge_type: 'fixed', charge: 10, label: '2–4 km' },
-    { id: 'slab-3', min_km: 4, max_km: 6, charge_type: 'fixed', charge: 20, label: '4–6 km' },
-    { id: 'slab-4', min_km: 6, max_km: 8, charge_type: 'fixed', charge: 30, label: '6–8 km' }
-  ];
-  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>({
-    default_delivery_fee: 0,
-    handling_fee: 5,
-    min_order_amount: 0,
-    warehouse_lat: 20.4839,
-    warehouse_lng: 77.4877,
-    warehouse_address: 'FMP Supermart Central Hub, Shivaji Chowk, Karanja Lad 444105',
-    delivery_pricing_mode: 'slabs',
-    per_km_rate: 8,
-    free_delivery_up_to_km: 0,
-    max_delivery_distance_km: 8,
-    delivery_slabs: defaultSlabs
-  });
-  const [deliverySlots, setDeliverySlots] = useState<any[]>([]);
-  const [savingSettings, setSavingSettings] = useState<boolean>(false);
-  const [isAddSlotOpen, setIsAddSlotOpen] = useState<boolean>(false);
-  const [slotForm, setSlotForm] = useState({ name: '', time_window: '09:00 AM - 12:00 PM', max_orders_per_slot: 25 });
-
-  // Tab 6: Reviews Moderation
+  // Tab: Reviews Moderation
   const [reviews, setReviews] = useState<any[]>([]);
 
-  // Tab 7: Inventory movement logs
+  // Tab: Inventory movement logs
   const [inventoryLogs, setInventoryLogs] = useState<any[]>([]);
 
   // Load all admin data
@@ -264,49 +171,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         ordersData,
         prodsData,
         catsData,
-        ridersData,
         auditData,
-        feeSettings,
-        slotsData,
         reviewsData,
         reportsData,
         notifsData,
-        suppliersData,
         storesData,
         customersData,
         adminCatsData,
         complaintsData,
-        platformConfigData
+        platformConfigData,
+        resetReqsData
       ] = await Promise.all([
         api.getAdminStats(),
         api.getOrders(),
         api.getAdminProducts(),
         api.getCategories(),
-        api.getAdminRiders(),
         api.getAdminAuditLogs(150).catch(() => []),
-        api.getDeliverySettings().catch(() => null),
-        api.getDeliverySlots().catch(() => []),
         api.getAdminReviews().catch(() => []),
         api.getAdminReports().catch(() => ({ categorySales: [], inventoryLogs: [] })),
         api.getNotifications().catch(() => []),
-        api.getSuppliers().catch(() => []),
         api.getAdminStores().catch(() => []),
         api.getAdminCustomers().catch(() => []),
         api.getAdminCategories().catch(() => []),
         api.getAdminComplaints().catch(() => []),
-        api.getAdminPlatformSettings().catch(() => null)
+        api.getAdminPlatformSettings().catch(() => null),
+        api.getPasswordResetRequests().catch(() => [])
       ]);
       setStats(statsData);
       setOrders(ordersData);
       setProducts(prodsData);
-      setCategories(catsData);
-      setRiders(ridersData);
       setAuditLogs(auditData);
       setNotifications(notifsData);
-      setSuppliers(suppliersData);
       setAdminStores(Array.isArray(storesData) ? storesData : []);
       setAdminCustomers(Array.isArray(customersData) ? customersData : []);
       setAdminCategories(Array.isArray(adminCatsData) && adminCatsData.length > 0 ? adminCatsData : catsData);
+      setPasswordResetRequests(Array.isArray(resetReqsData) ? resetReqsData : []);
       if (platformConfigData) {
         setPlatformSettings(platformConfigData);
       }
@@ -318,20 +217,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         });
         setComplaintNotesById(notesInit);
       }
-      if (feeSettings) {
-        setDeliverySettings({
-          ...feeSettings,
-          warehouse_lat: Number(feeSettings.warehouse_lat ?? 20.4839),
-          warehouse_lng: Number(feeSettings.warehouse_lng ?? 77.4877),
-          warehouse_address: feeSettings.warehouse_address || 'FMP Supermart Central Hub, Shivaji Chowk, Karanja Lad 444105',
-          delivery_pricing_mode: feeSettings.delivery_pricing_mode === 'per_km' ? 'per_km' : 'slabs',
-          per_km_rate: Number(feeSettings.per_km_rate ?? 8),
-          free_delivery_up_to_km: Number(feeSettings.free_delivery_up_to_km ?? 0),
-          max_delivery_distance_km: Number(feeSettings.max_delivery_distance_km ?? 8),
-          delivery_slabs: Array.isArray(feeSettings.delivery_slabs) && feeSettings.delivery_slabs.length > 0 ? feeSettings.delivery_slabs : defaultSlabs
-        });
-      }
-      if (slotsData) setDeliverySlots(slotsData);
       if (reviewsData) setReviews(reviewsData);
       if (reportsData?.inventoryLogs) setInventoryLogs(reportsData.inventoryLogs);
     } catch (err: any) {
@@ -361,60 +246,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, []);
 
   // Order Actions
-  const handleAssignRider = async (orderId: number) => {
-    const riderId = selectedRiderByOrder[orderId];
-    if (!riderId) {
-      showToast('Please select a delivery partner first', 'error');
-      return;
-    }
-    try {
-      await api.assignRider(orderId, riderId);
-      showToast('Delivery partner assigned successfully.');
-      setReassigningOrderId(null);
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to assign rider', 'error');
-    }
-  };
-
-  const handleUpdateOrderDeliveryFee = async (orderId: number) => {
-    if (orderFeeInput < 0) {
-      showToast('Delivery fee cannot be negative.', 'error');
-      return;
-    }
-    setUpdatingFee(true);
-    try {
-      const res = await api.updateOrderDeliveryFee(orderId, orderFeeInput);
-      showToast(res.message || 'Delivery fee updated.');
-      setEditingFeeOrderId(null);
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to update delivery fee', 'error');
-    } finally {
-      setUpdatingFee(false);
-    }
-  };
-
-  const handleDispatchOrder = async (orderId: number) => {
-    setDispatchingOrderId(orderId);
-    try {
-      const res = await api.dispatchOrder(orderId);
-      showToast(`Order dispatched! Secure Delivery OTP: ${res.order.delivery_otp}`);
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to dispatch order', 'error');
-    } finally {
-      setDispatchingOrderId(null);
-    }
-  };
-
   const handleCancelOrder = (orderId: number) => {
     setConfirmDialog({
       title: 'Cancel Order & Restore Inventory',
-      message: 'Cancel this order? All reserved grocery items will immediately be returned to central store stock.',
+      message: 'Cancel this order? All reserved grocery items will immediately be returned to store stock.',
       onConfirm: async () => {
         try {
-          await api.cancelOrder(orderId, 'Cancelled by store administrator');
+          await api.cancelOrder(orderId, 'Cancelled by platform administrator');
           showToast('Order cancelled and reserved stock restored.');
           loadAdminData();
         } catch (err: any) {
@@ -422,351 +260,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         }
       }
     });
-  };
-
-  // Quantity Slab Helpers inside Product Form
-  const handleAddProductSlab = () => {
-    setProductForm(prev => {
-      const existing = prev.pricing_slabs;
-      const last = existing[existing.length - 1];
-      let nextMin = '1';
-      if (last) {
-        const lastMaxNum = Number(last.max_qty);
-        const lastMinNum = Number(last.min_qty);
-        if (last.max_qty && Number.isFinite(lastMaxNum)) {
-          nextMin = String(lastMaxNum + 1);
-        } else if (Number.isFinite(lastMinNum)) {
-          nextMin = String(lastMinNum + 5);
-        }
-      }
-      return {
-        ...prev,
-        pricing_slabs: [
-          ...existing,
-          {
-            id: `slab-${Date.now()}-${existing.length + 1}`,
-            min_qty: nextMin,
-            max_qty: '',
-            price_per_unit: prev.price || ''
-          }
-        ]
-      };
-    });
-  };
-
-  const handleUpdateProductSlab = (
-    idx: number,
-    patch: Partial<{ min_qty: string; max_qty: string; price_per_unit: string }>
-  ) => {
-    setProductForm(prev => ({
-      ...prev,
-      pricing_slabs: prev.pricing_slabs.map((s, i) => (i === idx ? { ...s, ...patch } : s))
-    }));
-  };
-
-  const handleRemoveProductSlab = (idx: number) => {
-    setProductForm(prev => ({
-      ...prev,
-      pricing_slabs: prev.pricing_slabs.filter((_, i) => i !== idx)
-    }));
-  };
-
-  const openEditProductModal = (product: Product) => {
-    const pType = normalizeProductType(product.product_type, product.unit);
-    setEditingProduct(product);
-    setProductForm({
-      name: product.name,
-      category_id: product.category_id,
-      unit: product.unit,
-      price: String(product.price),
-      mrp: String(product.mrp),
-      purchase_cost:
-        product.purchase_cost !== null && product.purchase_cost !== undefined
-          ? String(product.purchase_cost)
-          : '',
-      stock: String(product.stock),
-      image_url: product.image_url || '',
-      description: product.description || '',
-      supplier_id: product.supplier_id ? String(product.supplier_id) : '',
-      supplier_name: product.supplier_name || '',
-      supplier_phone: product.supplier_phone || '',
-      supplier_address: product.supplier_address || '',
-      product_type: pType,
-      min_order_qty: product.min_order_qty ? String(product.min_order_qty) : '1',
-      max_order_qty:
-        product.max_order_qty !== null && product.max_order_qty !== undefined
-          ? String(product.max_order_qty)
-          : '',
-      pricing_slabs: Array.isArray(product.pricing_slabs)
-        ? product.pricing_slabs.map((s, idx) => ({
-            id: s.id || `slab-${idx + 1}`,
-            min_qty: String(s.min_qty),
-            max_qty: s.max_qty !== null && s.max_qty !== undefined ? String(s.max_qty) : '',
-            price_per_unit: String(s.price_per_unit)
-          }))
-        : []
-    });
-    setIsAddProductOpen(true);
-  };
-
-  // Product Actions
-  const handleSaveProduct = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      const normalizedSlabs: ProductPriceSlab[] = productForm.pricing_slabs.map((s, idx) => ({
-        id: s.id || `qslab-${idx + 1}`,
-        min_qty: Number(s.min_qty),
-        max_qty: s.max_qty.trim() === '' ? null : Number(s.max_qty),
-        price_per_unit: Number(s.price_per_unit)
-      }));
-
-      const payload = {
-        name: productForm.name.trim(),
-        category_id: Number(productForm.category_id),
-        unit: productForm.unit.trim(),
-        price: Number(productForm.price),
-        mrp: Number(productForm.mrp || productForm.price),
-        purchase_cost: productForm.purchase_cost !== '' ? Number(productForm.purchase_cost) : null,
-        stock: Number(productForm.stock),
-        image_url: productForm.image_url || 'https://images.unsplash.com/photo-1542838132-92c53300491e?w=500&q=80',
-        description: productForm.description.trim(),
-        supplier_id: productForm.supplier_id ? Number(productForm.supplier_id) : null,
-        supplier_name: productForm.supplier_name.trim() || null,
-        supplier_phone: productForm.supplier_phone.trim() || null,
-        supplier_address: productForm.supplier_address.trim() || null,
-        product_type: productForm.product_type,
-        min_order_qty: Number(productForm.min_order_qty || 1),
-        max_order_qty: productForm.max_order_qty.trim() === '' ? null : Number(productForm.max_order_qty),
-        pricing_slabs: normalizedSlabs
-      };
-
-      if (editingProduct) {
-        await api.updateProduct(editingProduct.id, payload);
-        showToast('Wholesale cost, quantity slabs & product details updated.');
-      } else {
-        await api.createProduct(payload);
-        showToast('New product added to FMP Supermart catalog.');
-      }
-
-      setIsAddProductOpen(false);
-      setEditingProduct(null);
-      setProductForm({
-        name: '',
-        category_id: 1,
-        unit: '1 kg',
-        price: '',
-        mrp: '',
-        purchase_cost: '',
-        stock: '50',
-        image_url: '',
-        description: '',
-        supplier_id: '',
-        supplier_name: '',
-        supplier_phone: '',
-        supplier_address: '',
-        product_type: 'packaged',
-        min_order_qty: '1',
-        max_order_qty: '',
-        pricing_slabs: []
-      });
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to save product', 'error');
-    }
-  };
-
-  const handleQuickPriceUpdate = async (productId: number, newPrice: number, currentMrp: number) => {
-    try {
-      await api.updateProduct(productId, { price: newPrice, mrp: Math.max(newPrice, currentMrp) });
-      showToast('Daily selling price updated.');
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to update price', 'error');
-    }
-  };
-
-  const handleAdjustStock = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!stockAdjustProduct) return;
-    try {
-      await api.adjustStock(stockAdjustProduct.id, newStockValue, 'Daily warehouse count adjustment');
-      showToast('Warehouse stock updated successfully.');
-      setStockAdjustProduct(null);
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to adjust stock', 'error');
-    }
-  };
-
-  const handleDeleteProduct = (id: number) => {
-    setConfirmDialog({
-      title: 'Deactivate Product',
-      message: 'Deactivate this product from customer storefront catalog?',
-      onConfirm: async () => {
-        try {
-          await api.deleteProduct(id);
-          showToast('Product deactivated.');
-          loadAdminData();
-        } catch (err: any) {
-          showToast(err.message || 'Failed to deactivate product', 'error');
-        }
-      }
-    });
-  };
-
-  // Reconcile COD
-  const handleConfirmReconcile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!reconcileModalRider) return;
-    setReconciling(true);
-    try {
-      const res = await api.reconcileCod(reconcileModalRider.id, reconcileNotes);
-      showToast(res.message || 'Cash reconciled and settled successfully.');
-      setReconcileModalRider(null);
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to settle cash', 'error');
-    } finally {
-      setReconciling(false);
-    }
-  };
-
-  // Fleet: Create new Rider
-  const handleCreateRider = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSubmittingRider(true);
-    try {
-      const res = await api.createRider(riderForm);
-      showToast(res.message || 'Delivery rider created successfully.');
-      setIsAddRiderOpen(false);
-      setRiderForm({ name: '', phone: '', password: '', address: 'Karanja Lad' });
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to create delivery rider', 'error');
-    } finally {
-      setSubmittingRider(false);
-    }
-  };
-
-  // Fleet: Reset Rider Password
-  const handleResetRiderPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!resetPasswordRider) return;
-    try {
-      const res = await api.resetRiderPassword(resetPasswordRider.id, newRiderPassword);
-      showToast(res.message || 'Password reset successfully.');
-      setResetPasswordRider(null);
-      setNewRiderPassword('');
-    } catch (err: any) {
-      showToast(err.message || 'Failed to reset password', 'error');
-    }
-  };
-
-  // Fleet: Toggle Rider Active
-  const handleToggleRiderActive = async (rider: any) => {
-    const updatedStatus = !rider.is_active;
-    try {
-      await api.updateRider(rider.id, { is_active: updatedStatus });
-      showToast(`Rider ${rider.name} marked ${updatedStatus ? 'Active' : 'Inactive'}.`);
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to update rider status', 'error');
-    }
-  };
-
-  // Settings: Save Distance-Based Delivery & Warehouse Settings
-  const handleSaveDeliverySettings = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingSettings(true);
-    try {
-      const res = await api.updateDeliverySettings({
-        default_delivery_fee: Number(deliverySettings.default_delivery_fee || 0),
-        handling_fee: Number(deliverySettings.handling_fee || 0),
-        min_order_amount: Number(deliverySettings.min_order_amount || 0),
-        warehouse_lat: Number(deliverySettings.warehouse_lat),
-        warehouse_lng: Number(deliverySettings.warehouse_lng),
-        warehouse_address: deliverySettings.warehouse_address,
-        delivery_pricing_mode: deliverySettings.delivery_pricing_mode,
-        per_km_rate: Number(deliverySettings.per_km_rate || 0),
-        free_delivery_up_to_km: Number(deliverySettings.free_delivery_up_to_km || 0),
-        max_delivery_distance_km: Number(deliverySettings.max_delivery_distance_km || 8),
-        delivery_slabs: deliverySettings.delivery_slabs
-      });
-      showToast(res.message || 'Warehouse & distance delivery settings saved.');
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to save delivery settings', 'error');
-    } finally {
-      setSavingSettings(false);
-    }
-  };
-
-  const handleAddDeliverySlab = () => {
-    const slabs = deliverySettings.delivery_slabs || [];
-    const lastMax = slabs.length > 0 ? Number(slabs[slabs.length - 1].max_km) : 0;
-    const nextSlab: DeliverySlab = {
-      id: `slab-${Date.now()}`,
-      min_km: lastMax,
-      max_km: lastMax + 2,
-      charge_type: 'fixed',
-      charge: 10,
-      label: `${lastMax}–${lastMax + 2} km`
-    };
-    setDeliverySettings({
-      ...deliverySettings,
-      delivery_slabs: [...slabs, nextSlab],
-      max_delivery_distance_km: Math.max(Number(deliverySettings.max_delivery_distance_km || 8), nextSlab.max_km)
-    });
-  };
-
-  const handleUpdateDeliverySlab = (idx: number, patch: Partial<DeliverySlab>) => {
-    const nextSlabs = [...(deliverySettings.delivery_slabs || [])];
-    const updated = { ...nextSlabs[idx], ...patch };
-    if (updated.charge_type === 'free') {
-      updated.charge = 0;
-    }
-    updated.label = `${updated.min_km}–${updated.max_km} km`;
-    nextSlabs[idx] = updated;
-    setDeliverySettings({ ...deliverySettings, delivery_slabs: nextSlabs });
-  };
-
-  const handleRemoveDeliverySlab = (idx: number) => {
-    const nextSlabs = (deliverySettings.delivery_slabs || []).filter((_, i) => i !== idx);
-    setDeliverySettings({ ...deliverySettings, delivery_slabs: nextSlabs });
-  };
-
-  const handleResetDefaultSlabs = () => {
-    setDeliverySettings({
-      ...deliverySettings,
-      delivery_pricing_mode: 'slabs',
-      max_delivery_distance_km: 8,
-      delivery_slabs: defaultSlabs
-    });
-    showToast('Suggested default slabs loaded (0–2 FREE, 2–4 ₹10, 4–6 ₹20, 6–8 ₹30). Click Save to apply.');
-  };
-
-  // Slots: Add new Delivery Slot
-  const handleCreateSlot = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      await api.createDeliverySlot(slotForm);
-      showToast('Delivery slot added.');
-      setIsAddSlotOpen(false);
-      setSlotForm({ name: '', time_window: '09:00 AM - 12:00 PM', max_orders_per_slot: 25 });
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to add delivery slot', 'error');
-    }
-  };
-
-  const handleDeleteSlot = async (id: number) => {
-    try {
-      await api.deleteDeliverySlot(id);
-      showToast('Delivery slot removed.');
-      loadAdminData();
-    } catch (err: any) {
-      showToast(err.message || 'Failed to remove slot', 'error');
-    }
   };
 
   // Reviews Moderation
@@ -930,7 +423,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     e.preventDefault();
     setSavingPlatformSettings(true);
     try {
-      const res = await api.updateAdminPlatformSettings(platformSettings);
+      const safePayload: Partial<PlatformSettings> = {
+        ...platformSettings,
+        monetization_enabled: false,
+        subscriptions_enabled: false,
+        featured_stores_enabled: false,
+        store_ads_enabled: false,
+        admob_enabled: false,
+        adsense_enabled: false
+      };
+      const res = await api.updateAdminPlatformSettings(safePayload);
       if (res?.settings) {
         setPlatformSettings(res.settings);
       }
@@ -943,11 +445,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleResolvePasswordReset = async (reqItem: any) => {
+    const nextPassword = (resetPassByReqId[reqItem.id] || '').trim();
+    if (nextPassword.length < 6) {
+      showToast('New password must be at least 6 characters long.', 'error');
+      return;
+    }
+    setResettingReqId(reqItem.id);
+    try {
+      const res = await api.adminResetUserPassword(reqItem.phone, nextPassword, reqItem.id);
+      showToast(res.message || 'User password reset successfully.');
+      setResetPassByReqId(prev => {
+        const next = { ...prev };
+        delete next[reqItem.id];
+        return next;
+      });
+      loadAdminData();
+    } catch (err: any) {
+      showToast(err.message || 'Failed to reset user password', 'error');
+    } finally {
+      setResettingReqId(null);
+    }
+  };
+
   // Filtered Orders for Tab 1
   const filteredOrders = orders.filter(o => {
     if (orderStatusFilter !== 'all' && o.status !== orderStatusFilter) return false;
-    if (orderStoreFilter === 'central' && o.store_id) return false;
-    if (orderStoreFilter !== 'all' && orderStoreFilter !== 'central' && String(o.store_id || '') !== orderStoreFilter) {
+    if (orderStoreFilter !== 'all' && String(o.store_id || '') !== orderStoreFilter) {
       return false;
     }
     if (orderSearch.trim()) {
@@ -955,42 +479,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return (
         o.order_number.toLowerCase().includes(q) ||
         o.customer_name.toLowerCase().includes(q) ||
-        o.customer_phone.includes(q) ||
-        o.delivery_address.toLowerCase().includes(q) ||
+        (o.customer_phone || '').includes(q) ||
+        (o.delivery_address || '').toLowerCase().includes(q) ||
         (o.store_name || '').toLowerCase().includes(q)
       );
     }
     return true;
   });
-
-  // Filtered Products for Tab 2
-  const filteredProducts = products.filter(p => {
-    if (productCategoryFilter !== 'all' && p.category_name !== productCategoryFilter) return false;
-    if (productStoreFilter === 'central' && p.store_id) return false;
-    if (productStoreFilter !== 'all' && productStoreFilter !== 'central' && String(p.store_id || '') !== productStoreFilter) {
-      return false;
-    }
-    if (productSearch.trim()) {
-      const q = productSearch.toLowerCase();
-      return (
-        p.name.toLowerCase().includes(q) ||
-        (p.category_name || '').toLowerCase().includes(q) ||
-        (p.store_name || '').toLowerCase().includes(q)
-      );
-    }
-    return true;
-  });
-
-  // Calculate settlement stats for Tab 3
-  const totalCodCollected = orders
-    .filter(o => o.status === 'delivered')
-    .reduce((sum, o) => sum + Number(o.total_amount), 0);
-
-  const totalCodSettled = orders
-    .filter(o => o.status === 'delivered' && o.cod_reconciled)
-    .reduce((sum, o) => sum + Number(o.total_amount), 0);
-
-  const totalCodUnsettled = totalCodCollected - totalCodSettled;
 
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col font-sans w-full max-w-full overflow-x-clip text-gray-900 pb-16">
@@ -1058,7 +553,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </span>
                 </div>
                 <p className="text-[11px] text-purple-200 truncate">
-                  Central Warehouse (444105) • Admin: {currentUser?.phone || '9699925206'}
+                  Hyperlocal Marketplace Platform (444105) • Admin: {currentUser?.phone || '9699925206'}
                 </p>
               </div>
             </div>
@@ -1266,39 +761,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </button>
 
-              {/* Tab 6: Daily Pricing */}
-              <button
-                onClick={() => setActiveTab('pricing')}
-                className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                  activeTab === 'pricing'
-                    ? 'bg-purple-600 text-white font-black shadow-xs'
-                    : 'text-purple-200 hover:bg-purple-900/60'
-                }`}
-              >
-                <Layers className="w-4 h-4" />
-                <span>Daily Pricing</span>
-                <span className="text-[10px] bg-purple-800 text-purple-200 px-1.5 py-0.2 rounded-full font-bold">
-                  {products.length}
-                </span>
-              </button>
-
-              {/* Tab 7: Delivery Partners (Fleet) */}
-              <button
-                onClick={() => setActiveTab('riders')}
-                className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                  activeTab === 'riders'
-                    ? 'bg-purple-600 text-white font-black shadow-xs'
-                    : 'text-purple-200 hover:bg-purple-900/60'
-                }`}
-              >
-                <Truck className="w-4 h-4" />
-                <span>Delivery Partners</span>
-                <span className="text-[10px] bg-purple-800 text-purple-200 px-1.5 py-0.2 rounded-full font-bold">
-                  {riders.length}
-                </span>
-              </button>
-
-              {/* Tab 8: Delivery Settings & Slots */}
+              {/* Tab: Platform Governance Settings */}
               <button
                 onClick={() => setActiveTab('settings')}
                 className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
@@ -1308,23 +771,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 }`}
               >
                 <Settings className="w-4 h-4" />
-                <span>Delivery &amp; Slots</span>
-              </button>
-
-              {/* Tab 9: Rider Cash Settlement */}
-              <button
-                onClick={() => setActiveTab('settlement')}
-                className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
-                  activeTab === 'settlement'
-                    ? 'bg-purple-600 text-white font-black shadow-xs'
-                    : 'text-purple-200 hover:bg-purple-900/60'
-                }`}
-              >
-                <DollarSign className="w-4 h-4" />
-                <span>Cash Settlement</span>
-                {totalCodUnsettled > 0 && (
-                  <span className="bg-emerald-500 text-gray-900 text-[10px] font-black px-1.5 py-0.2 rounded-full">
-                    ₹{totalCodUnsettled}
+                <span>Platform Settings</span>
+                {passwordResetRequests.length > 0 && (
+                  <span className="bg-amber-500 text-gray-900 text-[10px] font-black px-1.5 py-0.2 rounded-full">
+                    {passwordResetRequests.length}
                   </span>
                 )}
               </button>
@@ -1431,8 +881,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 { label: 'Pending Stores', value: p.pending_stores, sub: 'Awaiting approval', color: 'text-amber-700', tab: 'stores' as AdminTab },
                 { label: 'Rejected Stores', value: p.rejected_stores, sub: 'Declined registrations', color: 'text-red-600', tab: 'stores' as AdminTab },
                 { label: 'Suspended Stores', value: p.suspended_stores, sub: 'Temporarily paused', color: 'text-orange-700', tab: 'stores' as AdminTab },
-                { label: 'Total Products', value: p.total_products, sub: 'All catalog SKUs', color: 'text-indigo-900', tab: 'pricing' as AdminTab },
-                { label: 'Active Products', value: p.active_products, sub: 'Visible & listed', color: 'text-emerald-700', tab: 'pricing' as AdminTab },
+                { label: 'Total Products', value: p.total_products, sub: 'All catalog SKUs', color: 'text-indigo-900', tab: 'inventory' as AdminTab },
+                { label: 'Active Products', value: p.active_products, sub: 'Visible & listed', color: 'text-emerald-700', tab: 'inventory' as AdminTab },
                 { label: 'Total Orders', value: p.total_orders, sub: 'All marketplace orders', color: 'text-purple-900', tab: 'orders' as AdminTab },
                 { label: 'Pending Orders', value: p.pending_orders, sub: 'Placed / Confirmed / Packed', color: 'text-amber-700', tab: 'orders' as AdminTab },
                 { label: 'Completed Orders', value: p.completed_orders, sub: 'Delivered successfully', color: 'text-emerald-700', tab: 'orders' as AdminTab },
@@ -1568,35 +1018,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {/* Orders Summary Row - Responsive 2-col on mobile, 4-col on tablet/desktop */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
               <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
-                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Pending Dispatch</div>
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Pending / Preparing</div>
                 <div className="text-lg sm:text-xl font-black text-amber-700 mt-0.5 sm:mt-1 truncate">
                   {orders.filter(o => ['placed', 'confirmed', 'packed'].includes(o.status)).length}
                 </div>
-                <div className="text-[10px] text-gray-400 truncate">Requires rider & OTP</div>
+                <div className="text-[10px] text-gray-400 truncate">Placed, confirmed &amp; packed</div>
               </div>
 
               <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
-                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Out For Delivery</div>
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Ready / Dispatched</div>
                 <div className="text-lg sm:text-xl font-black text-blue-700 mt-0.5 sm:mt-1 truncate">
                   {orders.filter(o => o.status === 'dispatched').length}
                 </div>
-                <div className="text-[10px] text-gray-400 truncate">Riders en route with OTP</div>
+                <div className="text-[10px] text-gray-400 truncate">Out for delivery or ready for pickup</div>
               </div>
 
               <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
-                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Completed Deliveries</div>
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Completed Orders</div>
                 <div className="text-lg sm:text-xl font-black text-emerald-700 mt-0.5 sm:mt-1 truncate">
                   {orders.filter(o => o.status === 'delivered').length}
                 </div>
-                <div className="text-[10px] text-gray-400 truncate">OTP verified on delivery</div>
+                <div className="text-[10px] text-gray-400 truncate">Fulfilled by partner stores</div>
               </div>
 
               <div className="bg-white p-2.5 sm:p-3.5 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs min-w-0">
-                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Total Orders Today</div>
+                <div className="text-[10px] sm:text-[11px] font-bold text-gray-500 uppercase truncate">Total Orders</div>
                 <div className="text-lg sm:text-xl font-black text-purple-900 mt-0.5 sm:mt-1 truncate">
                   {orders.length}
                 </div>
-                <div className="text-[10px] text-gray-400 truncate">Cash on Delivery only</div>
+                <div className="text-[10px] text-gray-400 truncate">COD &amp; Pay at Store</div>
               </div>
             </div>
 
@@ -1619,7 +1069,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-semibold w-full sm:w-52 shrink-0"
                 >
                   <option value="all">All Stores ({orders.length})</option>
-                  <option value="central">FMP Central Warehouse</option>
                   {adminStores.map(st => (
                     <option key={st.id} value={String(st.id)}>
                       {st.name}
@@ -1655,7 +1104,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             ) : (
               <div className="space-y-3 min-w-0">
                 {filteredOrders.map(order => {
-                  const isPending = ['placed', 'confirmed', 'packed'].includes(order.status);
                   const isDispatched = order.status === 'dispatched';
                   const isDelivered = order.status === 'delivered';
                   const isCancelled = order.status === 'cancelled';
@@ -1694,7 +1142,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                           {order.fulfillment_type === 'pickup' ? (
                             <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0">
-                              🏪 Store Pickup{order.pickup_code ? ` (${order.pickup_code})` : ''}
+                              🏪 Store Pickup
                             </span>
                           ) : order.delivery_type === 'scheduled' ? (
                             <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 shrink-0">
@@ -1703,7 +1151,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             </span>
                           ) : (
                             <span className="bg-teal-100 text-teal-800 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0">
-                              ⚡ Express (30-45m)
+                              ⚡ Home Delivery
                             </span>
                           )}
                         </div>
@@ -1719,19 +1167,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       {/* Customer & Address Details */}
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 sm:gap-3 text-xs bg-gray-50 p-2.5 sm:p-3 rounded-xl min-w-0">
                         <div className="min-w-0">
-                          <div className="text-[10px] font-bold uppercase text-gray-400">Customer</div>
+                          <div className="text-[10px] font-bold uppercase text-gray-400">Customer (Masked)</div>
                           <div className="font-bold text-gray-900 mt-0.5 break-words">{order.customer_name}</div>
-                          <a
-                            href={`tel:${order.customer_phone}`}
-                            className="text-purple-700 font-semibold hover:underline flex items-center gap-1 mt-0.5 break-all"
-                          >
+                          <div className="text-purple-700 font-semibold font-mono flex items-center gap-1 mt-0.5 break-all">
                             <Phone className="w-3 h-3 shrink-0" />
                             <span>{order.customer_phone}</span>
-                          </a>
+                          </div>
                         </div>
 
                         <div className="min-w-0">
-                          <div className="text-[10px] font-bold uppercase text-gray-400">Delivery Address</div>
+                          <div className="text-[10px] font-bold uppercase text-gray-400">
+                            {order.fulfillment_type === 'pickup' ? 'Fulfillment' : 'Delivery Area'}
+                          </div>
                           <div className="text-gray-800 mt-0.5 font-medium leading-relaxed break-words">
                             {order.delivery_address}
                           </div>
@@ -1743,7 +1190,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </div>
 
                         <div className="min-w-0">
-                          <div className="text-[10px] font-bold uppercase text-gray-400">COD Total & Distance</div>
+                          <div className="text-[10px] font-bold uppercase text-gray-400">Order Total &amp; Distance</div>
                           <div className="flex items-center gap-2 flex-wrap mt-0.5">
                             <span className="font-black text-base text-emerald-800">₹{order.total_amount}</span>
                             {order.distance_km !== undefined && order.distance_km !== null && (
@@ -1753,47 +1200,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               </span>
                             )}
                           </div>
-                          <div className="text-[11px] text-gray-500 flex items-center flex-wrap gap-1 mt-0.5">
-                            <span className="break-words">Items: ₹{order.subtotal} • Delivery: ₹{order.delivery_fee} • Handling: ₹{order.handling_fee}{Number(order.tip_amount) > 0 ? ` • Tip: ₹${order.tip_amount}` : ''}</span>
-                            {!isDelivered && !isCancelled && (
-                              <button
-                                onClick={() => {
-                                  setEditingFeeOrderId(order.id);
-                                  setOrderFeeInput(Number(order.delivery_fee));
-                                }}
-                                className="text-purple-700 hover:text-purple-900 font-bold underline cursor-pointer text-[10px]"
-                              >
-                                Adjust Fee
-                              </button>
-                            )}
+                          <div className="text-[11px] text-gray-500 mt-0.5">
+                            <span className="break-words">Items: ₹{order.subtotal} • Delivery: ₹{order.delivery_fee}</span>
                           </div>
-                          {editingFeeOrderId === order.id && (
-                            <div className="mt-2 p-2 bg-purple-50 rounded-xl border border-purple-200 flex flex-wrap items-center gap-2">
-                              <span className="text-[11px] font-bold text-purple-900">Fee (₹):</span>
-                              <input
-                                type="number"
-                                min="0"
-                                value={orderFeeInput}
-                                onChange={e => setOrderFeeInput(Number(e.target.value))}
-                                className="w-16 px-2 py-1 text-xs font-bold bg-white border border-purple-300 rounded-lg text-gray-900"
-                              />
-                              <button
-                                onClick={() => handleUpdateOrderDeliveryFee(order.id)}
-                                disabled={updatingFee}
-                                className="px-2.5 py-1 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-xs font-bold cursor-pointer"
-                              >
-                                Save
-                              </button>
-                              <button
-                                onClick={() => setEditingFeeOrderId(null)}
-                                className="text-gray-500 hover:text-gray-700 text-xs px-1 cursor-pointer"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                          )}
                           <div className="text-[10px] font-bold text-amber-800 mt-0.5">
-                            Cash on Delivery (COD)
+                            {order.payment_mode || (order.fulfillment_type === 'pickup' ? 'Pay at Store' : 'Cash on Delivery (COD)')}
                           </div>
                         </div>
                       </div>
@@ -1815,90 +1226,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </div>
                       )}
 
-                      {/* Secure OTP Display (for dispatched orders) */}
-                      {order.delivery_otp && (
-                        <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs min-w-0">
-                          <div className="flex items-center gap-2">
-                            <Key className="w-4 h-4 text-emerald-700 shrink-0" />
-                            <span className="font-bold text-emerald-900">Delivery OTP:</span>
-                            <span className="font-mono font-black text-sm text-emerald-800 bg-white px-2 py-0.5 rounded border border-emerald-300 tracking-wider">
-                              {order.delivery_otp}
-                            </span>
-                          </div>
-                          <span className="text-[11px] text-emerald-700 font-medium">
-                            Rider must verify this code to complete delivery
+                      {/* Actions */}
+                      <div className="pt-2.5 border-t border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-2.5 text-xs min-w-0">
+                        <div className="flex items-center gap-2 text-amber-900 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-semibold">
+                          <StoreIcon className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            Managed directly by store: <strong>{order.store_name || (order.store_id ? `Store #${order.store_id}` : 'Partner Store')}</strong>
+                            {order.fulfillment_type === 'pickup' ? ' (Store Pickup)' : ' (Store-Managed Delivery)'}
                           </span>
                         </div>
-                      )}
-
-                      {/* Actions: Assign Partner, Dispatch, Cancel */}
-                      <div className="pt-2.5 border-t border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-2.5 text-xs min-w-0">
-                        {order.store_id ? (
-                          <div className="flex items-center gap-2 text-amber-900 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-semibold">
-                            <StoreIcon className="w-3.5 h-3.5 shrink-0" />
-                            <span>
-                              Managed directly by store: <strong>{order.store_name || `#${order.store_id}`}</strong>
-                              {order.fulfillment_type === 'pickup' ? ' (Store Pickup)' : ' (Store-Managed Delivery)'}
-                            </span>
-                          </div>
-                        ) : (
-                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0 w-full md:w-auto">
-                          <span className="font-bold text-gray-600 shrink-0">Assigned Partner:</span>
-                          {order.rider_name && reassigningOrderId !== order.id ? (
-                            <div className="flex flex-wrap items-center gap-2 min-w-0">
-                              <span className="bg-purple-50 text-purple-900 font-bold px-2.5 py-1 rounded-lg border border-purple-200 flex items-center gap-1.5 min-w-0 break-words">
-                                <Truck className="w-3.5 h-3.5 text-purple-700 shrink-0" />
-                                <span className="break-all">{order.rider_name} ({order.rider_phone})</span>
-                              </span>
-                              {!isDelivered && !isCancelled && (
-                                <button
-                                  onClick={() => {
-                                    setReassigningOrderId(order.id);
-                                    setSelectedRiderByOrder(prev => ({ ...prev, [order.id]: order.rider_id || 0 }));
-                                  }}
-                                  className="text-purple-700 hover:text-purple-900 underline text-xs font-bold cursor-pointer shrink-0"
-                                >
-                                  Reassign
-                                </button>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-1.5 min-w-0 w-full sm:w-auto">
-                              <select
-                                value={selectedRiderByOrder[order.id] || ''}
-                                onChange={e =>
-                                  setSelectedRiderByOrder(prev => ({
-                                    ...prev,
-                                    [order.id]: Number(e.target.value)
-                                  }))
-                                }
-                                className="bg-white border border-gray-300 rounded-xl px-2.5 py-1.5 text-xs font-medium w-full sm:w-auto max-w-full sm:max-w-xs min-w-0 truncate"
-                              >
-                                <option value="">Select Delivery Partner</option>
-                                {riders.filter(r => r.is_active !== false).map(r => (
-                                  <option key={r.id} value={r.id}>
-                                    {r.name} ({r.phone}) — {r.active_deliveries || r.assigned_deliveries || 0} active orders
-                                  </option>
-                                ))}
-                              </select>
-                              <button
-                                onClick={() => handleAssignRider(order.id)}
-                                className="bg-purple-700 hover:bg-purple-800 text-white font-bold px-3 py-1.5 rounded-xl transition cursor-pointer shrink-0"
-                              >
-                                {reassigningOrderId === order.id ? 'Reassign' : 'Assign'}
-                              </button>
-                              {reassigningOrderId === order.id && (
-                                <button
-                                  onClick={() => setReassigningOrderId(null)}
-                                  className="text-gray-500 hover:text-gray-700 text-xs px-1 cursor-pointer shrink-0"
-                                >
-                                  Cancel
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        )}
 
                         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto">
                           <button
@@ -1909,17 +1245,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             <Eye className="w-3.5 h-3.5 shrink-0" />
                             <span>View Details</span>
                           </button>
-
-                          {!order.store_id && isPending && (
-                            <button
-                              onClick={() => handleDispatchOrder(order.id)}
-                              disabled={dispatchingOrderId === order.id}
-                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 sm:py-1.5 rounded-xl shadow-xs transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 w-full sm:w-auto"
-                            >
-                              <Truck className="w-3.5 h-3.5 shrink-0" />
-                              <span>Dispatch &amp; Generate OTP</span>
-                            </button>
-                          )}
 
                           {!isDelivered && !isCancelled && (
                             <button
@@ -1940,905 +1265,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         )}
 
         {/* ======================================================== */}
-        {/* TAB 2: DAILY PRICING */}
-        {/* ======================================================== */}
-        {activeTab === 'pricing' && (
-          <div className="space-y-4">
-            {/* Top Bar: Add Product & Search */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-base font-extrabold text-gray-900">Wholesale Cost, Gross Margin & Daily Pricing</h2>
-                <p className="text-xs text-gray-500">
-                  Manage purchase cost, market price (MRP), FMP selling price, stock & private supplier details (customers only see FMP selling prices)
-                </p>
-              </div>
-
-              <button
-                onClick={() => {
-                  setEditingProduct(null);
-                  setProductForm({
-                    name: '',
-                    category_id: 1,
-                    unit: '1 kg',
-                    price: '',
-                    mrp: '',
-                    purchase_cost: '',
-                    stock: '50',
-                    image_url: '',
-                    description: '',
-                    supplier_id: '',
-                    supplier_name: '',
-                    supplier_phone: '',
-                    supplier_address: '',
-                    product_type: 'packaged',
-                    min_order_qty: '1',
-                    max_order_qty: '',
-                    pricing_slabs: []
-                  });
-                  setIsAddProductOpen(true);
-                }}
-                className="bg-purple-700 hover:bg-purple-800 text-white font-bold px-4 py-2 rounded-2xl text-xs flex items-center gap-1.5 transition shadow-xs cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Add New Product</span>
-              </button>
-            </div>
-
-            {/* Wholesale Margin KPI Strip */}
-            {(() => {
-              const costed = products.filter(p => p.purchase_cost !== null && p.purchase_cost !== undefined && Number(p.purchase_cost) > 0);
-              const avgMarginPct = costed.length > 0
-                ? (costed.reduce((sum, p) => sum + Number(p.margin_percent || 0), 0) / costed.length).toFixed(1)
-                : '0.0';
-              const lowOrNegMargin = costed.filter(p => Number(p.gross_margin || 0) <= 0).length;
-              return (
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3">
-                  <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-xs min-w-0">
-                    <div className="text-[10px] font-bold text-gray-500 uppercase truncate">Products With Cost</div>
-                    <div className="text-lg font-black text-purple-900 mt-0.5">{costed.length} / {products.length}</div>
-                    <div className="text-[10px] text-gray-400 truncate">Wholesale tracked SKUs</div>
-                  </div>
-                  <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-xs min-w-0">
-                    <div className="text-[10px] font-bold text-gray-500 uppercase truncate">Avg Gross Margin</div>
-                    <div className="text-lg font-black text-emerald-700 mt-0.5">{avgMarginPct}%</div>
-                    <div className="text-[10px] text-gray-400 truncate">Across costed items</div>
-                  </div>
-                  <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-xs col-span-2 sm:col-span-1 min-w-0">
-                    <div className="text-[10px] font-bold text-gray-500 uppercase truncate">Zero / Negative Margin</div>
-                    <div className={`text-lg font-black mt-0.5 ${lowOrNegMargin > 0 ? 'text-red-600' : 'text-gray-800'}`}>{lowOrNegMargin}</div>
-                    <div className="text-[10px] text-gray-400 truncate">Selling ≤ Purchase Cost</div>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Filter and Search */}
-            <div className="bg-white p-2.5 sm:p-3 rounded-2xl border border-gray-200 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 sm:gap-3 text-xs min-w-0">
-              <div className="flex-1 min-w-0 relative">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input
-                  type="text"
-                  value={productSearch}
-                  onChange={e => setProductSearch(e.target.value)}
-                  placeholder="Search product or store name..."
-                  className="w-full pl-9 pr-3 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-hidden focus:bg-white focus:border-purple-600"
-                />
-              </div>
-
-              <select
-                value={productStoreFilter}
-                onChange={e => setProductStoreFilter(e.target.value)}
-                className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-semibold w-full sm:w-auto"
-              >
-                <option value="all">All Stores ({products.length})</option>
-                <option value="central">FMP Central Warehouse</option>
-                {adminStores.map(st => (
-                  <option key={st.id} value={String(st.id)}>
-                    {st.name}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={productCategoryFilter}
-                onChange={e => setProductCategoryFilter(e.target.value)}
-                className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5 text-xs font-semibold w-full sm:w-auto"
-              >
-                <option value="all">All Categories ({categories.length})</option>
-                {categories.map(c => (
-                  <option key={c.id} value={c.name}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Products Table */}
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs min-w-0">
-              <div className="overflow-x-auto touch-pan-x scrollbar-none">
-                <table className="w-full text-left text-xs min-w-[820px]">
-                  <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase text-[10px] tracking-wider">
-                    <tr>
-                      <th className="py-3 px-4">Product</th>
-                      <th className="py-3 px-3">Purchase Cost</th>
-                      <th className="py-3 px-3">FMP Price (₹)</th>
-                      <th className="py-3 px-3">Market MRP</th>
-                      <th className="py-3 px-3">Gross Margin</th>
-                      <th className="py-3 px-3">Supplier (Private)</th>
-                      <th className="py-3 px-3">Stock</th>
-                      <th className="py-3 px-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {filteredProducts.map(product => {
-                      const isLowStock = product.stock > 0 && product.stock < 10;
-                      const isOut = product.stock <= 0;
-                      const hasCost = product.purchase_cost !== null && product.purchase_cost !== undefined;
-                      const sellPrice = Number(product.price);
-                      const costPrice = hasCost ? Number(product.purchase_cost) : null;
-                      const marginAmt = costPrice !== null ? Number((sellPrice - costPrice).toFixed(2)) : null;
-                      const marginPct = costPrice !== null && sellPrice > 0
-                        ? Number((((sellPrice - costPrice) / sellPrice) * 100).toFixed(1))
-                        : null;
-
-                      return (
-                        <tr key={product.id} className="hover:bg-gray-50/70 transition">
-                          {/* Product Image & Name */}
-                          <td className="py-3 px-4">
-                            <div className="flex items-center gap-3">
-                              <img
-                                src={product.image_url}
-                                alt={product.name}
-                                className="w-10 h-10 object-cover rounded-xl border border-gray-200 shrink-0"
-                              />
-                                <div>
-                                  <div className="font-bold text-gray-900 leading-tight">{product.name}</div>
-                                  <div className="text-gray-500 text-[11px]">{product.unit} • {product.category_name}</div>
-                                  <div className="flex flex-wrap items-center gap-1 mt-1">
-                                    <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
-                                      product.store_id
-                                        ? 'bg-amber-100 text-amber-900'
-                                        : 'bg-purple-100 text-purple-900'
-                                    }`}>
-                                      {product.store_id ? (product.store_name || `Store #${product.store_id}`) : 'FMP Central'}
-                                    </span>
-                                    <span className={`text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded ${
-                                      normalizeProductType(product.product_type, product.unit) === 'loose'
-                                        ? 'bg-amber-100 text-amber-900'
-                                        : 'bg-gray-100 text-gray-700'
-                                    }`}>
-                                      {normalizeProductType(product.product_type, product.unit)}
-                                    </span>
-                                    {!product.store_id && (
-                                      <button
-                                        type="button"
-                                        onClick={() => openEditProductModal(product)}
-                                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded border cursor-pointer transition ${
-                                          product.pricing_slabs && product.pricing_slabs.length > 0
-                                            ? 'bg-purple-50 text-purple-800 border-purple-200 hover:bg-purple-100'
-                                            : 'bg-white text-gray-500 border-gray-200 hover:border-purple-300'
-                                        }`}
-                                      >
-                                        {product.pricing_slabs && product.pricing_slabs.length > 0
-                                          ? `${product.pricing_slabs.length} qty slabs`
-                                          : '+ Qty Slabs'}
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-
-                            {/* Purchase Cost */}
-                            <td className="py-3 px-3">
-                              {costPrice !== null ? (
-                                <span className="font-bold text-gray-800">₹{costPrice}</span>
-                              ) : (
-                                <span className="text-gray-400 italic text-[11px]">Not set</span>
-                              )}
-                            </td>
-
-                            {/* FMP Selling Price */}
-                            <td className="py-3 px-3">
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-black text-gray-900 text-sm">₹{product.price}</span>
-                                {!product.store_id && (
-                                  <button
-                                    onClick={() => {
-                                      const val = prompt(`Enter new daily selling price for ${product.name}:`, String(product.price));
-                                      if (val && !isNaN(Number(val)) && Number(val) > 0) {
-                                        handleQuickPriceUpdate(product.id, Number(val), Number(product.mrp));
-                                      }
-                                    }}
-                                    title="Quick Edit Price"
-                                    className="p-1 text-gray-400 hover:text-purple-700 rounded transition cursor-pointer"
-                                  >
-                                    <Edit2 className="w-3 h-3" />
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-
-                            {/* MRP */}
-                            <td className="py-3 px-3 text-gray-500">
-                              ₹{product.mrp}
-                            </td>
-
-                            {/* Gross Margin */}
-                            <td className="py-3 px-3">
-                              {marginAmt !== null ? (
-                                <div className="space-y-0.5">
-                                  <span className={`font-black text-xs ${marginAmt > 0 ? 'text-emerald-700' : 'text-red-600'}`}>
-                                    {marginAmt >= 0 ? `+₹${marginAmt}` : `-₹${Math.abs(marginAmt)}`}
-                                  </span>
-                                  <span className={`block text-[10px] font-bold ${marginAmt > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
-                                    {marginPct}% margin
-                                  </span>
-                                </div>
-                              ) : (
-                                <span className="text-gray-400 text-[11px]">—</span>
-                              )}
-                            </td>
-
-                            {/* Supplier (Private Admin Only) */}
-                            <td className="py-3 px-3 max-w-[170px]">
-                              {product.supplier_name ? (
-                                <div className="text-[11px]">
-                                  <div className="font-bold text-gray-800 truncate">{product.supplier_name}</div>
-                                  {product.supplier_address && (
-                                    <div className="text-[10px] text-gray-500 truncate" title={product.supplier_address}>
-                                      {product.supplier_address}
-                                    </div>
-                                  )}
-                                </div>
-                              ) : (
-                                <span className="text-gray-400 italic text-[11px]">No supplier</span>
-                              )}
-                            </td>
-
-                            {/* Stock Units */}
-                            <td className="py-3 px-3">
-                              <div className="flex items-center gap-1.5">
-                                <span className={`font-bold ${isOut ? 'text-red-600' : isLowStock ? 'text-amber-700' : 'text-gray-900'}`}>
-                                  {product.stock}
-                                </span>
-                                {!product.store_id && (
-                                  <button
-                                    onClick={() => {
-                                      setStockAdjustProduct(product);
-                                      setNewStockValue(product.stock);
-                                    }}
-                                    title="Adjust Stock"
-                                    className="p-1 text-gray-400 hover:text-purple-700 rounded transition cursor-pointer"
-                                  >
-                                    <Boxes className="w-3 h-3" />
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-
-                            {/* Actions */}
-                            <td className="py-3 px-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5">
-                                {!product.store_id && (
-                                  <button
-                                    onClick={() => openEditProductModal(product)}
-                                    className="p-1.5 text-gray-500 hover:text-purple-700 hover:bg-purple-50 rounded-lg transition cursor-pointer"
-                                    title="Edit Wholesale Cost, Slabs & Product Details"
-                                  >
-                                    <Edit2 className="w-4 h-4" />
-                                  </button>
-                                )}
-
-                                <button
-                                  onClick={() => handleDeleteProduct(product.id)}
-                                  className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
-                                  title="Deactivate Product"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ======================================================== */}
-        {/* TAB 3: RIDER CASH SETTLEMENT */}
-        {/* ======================================================== */}
-        {activeTab === 'settlement' && (
-          <div className="space-y-4">
-            {/* Settlement Metrics Row */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-xs">
-                <div className="text-[11px] font-bold text-gray-500 uppercase">Total COD Cash Collected</div>
-                <div className="text-2xl font-black text-gray-900 mt-1">₹{totalCodCollected}</div>
-                <div className="text-[10px] text-gray-400 mt-0.5">Across all completed deliveries</div>
-              </div>
-
-              <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-xs">
-                <div className="text-[11px] font-bold text-gray-500 uppercase">Settled At Cash Counter</div>
-                <div className="text-2xl font-black text-emerald-700 mt-1">₹{totalCodSettled}</div>
-                <div className="text-[10px] text-emerald-600 mt-0.5">Verified & handed over</div>
-              </div>
-
-              <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-xs">
-                <div className="text-[11px] font-bold text-gray-500 uppercase">Pending Cash In Hand</div>
-                <div className="text-2xl font-black text-amber-700 mt-1">₹{totalCodUnsettled}</div>
-                <div className="text-[10px] text-amber-600 mt-0.5">With active delivery partners</div>
-              </div>
-            </div>
-
-            {/* Rider Wise Breakdown */}
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs min-w-0">
-              <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-                <div>
-                  <h3 className="font-extrabold text-sm text-gray-900">Delivery Partner Cash Settlement</h3>
-                  <p className="text-xs text-gray-500">Collect cash from riders and clear their daily balance</p>
-                </div>
-              </div>
-
-              <div className="overflow-x-auto touch-pan-x scrollbar-none">
-                <table className="w-full text-left text-xs min-w-[640px]">
-                  <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase text-[10px] tracking-wider">
-                    <tr>
-                      <th className="py-3 px-4">Delivery Partner</th>
-                      <th className="py-3 px-3">Contact</th>
-                      <th className="py-3 px-3">Delivered COD Orders</th>
-                      <th className="py-3 px-3">Cash In Hand</th>
-                      <th className="py-3 px-3">Reconciliation Status</th>
-                      <th className="py-3 px-4 text-right">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {riders.map(rider => {
-                      // Compute rider's pending COD from orders
-                      const riderDelivered = orders.filter(
-                        o => o.rider_id === rider.id && o.status === 'delivered'
-                      );
-                      const riderPendingOrders = riderDelivered.filter(o => !o.cod_reconciled);
-                      const cashInHand = riderPendingOrders.reduce(
-                        (sum, o) => sum + Number(o.total_amount),
-                        0
-                      );
-
-                      return (
-                        <tr key={rider.id} className="hover:bg-gray-50/70 transition">
-                          <td className="py-3 px-4 font-bold text-gray-900">
-                            <div className="flex items-center gap-2">
-                              <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 font-black flex items-center justify-center">
-                                {rider.name.charAt(0)}
-                              </div>
-                              <div>
-                                <div>{rider.name}</div>
-                                <div className="text-[10px] text-gray-400 font-medium">Karanja Fleet</div>
-                              </div>
-                            </div>
-                          </td>
-
-                          <td className="py-3 px-3">
-                            <a
-                              href={`tel:${rider.phone}`}
-                              className="text-purple-700 font-semibold hover:underline flex items-center gap-1"
-                            >
-                              <Phone className="w-3 h-3" />
-                              <span>{rider.phone}</span>
-                            </a>
-                          </td>
-
-                          <td className="py-3 px-3 font-semibold text-gray-800">
-                            {riderDelivered.length} Delivered
-                          </td>
-
-                          <td className="py-3 px-3 font-black text-sm text-gray-900">
-                            {cashInHand > 0 ? (
-                              <span className="text-amber-700">₹{cashInHand}</span>
-                            ) : (
-                              <span className="text-gray-400">₹0</span>
-                            )}
-                          </td>
-
-                          <td className="py-3 px-3">
-                            {cashInHand > 0 ? (
-                              <span className="bg-amber-100 text-amber-900 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                Pending Cash Handover
-                              </span>
-                            ) : (
-                              <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                All Settled
-                              </span>
-                            )}
-                          </td>
-
-                          <td className="py-3 px-4 text-right">
-                            <button
-                              onClick={() => {
-                                setReconcileModalRider({
-                                  ...rider,
-                                  cashInHand,
-                                  pendingCount: riderPendingOrders.length
-                                });
-                              }}
-                              disabled={cashInHand <= 0}
-                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-xl transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-xs"
-                            >
-                              Settle Cash
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Audit Log Table */}
-            {auditLogs.length > 0 && (
-              <div className="bg-white rounded-2xl border border-gray-200 p-4 shadow-xs space-y-2">
-                <h4 className="font-extrabold text-xs text-gray-900">Recent Admin & Cash Settlement Audit Logs</h4>
-                <div className="max-h-52 overflow-y-auto divide-y divide-gray-100 text-xs">
-                  {auditLogs.slice(0, 10).map((log: any) => (
-                    <div key={log.id} className="py-2 flex items-center justify-between text-[11px]">
-                      <div>
-                        <span className="font-bold text-gray-900 capitalize">{log.action.replace('_', ' ')}</span>
-                        <span className="text-gray-500 ml-2">{log.details}</span>
-                      </div>
-                      <span className="text-gray-400 text-[10px]">
-                        {new Date(log.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ======================================================== */}
-        {/* TAB 4: DELIVERY PARTNERS (FLEET MANAGEMENT) */}
-        {/* ======================================================== */}
-        {activeTab === 'riders' && (
-          <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div>
-                <h3 className="font-extrabold text-base text-gray-900">Delivery Partners Fleet</h3>
-                <p className="text-xs text-gray-500">Manage delivery boys, account credentials, active workload and cash in hand</p>
-              </div>
-
-              <button
-                onClick={() => setIsAddRiderOpen(true)}
-                className="bg-purple-700 hover:bg-purple-800 text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Add Delivery Partner</span>
-              </button>
-            </div>
-
-            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs min-w-0">
-              <div className="overflow-x-auto touch-pan-x scrollbar-none">
-                <table className="w-full text-left text-xs min-w-[640px]">
-                  <thead className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase text-[10px]">
-                    <tr>
-                      <th className="py-3 px-4">Partner Name</th>
-                      <th className="py-3 px-3">Mobile Number</th>
-                      <th className="py-3 px-3">Assigned Orders</th>
-                      <th className="py-3 px-3">Completed</th>
-                      <th className="py-3 px-3">Failed / Issues</th>
-                      <th className="py-3 px-3">Cash In Hand</th>
-                      <th className="py-3 px-3">Status</th>
-                      <th className="py-3 px-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {riders.map(rider => (
-                      <tr key={rider.id} className="hover:bg-gray-50/70 transition">
-                        <td className="py-3 px-4 font-bold text-gray-900">
-                          <div className="flex items-center gap-2">
-                            <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-800 font-black flex items-center justify-center">
-                              {rider.name.charAt(0)}
-                            </div>
-                            <div>
-                              <div>{rider.name}</div>
-                              <div className="text-[10px] text-gray-400 font-medium">{rider.address || 'Karanja Lad'}</div>
-                            </div>
-                          </div>
-                        </td>
-
-                        <td className="py-3 px-3">
-                          <a href={`tel:${rider.phone}`} className="text-purple-700 font-semibold hover:underline flex items-center gap-1">
-                            <Phone className="w-3 h-3" />
-                            <span>{rider.phone}</span>
-                          </a>
-                        </td>
-
-                        <td className="py-3 px-3">
-                          <span className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
-                            Number(rider.active_deliveries) > 0 ? 'bg-amber-100 text-amber-900' : 'bg-gray-100 text-gray-600'
-                          }`}>
-                            {rider.active_deliveries || 0} active ({rider.assigned_deliveries || 0} total)
-                          </span>
-                        </td>
-
-                        <td className="py-3 px-3 font-semibold text-emerald-800">
-                          {rider.total_delivered || 0} Delivered
-                        </td>
-
-                        <td className="py-3 px-3 font-semibold">
-                          {Number(rider.failed_deliveries) > 0 ? (
-                            <span className="text-red-700 bg-red-50 px-2 py-0.5 rounded-full text-[10px] font-bold">
-                              {rider.failed_deliveries} Failed
-                            </span>
-                          ) : (
-                            <span className="text-gray-400 text-[11px]">0</span>
-                          )}
-                        </td>
-
-                        <td className="py-3 px-3 font-black text-gray-900">
-                          ₹{Number(rider.cash_in_hand || 0)}
-                        </td>
-
-                        <td className="py-3 px-3">
-                          <button
-                            onClick={() => handleToggleRiderActive(rider)}
-                            className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold cursor-pointer transition ${
-                              rider.is_active !== false
-                                ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                                : 'bg-red-100 text-red-800 hover:bg-red-200'
-                            }`}
-                          >
-                            {rider.is_active !== false ? '● Active' : '○ Inactive'}
-                          </button>
-                        </td>
-
-                        <td className="py-3 px-4 text-right">
-                          <button
-                            onClick={() => {
-                              setResetPasswordRider(rider);
-                              setNewRiderPassword('');
-                            }}
-                            className="text-purple-700 hover:text-purple-900 hover:bg-purple-50 font-bold px-2.5 py-1 rounded-lg border border-purple-200 transition cursor-pointer text-xs"
-                          >
-                            Reset Password
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ======================================================== */}
-        {/* TAB 5: DELIVERY SETTINGS, WAREHOUSE COORDS & SLOTS */}
+        {/* TAB 5: PLATFORM SETTINGS & PASSWORD RESETS */}
         {/* ======================================================== */}
         {activeTab === 'settings' && (
           <div className="space-y-6">
-            <form onSubmit={handleSaveDeliverySettings} className="space-y-6">
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Central Warehouse Coordinates Card */}
-                <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
-                      <MapPin className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h3 className="font-extrabold text-sm text-gray-900">Central Warehouse Location (OpenStreetMap)</h3>
-                      <p className="text-[11px] text-gray-500">All OSRM road distances are calculated from this pin</p>
-                    </div>
-                  </div>
-
-                  <OsmMapPicker
-                    lat={Number(deliverySettings.warehouse_lat || 20.4839)}
-                    lng={Number(deliverySettings.warehouse_lng || 77.4877)}
-                    pinColor="purple"
-                    pinLabel="Warehouse"
-                    heightClass="h-52"
-                    onChange={(newLat, newLng, addr) =>
-                      setDeliverySettings(prev => ({
-                        ...prev,
-                        warehouse_lat: newLat,
-                        warehouse_lng: newLng,
-                        ...(addr ? { warehouse_address: addr } : {})
-                      }))
-                    }
-                  />
-
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div>
-                      <label className="block text-[10px] font-bold text-gray-600 mb-1">Warehouse Latitude</label>
-                      <input
-                        type="number"
-                        step="0.000001"
-                        required
-                        value={deliverySettings.warehouse_lat ?? 20.4839}
-                        onChange={e => setDeliverySettings({ ...deliverySettings, warehouse_lat: Number(e.target.value) })}
-                        className="w-full p-2 bg-gray-50 border border-gray-200 rounded-xl font-mono text-xs font-bold"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] font-bold text-gray-600 mb-1">Warehouse Longitude</label>
-                      <input
-                        type="number"
-                        step="0.000001"
-                        required
-                        value={deliverySettings.warehouse_lng ?? 77.4877}
-                        onChange={e => setDeliverySettings({ ...deliverySettings, warehouse_lng: Number(e.target.value) })}
-                        className="w-full p-2 bg-gray-50 border border-gray-200 rounded-xl font-mono text-xs font-bold"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="text-xs">
-                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Warehouse Address Label</label>
-                    <input
-                      type="text"
-                      required
-                      value={deliverySettings.warehouse_address || ''}
-                      onChange={e => setDeliverySettings({ ...deliverySettings, warehouse_address: e.target.value })}
-                      className="w-full p-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-medium"
-                    />
-                  </div>
-                </div>
-
-                {/* Distance-Based Delivery Charge Rules Card */}
-                <div className="bg-white p-4 sm:p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4 min-w-0">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-2">
-                      <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
-                        <Settings className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <h3 className="font-extrabold text-sm text-gray-900">Distance-Based Delivery Charges</h3>
-                        <p className="text-[11px] text-gray-500">Backend-enforced pricing by road km (no ₹299 threshold)</p>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleResetDefaultSlabs}
-                      className="text-[11px] font-bold text-purple-700 hover:text-purple-900 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg cursor-pointer"
-                    >
-                      Load Default Slabs
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
-                        Handling & Packaging Fee (₹)
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        required
-                        value={deliverySettings.handling_fee ?? 5}
-                        onChange={e => setDeliverySettings({ ...deliverySettings, handling_fee: Number(e.target.value) })}
-                        className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
-                        Max Delivery Radius (km)
-                      </label>
-                      <input
-                        type="number"
-                        min="1"
-                        step="0.5"
-                        required
-                        value={deliverySettings.max_delivery_distance_km ?? 8}
-                        onChange={e => setDeliverySettings({ ...deliverySettings, max_delivery_distance_km: Number(e.target.value) })}
-                        className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900"
-                      />
-                      <span className="text-[10px] text-gray-400">Orders above this are unavailable</span>
-                    </div>
-                  </div>
-
-                  {/* Pricing Mode Selector */}
-                  <div className="space-y-1.5 text-xs">
-                    <label className="block text-[11px] font-bold text-gray-700">Delivery Charge Calculation Mode</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setDeliverySettings({ ...deliverySettings, delivery_pricing_mode: 'slabs' })}
-                        className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
-                          deliverySettings.delivery_pricing_mode !== 'per_km'
-                            ? 'bg-purple-700 text-white border-purple-700 font-bold shadow-xs'
-                            : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
-                        }`}
-                      >
-                        <div className="text-xs font-extrabold">Distance Slabs</div>
-                        <div className={`text-[10px] ${deliverySettings.delivery_pricing_mode !== 'per_km' ? 'text-purple-100' : 'text-gray-500'}`}>
-                          Custom ranges, Free / Fixed / Per-km
-                        </div>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setDeliverySettings({ ...deliverySettings, delivery_pricing_mode: 'per_km' })}
-                        className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
-                          deliverySettings.delivery_pricing_mode === 'per_km'
-                            ? 'bg-purple-700 text-white border-purple-700 font-bold shadow-xs'
-                            : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
-                        }`}
-                      >
-                        <div className="text-xs font-extrabold">Per-Kilometre Rate</div>
-                        <div className={`text-[10px] ${deliverySettings.delivery_pricing_mode === 'per_km' ? 'text-purple-100' : 'text-gray-500'}`}>
-                          Free base km + ₹/km charge
-                        </div>
-                      </button>
-                    </div>
-                  </div>
-
-                  {deliverySettings.delivery_pricing_mode === 'per_km' ? (
-                    <div className="p-3 bg-purple-50/70 border border-purple-200 rounded-2xl space-y-3 text-xs">
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="block text-[10px] font-bold text-purple-900 mb-1">Free Delivery Up To (km)</label>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.5"
-                            value={deliverySettings.free_delivery_up_to_km ?? 0}
-                            onChange={e => setDeliverySettings({ ...deliverySettings, free_delivery_up_to_km: Number(e.target.value) })}
-                            className="w-full p-2 bg-white border border-purple-200 rounded-xl font-bold"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-bold text-purple-900 mb-1">Rate Per Kilometre (₹/km)</label>
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={deliverySettings.per_km_rate ?? 8}
-                            onChange={e => setDeliverySettings({ ...deliverySettings, per_km_rate: Number(e.target.value) })}
-                            className="w-full p-2 bg-white border border-purple-200 rounded-xl font-bold"
-                          />
-                          <span className="text-[10px] text-purple-700">Set ₹0 for completely free delivery</span>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-2 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-bold text-gray-700">Editable Distance Slabs (km)</span>
-                        <button
-                          type="button"
-                          onClick={handleAddDeliverySlab}
-                          className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-1 cursor-pointer"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>Add Slab</span>
-                        </button>
-                      </div>
-
-                      <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                        {(deliverySettings.delivery_slabs || []).map((slab, idx) => (
-                          <div key={slab.id || idx} className="p-2.5 bg-gray-50 border border-gray-200 rounded-xl grid grid-cols-12 gap-1.5 items-end">
-                            <div className="col-span-3">
-                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Min km</label>
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.5"
-                                value={slab.min_km}
-                                onChange={e => handleUpdateDeliverySlab(idx, { min_km: Number(e.target.value) })}
-                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold"
-                              />
-                            </div>
-                            <div className="col-span-3">
-                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Max km</label>
-                              <input
-                                type="number"
-                                min="0.5"
-                                step="0.5"
-                                value={slab.max_km}
-                                onChange={e => handleUpdateDeliverySlab(idx, { max_km: Number(e.target.value) })}
-                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold"
-                              />
-                            </div>
-                            <div className="col-span-3">
-                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Type</label>
-                              <select
-                                value={slab.charge_type}
-                                onChange={e => handleUpdateDeliverySlab(idx, { charge_type: e.target.value as any })}
-                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-[11px] font-semibold"
-                              >
-                                <option value="free">FREE</option>
-                                <option value="fixed">Fixed ₹</option>
-                                <option value="per_km">₹ / km</option>
-                              </select>
-                            </div>
-                            <div className="col-span-2">
-                              <label className="block text-[9px] font-bold text-gray-500 uppercase">₹</label>
-                              <input
-                                type="number"
-                                min="0"
-                                disabled={slab.charge_type === 'free'}
-                                value={slab.charge_type === 'free' ? 0 : slab.charge}
-                                onChange={e => handleUpdateDeliverySlab(idx, { charge: Number(e.target.value) })}
-                                className="w-full p-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold disabled:bg-gray-100 disabled:text-gray-400"
-                              />
-                            </div>
-                            <div className="col-span-1 flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveDeliverySlab(idx)}
-                                className="p-1.5 text-gray-400 hover:text-red-600 cursor-pointer"
-                                title="Remove slab"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-1.5">
-                        Distances above <strong>{deliverySettings.max_delivery_distance_km} km</strong> are automatically blocked as unavailable at checkout.
-                      </div>
-                    </div>
-                  )}
-
-                  <button
-                    type="submit"
-                    disabled={savingSettings}
-                    className="w-full py-2.5 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50 text-xs"
-                  >
-                    {savingSettings ? 'Saving Settings...' : 'Save Warehouse & Delivery Settings'}
-                  </button>
-                </div>
-              </div>
-            </form>
-
-            {/* Delivery Slots Management Card */}
-            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
-                    <Clock className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h3 className="font-extrabold text-sm text-gray-900">Scheduled Delivery Slots</h3>
-                    <p className="text-[11px] text-gray-500">Time windows for customer checkout</p>
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => setIsAddSlotOpen(true)}
-                  className="bg-purple-100 hover:bg-purple-200 text-purple-900 px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 transition cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add Slot</span>
-                </button>
-              </div>
-
-              <div className="divide-y divide-gray-100 text-xs">
-                {deliverySlots.map(slot => (
-                  <div key={slot.id} className="py-2.5 flex items-center justify-between">
-                    <div>
-                      <div className="font-bold text-gray-900">{slot.name}</div>
-                      <div className="text-[11px] text-purple-700 font-semibold">{slot.time_window}</div>
-                      <div className="text-[10px] text-gray-400">Max Capacity: {slot.max_orders_per_slot || 25} orders</div>
-                    </div>
-
-                    <button
-                      onClick={() => handleDeleteSlot(slot.id)}
-                      className="text-gray-400 hover:text-red-600 p-1.5 rounded-lg transition cursor-pointer"
-                      title="Deactivate Slot"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
 
             {/* Platform Governance & Future Monetization Controls */}
             <form onSubmit={handleSavePlatformSettings} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -2950,7 +1380,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
 
-              {/* Future Monetization Architecture Flags (Admin-Only, Disabled During Free Launch) */}
+              {/* Future Monetization Architecture Flags (Locked OFF During Free Launch) */}
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4 flex flex-col justify-between">
                 <div className="space-y-4">
                   <div className="flex items-center gap-2">
@@ -2958,44 +1388,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <Lock className="w-4 h-4" />
                     </div>
                     <div>
-                      <h3 className="font-extrabold text-sm text-gray-900">Future Monetization Architecture (Admin-Only)</h3>
-                      <p className="text-[11px] text-gray-500">All flags remain OFF during Free Launch Mode so zero fees or ads appear to users</p>
+                      <h3 className="font-extrabold text-sm text-gray-900">Free Launch Monetization Lock (Read-Only)</h3>
+                      <p className="text-[11px] text-gray-500">Locked OFF across frontend &amp; backend so zero fees, commissions, or ads appear</p>
                     </div>
                   </div>
 
                   <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 font-medium">
-                    Free Launch Mode Guarantee: Paid plans, featured placements, upgrade prompts, AdMob, and AdSense stay hidden from Customers and Store Owners unless explicitly enabled here by an authorized Super Admin.
+                    Free Launch Mode Active: Store listing, ordering, and customer discovery are 100% free. All billing, commission, subscription, and ad toggles are enforced OFF by the backend.
                   </div>
 
                   <div className="space-y-2 text-xs">
                     {[
-                      { key: 'monetization_enabled' as const, label: 'Master Monetization Switch', desc: 'Must be enabled for any future billing or ad modules to activate' },
-                      { key: 'subscriptions_enabled' as const, label: 'Store Owner Subscriptions', desc: 'Monthly kirana plans module (disabled for free launch)' },
-                      { key: 'featured_stores_enabled' as const, label: 'Featured Store Placements', desc: 'Promoted kirana ranking slots' },
-                      { key: 'store_ads_enabled' as const, label: 'Sponsored Store Banners', desc: 'In-marketplace kirana advertisements' },
-                      { key: 'admob_enabled' as const, label: 'Google AdMob Integration', desc: 'Mobile app ad unit slots' },
-                      { key: 'adsense_enabled' as const, label: 'Google AdSense Integration', desc: 'Responsive web ad slots' }
+                      { key: 'monetization_enabled' as const, label: 'Master Monetization Switch', desc: 'Locked OFF during free launch' },
+                      { key: 'subscriptions_enabled' as const, label: 'Store Owner Subscriptions', desc: 'Monthly kirana plans module locked OFF' },
+                      { key: 'featured_stores_enabled' as const, label: 'Featured Store Placements', desc: 'Promoted kirana ranking slots locked OFF' },
+                      { key: 'store_ads_enabled' as const, label: 'Sponsored Store Banners', desc: 'In-marketplace advertisements locked OFF' },
+                      { key: 'admob_enabled' as const, label: 'Google AdMob Integration', desc: 'Mobile ad unit slots locked OFF' },
+                      { key: 'adsense_enabled' as const, label: 'Google AdSense Integration', desc: 'Responsive web ad slots locked OFF' }
                     ].map(item => (
-                      <label
+                      <div
                         key={item.key}
-                        className="flex items-center justify-between gap-3 p-2.5 bg-gray-50 rounded-xl border border-gray-200 cursor-pointer"
+                        className="flex items-center justify-between gap-3 p-2.5 bg-gray-50 rounded-xl border border-gray-200 opacity-85"
                       >
                         <div className="min-w-0">
                           <div className="font-bold text-gray-900">{item.label}</div>
                           <div className="text-[10px] text-gray-500">{item.desc}</div>
                         </div>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(platformSettings[item.key])}
-                          onChange={e =>
-                            setPlatformSettings({
-                              ...platformSettings,
-                              [item.key]: e.target.checked
-                            })
-                          }
-                          className="w-4 h-4 text-purple-700 rounded shrink-0"
-                        />
-                      </label>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-gray-200 text-gray-700">
+                            Locked OFF
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={false}
+                            disabled
+                            readOnly
+                            className="w-4 h-4 text-gray-400 rounded shrink-0 cursor-not-allowed"
+                          />
+                        </div>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -3005,10 +1436,88 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   disabled={savingPlatformSettings}
                   className="w-full py-2.5 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs transition cursor-pointer disabled:opacity-50 text-xs"
                 >
-                  {savingPlatformSettings ? 'Saving Platform Controls...' : 'Save Platform & Feature Controls'}
+                  {savingPlatformSettings ? 'Saving Platform Controls...' : 'Save Platform Governance Settings'}
                 </button>
               </div>
             </form>
+
+            {/* Pending Password Reset Requests Card */}
+            <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-4">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                    <Key className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-sm text-gray-900">User Password Reset Requests</h3>
+                    <p className="text-[11px] text-gray-500">
+                      Issue a temporary password for verified customers or store owners (invalidates existing tokens immediately)
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                  {passwordResetRequests.filter(r => r.status === 'pending').length} Pending
+                </span>
+              </div>
+
+              {passwordResetRequests.length === 0 ? (
+                <div className="p-6 text-center text-xs text-gray-400 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                  No password reset requests recorded.
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-100 text-xs">
+                  {passwordResetRequests.map(reqItem => {
+                    const isPending = reqItem.status === 'pending';
+                    return (
+                      <div key={reqItem.id} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-0.5 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-gray-900">{reqItem.name || 'Account User'}</span>
+                            <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-purple-50 text-purple-800 border border-purple-200">
+                              {reqItem.role || 'customer'}
+                            </span>
+                            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
+                              isPending ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-800'
+                            }`}>
+                              {reqItem.status}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-gray-600 font-semibold">Mobile: {reqItem.phone}</div>
+                          {reqItem.notes && <div className="text-[10px] text-gray-500">{reqItem.notes}</div>}
+                          <div className="text-[10px] text-gray-400">
+                            Requested {reqItem.created_at ? new Date(reqItem.created_at).toLocaleString('en-IN') : ''}
+                          </div>
+                        </div>
+
+                        {isPending ? (
+                          <div className="flex items-center gap-2 shrink-0">
+                            <input
+                              type="text"
+                              value={resetPassByReqId[reqItem.id] || ''}
+                              onChange={e => setResetPassByReqId(prev => ({ ...prev, [reqItem.id]: e.target.value }))}
+                              placeholder="New password (min 6 chars)"
+                              className="p-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold w-44"
+                            />
+                            <button
+                              type="button"
+                              disabled={resettingReqId === reqItem.id}
+                              onClick={() => handleResolvePasswordReset(reqItem)}
+                              className="px-3.5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl text-xs cursor-pointer disabled:opacity-50"
+                            >
+                              {resettingReqId === reqItem.id ? 'Resetting...' : 'Reset Password'}
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-[11px] font-semibold text-emerald-700 shrink-0">
+                            Resolved {reqItem.resolved_at ? new Date(reqItem.resolved_at).toLocaleDateString('en-IN') : ''}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -3108,7 +1617,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             )}
 
-            {/* Warehouse Stock Movement Logs */}
+            {/* Platform Stock Movement Logs */}
             <div className="bg-white rounded-2xl border border-gray-200 p-4 shadow-xs space-y-3">
               <h3 className="font-extrabold text-sm text-gray-900">Inventory Movement Logs</h3>
               <div className="divide-y divide-gray-100 text-xs max-h-96 overflow-y-auto">
@@ -3725,739 +2234,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         )}
       </main>
 
-      {/* ======================================================== */}
-      {/* MODAL: ADD DELIVERY PARTNER (RIDER) */}
-      {/* ======================================================== */}
-      {isAddRiderOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-gray-100 space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-extrabold text-gray-900 text-base">Register Delivery Partner</h3>
-              <button onClick={() => setIsAddRiderOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateRider} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Partner Full Name</label>
-                <input
-                  type="text"
-                  required
-                  value={riderForm.name}
-                  onChange={e => setRiderForm({ ...riderForm, name: e.target.value })}
-                  placeholder="e.g. Ramesh Rathod"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Mobile Number (10 digits)</label>
-                <input
-                  type="tel"
-                  required
-                  value={riderForm.phone}
-                  onChange={e => setRiderForm({ ...riderForm, phone: e.target.value })}
-                  placeholder="9822XXXXXX"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Initial Password</label>
-                <input
-                  type="password"
-                  required
-                  value={riderForm.password}
-                  onChange={e => setRiderForm({ ...riderForm, password: e.target.value })}
-                  placeholder="••••••••"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Base Address / Area</label>
-                <input
-                  type="text"
-                  value={riderForm.address}
-                  onChange={e => setRiderForm({ ...riderForm, address: e.target.value })}
-                  placeholder="Station Road, Karanja Lad"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsAddRiderOpen(false)}
-                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={submittingRider}
-                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs cursor-pointer disabled:opacity-50"
-                >
-                  {submittingRider ? 'Registering...' : 'Create Account'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* MODAL: RESET RIDER PASSWORD */}
-      {/* ======================================================== */}
-      {resetPasswordRider && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-gray-100 space-y-4">
-            <h3 className="font-extrabold text-gray-900 text-base">Reset Password for {resetPasswordRider.name}</h3>
-            <p className="text-xs text-gray-500">Provide a new password for mobile {resetPasswordRider.phone}</p>
-
-            <form onSubmit={handleResetRiderPassword} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">New Password</label>
-                <input
-                  type="password"
-                  required
-                  value={newRiderPassword}
-                  onChange={e => setNewRiderPassword(e.target.value)}
-                  placeholder="Min 6 characters"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setResetPasswordRider(null)}
-                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs cursor-pointer"
-                >
-                  Update Password
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* MODAL: ADD DELIVERY SLOT */}
-      {/* ======================================================== */}
-      {isAddSlotOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-gray-100 space-y-4">
-            <h3 className="font-extrabold text-gray-900 text-base">Add Scheduled Delivery Slot</h3>
-
-            <form onSubmit={handleCreateSlot} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Slot Name</label>
-                <input
-                  type="text"
-                  required
-                  value={slotForm.name}
-                  onChange={e => setSlotForm({ ...slotForm, name: e.target.value })}
-                  placeholder="e.g. Afternoon Rush"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Time Window</label>
-                <input
-                  type="text"
-                  required
-                  value={slotForm.time_window}
-                  onChange={e => setSlotForm({ ...slotForm, time_window: e.target.value })}
-                  placeholder="01:00 PM - 04:00 PM"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Max Orders per Slot</label>
-                <input
-                  type="number"
-                  min="1"
-                  required
-                  value={slotForm.max_orders_per_slot}
-                  onChange={e => setSlotForm({ ...slotForm, max_orders_per_slot: Number(e.target.value) })}
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsAddSlotOpen(false)}
-                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs cursor-pointer"
-                >
-                  Save Slot
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* MODAL: ADD / EDIT PRODUCT WITH WHOLESALE & SUPPLIER */}
-      {/* ======================================================== */}
-      {isAddProductOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-gray-100 space-y-4 my-8 max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between">
-              <h3 className="font-extrabold text-gray-900 text-base">
-                {editingProduct ? 'Edit Wholesale & Selling Price' : 'Add New Product (Wholesale & Retail)'}
-              </h3>
-              <button
-                onClick={() => setIsAddProductOpen(false)}
-                className="text-gray-400 hover:text-gray-600 p-1 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveProduct} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Product Name</label>
-                <input
-                  type="text"
-                  required
-                  value={productForm.name}
-                  onChange={e => setProductForm({ ...productForm, name: e.target.value })}
-                  placeholder="e.g. Sharbati Wheat Atta"
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white text-xs font-semibold"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Category</label>
-                  <select
-                    value={productForm.category_id}
-                    onChange={e => setProductForm({ ...productForm, category_id: Number(e.target.value) })}
-                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                  >
-                    {categories.map(c => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Unit / Weight</label>
-                  <input
-                    type="text"
-                    required
-                    value={productForm.unit}
-                    onChange={e => setProductForm({ ...productForm, unit: e.target.value })}
-                    placeholder="1 kg, 500 g, 1 L"
-                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold"
-                  />
-                </div>
-              </div>
-
-              {/* Wholesale & Selling Prices */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <div>
-                  <label className="block text-[11px] font-bold text-purple-900 mb-1">Purchase Cost (₹)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={productForm.purchase_cost}
-                    onChange={e => setProductForm({ ...productForm, purchase_cost: e.target.value })}
-                    placeholder="36"
-                    className="w-full p-2.5 bg-purple-50/70 border border-purple-200 rounded-xl text-xs font-bold text-purple-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Market MRP (₹)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={productForm.mrp}
-                    onChange={e => setProductForm({ ...productForm, mrp: e.target.value })}
-                    placeholder="50"
-                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-emerald-800 mb-1">FMP Selling Price (₹)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    required
-                    value={productForm.price}
-                    onChange={e => setProductForm({ ...productForm, price: e.target.value })}
-                    placeholder="45"
-                    className="w-full p-2.5 bg-emerald-50 border border-emerald-300 rounded-xl text-xs font-black text-emerald-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Stock Qty</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    required
-                    value={productForm.stock}
-                    onChange={e => setProductForm({ ...productForm, stock: e.target.value })}
-                    placeholder="50"
-                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold"
-                  />
-                </div>
-              </div>
-
-              {/* Automatic Gross Margin Calculator */}
-              {productForm.price !== '' && productForm.purchase_cost !== '' && (
-                (() => {
-                  const sell = Number(productForm.price) || 0;
-                  const cost = Number(productForm.purchase_cost) || 0;
-                  const margin = Number((sell - cost).toFixed(2));
-                  const pct = sell > 0 ? Number((((sell - cost) / sell) * 100).toFixed(1)) : 0;
-                  const positive = margin >= 0;
-                  return (
-                    <div className={`p-2.5 rounded-xl border flex items-center justify-between text-xs ${
-                      positive ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-900'
-                    }`}>
-                      <div className="flex items-center gap-1.5 font-bold">
-                        <Percent className="w-4 h-4 shrink-0" />
-                        <span>Auto Gross Margin (Admin Only):</span>
-                      </div>
-                      <div className="font-black">
-                        {positive ? `+₹${margin}` : `-₹${Math.abs(margin)}`} ({pct}%)
-                      </div>
-                    </div>
-                  );
-                })()
-              )}
-
-              {/* Packaging Type (Loose vs Packaged) & Order Qty Limits */}
-              <div className="p-3 bg-purple-50/50 border border-purple-200 rounded-2xl space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 font-bold text-purple-950 text-[11px]">
-                    <Layers className="w-3.5 h-3.5 text-purple-700" />
-                    <span>Packaging Type & Order Limits</span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setProductForm(prev => ({ ...prev, product_type: 'packaged' }))}
-                    className={`p-2 rounded-xl border text-left transition cursor-pointer ${
-                      productForm.product_type === 'packaged'
-                        ? 'bg-purple-700 text-white border-purple-700 shadow-xs'
-                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="text-[11px] font-extrabold">Packaged Units</div>
-                    <div className={`text-[10px] ${productForm.product_type === 'packaged' ? 'text-purple-100' : 'text-gray-500'}`}>
-                      Whole integer packs (1, 2, 5...)
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setProductForm(prev => ({ ...prev, product_type: 'loose' }))}
-                    className={`p-2 rounded-xl border text-left transition cursor-pointer ${
-                      productForm.product_type === 'loose'
-                        ? 'bg-purple-700 text-white border-purple-700 shadow-xs'
-                        : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="text-[11px] font-extrabold">Loose Weight / Bulk</div>
-                    <div className={`text-[10px] ${productForm.product_type === 'loose' ? 'text-purple-100' : 'text-gray-500'}`}>
-                      Weight in kg/L (e.g. 0.5, 1, 5, 10, 50)
-                    </div>
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-600 mb-1">
-                      Min Order Qty ({productForm.product_type === 'loose' ? 'kg / L' : 'units'})
-                    </label>
-                    <input
-                      type="number"
-                      min={productForm.product_type === 'loose' ? '0.1' : '1'}
-                      step={productForm.product_type === 'loose' ? '0.1' : '1'}
-                      value={productForm.min_order_qty}
-                      onChange={e => setProductForm({ ...productForm, min_order_qty: e.target.value })}
-                      placeholder="1"
-                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-600 mb-1">
-                      Max Order Qty (Blank = No Limit)
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      step={productForm.product_type === 'loose' ? '0.5' : '1'}
-                      value={productForm.max_order_qty}
-                      onChange={e => setProductForm({ ...productForm, max_order_qty: e.target.value })}
-                      placeholder="Unlimited"
-                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-bold"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Quantity-Based Wholesale Pricing Slabs */}
-              <div className="p-3 bg-emerald-50/40 border border-emerald-200 rounded-2xl space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <div className="font-extrabold text-emerald-950 text-[11px]">
-                      Dynamic Quantity Price Slabs ({productForm.product_type === 'loose' ? 'per kg/L' : 'per unit'})
-                    </div>
-                    <div className="text-[10px] text-emerald-800">
-                      Set bulk rates by qty range. Leave Max Qty blank for open-ended (e.g. 50+).
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleAddProductSlab}
-                    className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold px-2.5 py-1.5 rounded-xl text-[11px] flex items-center gap-1 shrink-0 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Add Slab</span>
-                  </button>
-                </div>
-
-                {productForm.pricing_slabs.length === 0 ? (
-                  <div className="bg-white/80 border border-dashed border-emerald-300 rounded-xl p-2.5 text-center text-[11px] text-gray-500">
-                    No quantity slabs set. Customers will pay regular FMP price (₹{productForm.price || 0}). Click "Add Slab" to configure tiered pricing.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {productForm.pricing_slabs.map((slab, idx) => {
-                      const basePrice = Number(productForm.price) || 0;
-                      const slabPrice = Number(slab.price_per_unit) || 0;
-                      const costPrice = productForm.purchase_cost !== '' ? Number(productForm.purchase_cost) : null;
-                      const belowCost = costPrice !== null && slabPrice > 0 && slabPrice < costPrice;
-                      const pctOff = basePrice > 0 && slabPrice > 0 && slabPrice < basePrice
-                        ? Math.round(((basePrice - slabPrice) / basePrice) * 100)
-                        : 0;
-
-                      return (
-                        <div key={slab.id || idx} className="bg-white p-2 rounded-xl border border-gray-200 space-y-1.5">
-                          <div className="grid grid-cols-12 gap-1.5 items-end">
-                            <div className="col-span-4">
-                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Min Qty</label>
-                              <input
-                                type="number"
-                                min={productForm.product_type === 'loose' ? '0.1' : '1'}
-                                step={productForm.product_type === 'loose' ? '0.1' : '1'}
-                                required
-                                value={slab.min_qty}
-                                onChange={e => handleUpdateProductSlab(idx, { min_qty: e.target.value })}
-                                className="w-full p-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold"
-                              />
-                            </div>
-                            <div className="col-span-4">
-                              <label className="block text-[9px] font-bold text-gray-500 uppercase">Max Qty</label>
-                              <input
-                                type="number"
-                                min={productForm.product_type === 'loose' ? '0.1' : '1'}
-                                step={productForm.product_type === 'loose' ? '0.1' : '1'}
-                                value={slab.max_qty}
-                                onChange={e => handleUpdateProductSlab(idx, { max_qty: e.target.value })}
-                                placeholder="Unlimited"
-                                className="w-full p-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs font-bold"
-                              />
-                            </div>
-                            <div className="col-span-3">
-                              <label className="block text-[9px] font-bold text-emerald-700 uppercase">₹ / Unit</label>
-                              <input
-                                type="number"
-                                min="0.01"
-                                step="0.01"
-                                required
-                                value={slab.price_per_unit}
-                                onChange={e => handleUpdateProductSlab(idx, { price_per_unit: e.target.value })}
-                                className="w-full p-1.5 bg-emerald-50 border border-emerald-300 rounded-lg text-xs font-black text-emerald-900"
-                              />
-                            </div>
-                            <div className="col-span-1 flex justify-end">
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveProductSlab(idx)}
-                                className="p-1.5 text-gray-400 hover:text-red-600 cursor-pointer"
-                                title="Delete Slab"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-
-                          {(pctOff > 0 || belowCost) && (
-                            <div className="flex items-center justify-between text-[10px] px-0.5">
-                              {pctOff > 0 ? (
-                                <span className="text-emerald-700 font-bold">
-                                  Saves {pctOff}% vs regular price (₹{basePrice})
-                                </span>
-                              ) : <span />}
-                              {belowCost && (
-                                <span className="text-red-600 font-bold">
-                                  Warning: Below cost (₹{costPrice})
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Private Supplier Details (Never visible to customers) */}
-              <div className="p-3 bg-gray-50 border border-gray-200 rounded-2xl space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 font-bold text-gray-800 text-[11px]">
-                    <Building2 className="w-3.5 h-3.5 text-purple-700" />
-                    <span>Supplier Details (Hidden from Customers)</span>
-                  </div>
-                </div>
-
-                {suppliers.length > 0 && (
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Select Registered Supplier (Optional)</label>
-                    <select
-                      value={productForm.supplier_id}
-                      onChange={e => {
-                        const supId = e.target.value;
-                        const matched = suppliers.find(s => String(s.id) === supId);
-                        setProductForm({
-                          ...productForm,
-                          supplier_id: supId,
-                          supplier_name: matched ? matched.name : productForm.supplier_name,
-                          supplier_phone: matched ? matched.phone : productForm.supplier_phone,
-                          supplier_address: matched ? (matched.address || '') : productForm.supplier_address
-                        });
-                      }}
-                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
-                    >
-                      <option value="">-- Enter manually or choose supplier --</option>
-                      {suppliers.map(s => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.phone})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Supplier Shop / Name</label>
-                    <input
-                      type="text"
-                      value={productForm.supplier_name}
-                      onChange={e => setProductForm({ ...productForm, supplier_name: e.target.value })}
-                      placeholder="e.g. Vidarbha Agro Mart"
-                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-gray-600 mb-1">Supplier Phone</label>
-                    <input
-                      type="tel"
-                      value={productForm.supplier_phone}
-                      onChange={e => setProductForm({ ...productForm, supplier_phone: e.target.value })}
-                      placeholder="9422XXXXXX"
-                      className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-[10px] font-bold text-gray-600 mb-1">Supplier Shop Address</label>
-                  <input
-                    type="text"
-                    value={productForm.supplier_address}
-                    onChange={e => setProductForm({ ...productForm, supplier_address: e.target.value })}
-                    placeholder="e.g. Shop 12, APMC Market Yard, Karanja Lad"
-                    className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Image URL</label>
-                <input
-                  type="url"
-                  value={productForm.image_url}
-                  onChange={e => setProductForm({ ...productForm, image_url: e.target.value })}
-                  placeholder="https://..."
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Description</label>
-                <textarea
-                  rows={2}
-                  value={productForm.description}
-                  onChange={e => setProductForm({ ...productForm, description: e.target.value })}
-                  placeholder="Fresh quality grocery item..."
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs"
-                />
-              </div>
-
-              <div className="pt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsAddProductOpen(false)}
-                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold transition cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl shadow-xs transition cursor-pointer"
-                >
-                  Save Product
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* MODAL: STOCK ADJUSTMENT */}
-      {/* ======================================================== */}
-      {stockAdjustProduct && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-gray-100 space-y-4">
-            <h3 className="font-extrabold text-gray-900 text-base">Adjust Warehouse Stock</h3>
-            <div className="p-3 bg-purple-50 rounded-xl text-xs text-purple-900 font-semibold">
-              {stockAdjustProduct.name} ({stockAdjustProduct.unit})
-            </div>
-
-            <form onSubmit={handleAdjustStock} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">New Total In-Stock Quantity</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  required
-                  value={newStockValue}
-                  onChange={e => setNewStockValue(Number(e.target.value))}
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-base font-black text-gray-900"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setStockAdjustProduct(null)}
-                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold transition cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-xl transition cursor-pointer shadow-xs"
-                >
-                  Update Stock
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ======================================================== */}
-      {/* MODAL: SETTLE RIDER CASH */}
-      {/* ======================================================== */}
-      {reconcileModalRider && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-gray-100 space-y-4">
-            <div className="text-center space-y-1">
-              <div className="w-12 h-12 bg-emerald-100 text-emerald-800 rounded-2xl flex items-center justify-center mx-auto mb-2">
-                <DollarSign className="w-6 h-6" />
-              </div>
-              <h3 className="font-extrabold text-gray-900 text-base">Confirm Cash Handover</h3>
-              <p className="text-xs text-gray-500">
-                Settle collected COD cash from delivery partner
-              </p>
-            </div>
-
-            <div className="bg-emerald-50 p-3 rounded-2xl text-xs space-y-1">
-              <div className="flex justify-between text-gray-600">
-                <span>Rider Name:</span>
-                <span className="font-bold text-gray-900">{reconcileModalRider.name}</span>
-              </div>
-              <div className="flex justify-between text-gray-600">
-                <span>Pending Deliveries:</span>
-                <span className="font-bold text-gray-900">{reconcileModalRider.pendingCount} orders</span>
-              </div>
-              <div className="flex justify-between font-black text-emerald-900 text-base pt-1 border-t border-emerald-200">
-                <span>Total Cash To Settle:</span>
-                <span>₹{reconcileModalRider.cashInHand}</span>
-              </div>
-            </div>
-
-            <form onSubmit={handleConfirmReconcile} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-[11px] font-bold text-gray-700 mb-1">Settlement Note</label>
-                <input
-                  type="text"
-                  required
-                  value={reconcileNotes}
-                  onChange={e => setReconcileNotes(e.target.value)}
-                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-medium"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setReconcileModalRider(null)}
-                  className="px-4 py-2 bg-gray-100 text-gray-700 rounded-xl font-bold transition cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={reconciling}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition cursor-pointer shadow-xs disabled:opacity-50"
-                >
-                  {reconciling ? 'Settling...' : 'Confirm Cash Received'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* ======================================================== */}
       {/* MODAL: REJECT STORE REGISTRATION */}
@@ -4817,9 +2593,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
               <div className="space-y-1">
                 <div className="text-[10px] font-bold uppercase text-gray-400">Store &amp; Billing</div>
-                <div>Store: <strong>{selectedOrderDetail.store_name || 'FMP Central Warehouse'}</strong></div>
+                <div>Store: <strong>{selectedOrderDetail.store_name || 'Partner Store'}</strong></div>
                 <div>Mode: <strong className="capitalize">{selectedOrderDetail.fulfillment_type || 'delivery'}</strong> • Payment: <strong>{selectedOrderDetail.payment_mode}</strong> ({selectedOrderDetail.payment_status})</div>
-                <div>Subtotal: ₹{selectedOrderDetail.subtotal} • Delivery: ₹{selectedOrderDetail.delivery_fee} • Handling: ₹{selectedOrderDetail.handling_fee}</div>
+                <div>Subtotal: ₹{selectedOrderDetail.subtotal} • Delivery: ₹{selectedOrderDetail.delivery_fee}</div>
                 <div className="font-black text-sm text-emerald-700 pt-1">Total: ₹{selectedOrderDetail.total_amount}</div>
               </div>
             </div>

@@ -33,6 +33,15 @@ interface GpsErrorState {
   steps: string[];
 }
 
+function escapePinHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function createPinIcon(color: 'emerald' | 'purple' | 'warehouse', label?: string) {
   const bg =
     color === 'warehouse'
@@ -41,8 +50,9 @@ function createPinIcon(color: 'emerald' | 'purple' | 'warehouse', label?: string
       ? '#7e22ce'
       : '#059669';
   const border = '#ffffff';
-  const titleHtml = label
-    ? `<div style="position:absolute;top:-24px;left:50%;transform:translateX(-50%);white-space:nowrap;background:#111827;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.25);">${label}</div>`
+  const safeLabel = label ? escapePinHtml(label) : '';
+  const titleHtml = safeLabel
+    ? `<div style="position:absolute;top:-24px;left:50%;transform:translateX(-50%);white-space:nowrap;background:#111827;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.25);">${safeLabel}</div>`
     : '';
 
   return L.divIcon({

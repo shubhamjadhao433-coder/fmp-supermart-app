@@ -1,8 +1,36 @@
+import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { usersRepo, auditLogsRepo } from './firestoreDb.ts';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'fmp_karanja_lad_supermart_jwt_secure_secret_2026_xyz';
+function resolveJwtSecret(): string {
+  const configured = (process.env.JWT_SECRET || '').trim();
+  const isProduction = process.env.NODE_ENV === 'production';
+  const insecureDefaults = new Set([
+    'fmp_karanja_lad_supermart_jwt_secure_secret_2026_xyz',
+    'secret',
+    'changeme',
+    'jwt_secret'
+  ]);
+
+  if (isProduction) {
+    if (!configured || configured.length < 32 || insecureDefaults.has(configured)) {
+      throw new Error(
+        'FATAL SECURITY ERROR: JWT_SECRET must be set to a strong random secret (at least 32 characters) in production.'
+      );
+    }
+    return configured;
+  }
+
+  if (configured && configured.length >= 16 && !insecureDefaults.has(configured)) {
+    return configured;
+  }
+
+  // Non-production ephemeral process secret (never hardcoded)
+  return crypto.randomBytes(32).toString('hex');
+}
+
+const JWT_SECRET = resolveJwtSecret();
 
 export interface AuthUser {
   id: number;
@@ -60,16 +88,24 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
-    const userId = parseInt(String(decoded.id), 10);
-
-    // Fetch full user record from Firestore to ensure current active state
-    let user = await usersRepo.findById(userId);
-    if (!user && decoded.phone && decoded.role) {
-      user = await usersRepo.findByPhoneAndRole(decoded.phone, decoded.role);
+    const userId = Number(decoded?.id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(401).json({ error: 'Invalid authentication token.' });
     }
+
+    // Strictly look up authenticated user by verified ID (never fall back to mutable phone/role)
+    const user = await usersRepo.findById(userId);
 
     if (!user || user.is_active === false) {
       return res.status(401).json({ error: 'User account not found or deactivated.' });
+    }
+
+    // Invalidate JWTs issued before an administrative password reset
+    if (user.password_changed_at && typeof decoded.iat === 'number') {
+      const changedAtMs = new Date(user.password_changed_at).getTime();
+      if (Number.isFinite(changedAtMs) && decoded.iat * 1000 < changedAtMs - 1000) {
+        return res.status(401).json({ error: 'Session invalidated after password reset. Please login again.' });
+      }
     }
 
     req.user = {
@@ -84,7 +120,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       is_active: user.is_active
     };
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: 'Session expired or invalid token. Please log in again.' });
   }
 }
@@ -125,8 +161,12 @@ export async function logAudit(
   }
 }
 
-// Generate 4-digit numeric delivery OTP
+// Cryptographically random 6-digit pickup verification code
+export function generatePickupCode(): string {
+  return crypto.randomInt(100000, 1000000).toString();
+}
+
+// Cryptographically random 4-digit OTP helper (retained only for module compatibility)
 export function generateDeliveryOTP(): string {
-  // 4 digits, e.g. 1000 - 9999
-  return Math.floor(1000 + Math.random() * 9000).toString();
+  return crypto.randomInt(1000, 10000).toString();
 }

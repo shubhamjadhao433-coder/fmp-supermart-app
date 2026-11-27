@@ -104,6 +104,7 @@ export interface UserDoc {
   city: string;
   pincode: string;
   is_active: boolean;
+  password_changed_at?: string | null;
   created_at: string;
 }
 
@@ -466,6 +467,7 @@ export const productsRepo = {
     search?: string;
     in_stock?: boolean;
     includeWholesale?: boolean;
+    includeCentral?: boolean;
     store_id?: number | null;
     includeInactive?: boolean;
     includeZeroStockUnavailable?: boolean;
@@ -496,13 +498,18 @@ export const productsRepo = {
       } else {
         products = products.filter(p => p.store_id === filters.store_id);
       }
-    } else if (!filters?.includeWholesale && !filters?.includeInactive) {
-      // Public catalog must never leak products from unapproved or deactivated stores
-      products = products.filter(p => {
-        if (!p.store_id) return true;
-        const st = storeMap.get(p.store_id);
-        return Boolean(st && st.approval_status === 'approved' && st.is_active !== false);
-      });
+    } else {
+      if (!filters?.includeCentral) {
+        products = products.filter(p => Boolean(p.store_id && Number(p.store_id) > 0));
+      }
+      if (!filters?.includeWholesale && !filters?.includeInactive) {
+        // Public catalog must never leak products from unapproved or deactivated stores
+        products = products.filter(p => {
+          if (!p.store_id) return Boolean(filters?.includeCentral);
+          const st = storeMap.get(p.store_id);
+          return Boolean(st && st.approval_status === 'approved' && st.is_active !== false);
+        });
+      }
     }
 
     const categories = await categoriesRepo.list(true);
@@ -556,7 +563,7 @@ export const productsRepo = {
       const st = p.store_id ? storeMap.get(p.store_id) : null;
       const r = ratingMap[p.id];
       const count = r ? r.count : 0;
-      const avg = count > 0 ? Number((r.sum / count).toFixed(1)) : (p.id % 2 === 0 ? 4.8 : 4.9);
+      const avg = count > 0 ? Number((r.sum / count).toFixed(1)) : 0;
       const metrics = computeWholesaleMetrics(Number(p.price), p.purchase_cost);
       const productType = normalizeProductType(p.product_type, p.unit);
       const pricingSlabs = normalizeProductPriceSlabs(p.pricing_slabs, productType === 'loose' ? 'kg' : '');
@@ -711,6 +718,23 @@ export const productsRepo = {
 
       return updated;
     });
+  },
+
+  async listInventoryLogsForStore(storeId: number, limitCount: number = 60): Promise<any[]> {
+    const storeProducts = await this.list({ store_id: storeId, includeInactive: true, includeWholesale: false });
+    const prodMap = new Map<number, any>(storeProducts.map(p => [Number(p.id), p]));
+    if (prodMap.size === 0) return [];
+    const invSnap = await getDocs(collection(firestoreDb, 'inventory'));
+    return invSnap.docs
+      .map(d => d.data())
+      .filter((log: any) => prodMap.has(Number(log.product_id)))
+      .map((log: any) => ({
+        ...log,
+        product_name: prodMap.get(Number(log.product_id))?.name || `Product #${log.product_id}`,
+        unit: prodMap.get(Number(log.product_id))?.unit || ''
+      }))
+      .sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
+      .slice(0, limitCount);
   }
 };
 
@@ -755,8 +779,10 @@ export interface OrderDoc {
   rider_phone?: string | null;
   delivery_otp?: string | null;
   pickup_code?: string | null;
+  pickup_attempts?: number;
   otp_expires_at?: string | null;
   otp_attempts?: number;
+  status_history?: Array<{ status: string; at: string; actor_role?: string; note?: string }>;
   failure_reason?: string | null;
   rejection_reason?: string | null;
   cancelled_by_role?: 'customer' | 'store_owner' | 'admin' | string | null;
@@ -835,29 +861,29 @@ export const ordersRepo = {
         }
       }
 
-      // 0. If marketplace store order, read & verify store first (before any writes!)
-      let storeDoc: StoreDoc | null = null;
-      if (storeId) {
-        const storeRef = doc(firestoreDb, 'stores', String(storeId));
-        const storeSnap = await tx.get(storeRef);
-        if (!storeSnap.exists()) {
-          throw new Error('Selected grocery store was not found.');
-        }
-        storeDoc = storeSnap.data() as StoreDoc;
-        if (storeDoc.approval_status !== 'approved' || storeDoc.is_active === false) {
-          throw new Error('This store is currently not active on FMP Supermart.');
-        }
-        if (storeDoc.is_open === false) {
-          throw new Error(`${storeDoc.name} is currently closed and not accepting orders.`);
-        }
-        const supportsDelivery = storeDoc.service_type === 'delivery' || storeDoc.service_type === 'both';
-        const supportsPickup = storeDoc.service_type === 'pickup' || storeDoc.service_type === 'both';
-        if (fulfillmentType === 'delivery' && !supportsDelivery) {
-          throw new Error(`${storeDoc.name} only supports Store Pickup.`);
-        }
-        if (fulfillmentType === 'pickup' && !supportsPickup) {
-          throw new Error(`${storeDoc.name} only supports Home Delivery.`);
-        }
+      // 0. Enforce hyperlocal store order (must belong to an approved, active, open kirana store)
+      if (!storeId) {
+        throw new Error('Orders must be placed with an approved local grocery store.');
+      }
+      const storeRef = doc(firestoreDb, 'stores', String(storeId));
+      const storeSnap = await tx.get(storeRef);
+      if (!storeSnap.exists()) {
+        throw new Error('Selected grocery store was not found.');
+      }
+      const storeDoc: StoreDoc = storeSnap.data() as StoreDoc;
+      if (storeDoc.approval_status !== 'approved' || storeDoc.is_active === false) {
+        throw new Error('This store is currently not active on FMP Supermart.');
+      }
+      if (storeDoc.is_open === false) {
+        throw new Error(`${storeDoc.name} is currently closed and not accepting orders.`);
+      }
+      const supportsDelivery = storeDoc.service_type === 'delivery' || storeDoc.service_type === 'both';
+      const supportsPickup = storeDoc.service_type === 'pickup' || storeDoc.service_type === 'both';
+      if (fulfillmentType === 'delivery' && !supportsDelivery) {
+        throw new Error(`${storeDoc.name} only supports Store Pickup.`);
+      }
+      if (fulfillmentType === 'pickup' && !supportsPickup) {
+        throw new Error(`${storeDoc.name} only supports Home Delivery.`);
       }
 
       // 1. Fetch & validate all items atomically (backend quantity-slab pricing + stock/min/max + store isolation check)
@@ -913,63 +939,34 @@ export const ordersRepo = {
         });
       }
 
-      // 2. Fetch delivery settings & compute authoritative backend delivery fee
-      const settingsRef = doc(firestoreDb, 'settings', 'delivery');
-      const settingsSnap = await tx.get(settingsRef);
-      const rawSettings = settingsSnap.exists() ? settingsSnap.data() : {};
-
+      // 2. Compute authoritative store-managed delivery fee (handling_fee & tip_amount strictly 0)
       let deliveryFee = 0;
-      let handlingFee = 0;
+      const handlingFee = 0;
       let distanceKm = orderPayload.distanceKm;
-      let distanceSource = orderPayload.distanceSource;
-      let warehouseLat = Number((rawSettings as any).warehouse_lat ?? DEFAULT_WAREHOUSE_LAT);
-      let warehouseLng = Number((rawSettings as any).warehouse_lng ?? DEFAULT_WAREHOUSE_LNG);
+      const distanceSource = orderPayload.distanceSource;
+      const warehouseLat = storeDoc.lat;
+      const warehouseLng = storeDoc.lng;
       let matchedSlabLabel: string | null = null;
 
-      if (storeDoc) {
-        warehouseLat = storeDoc.lat;
-        warehouseLng = storeDoc.lng;
-        if (storeDoc.min_order_amount > 0 && subtotal < storeDoc.min_order_amount) {
-          throw new Error(`Minimum order amount for ${storeDoc.name} is ₹${storeDoc.min_order_amount}.`);
-        }
-        if (fulfillmentType === 'pickup') {
-          deliveryFee = 0;
-          handlingFee = 0;
-          distanceKm = 0;
-          matchedSlabLabel = 'Store Pickup (Free)';
-        } else {
-          if (storeDoc.delivery_radius_km > 0 && distanceKm > storeDoc.delivery_radius_km) {
-            throw new Error(
-              `Your selected location (${distanceKm} km) is outside ${storeDoc.name}'s ${storeDoc.delivery_radius_km} km delivery radius.`
-            );
-          }
-          deliveryFee = Math.max(0, Number(storeDoc.delivery_fee || 0));
-          handlingFee = 0;
-          matchedSlabLabel = deliveryFee === 0 ? 'Free Store-Managed Delivery' : `Store-Managed Delivery (₹${deliveryFee})`;
-        }
+      if (storeDoc.min_order_amount > 0 && subtotal < storeDoc.min_order_amount) {
+        throw new Error(`Minimum order amount for ${storeDoc.name} is ₹${storeDoc.min_order_amount}.`);
+      }
+      if (fulfillmentType === 'pickup') {
+        deliveryFee = 0;
+        distanceKm = 0;
+        matchedSlabLabel = 'Store Pickup (Free)';
       } else {
-        const quote = calculateDeliveryFeeFromDistance(
-          orderPayload.distanceKm,
-          orderPayload.durationMins,
-          orderPayload.distanceSource,
-          rawSettings
-        );
-
-        if (!quote.deliverable) {
-          throw new Error(quote.reason || 'Delivery is unavailable at your selected location.');
+        if (storeDoc.delivery_radius_km > 0 && distanceKm > storeDoc.delivery_radius_km) {
+          throw new Error(
+            `Your selected location (${distanceKm} km) is outside ${storeDoc.name}'s ${storeDoc.delivery_radius_km} km delivery radius.`
+          );
         }
-
-        deliveryFee = quote.delivery_fee;
-        handlingFee = quote.handling_fee;
-        distanceKm = quote.distance_km;
-        distanceSource = quote.distance_source;
-        warehouseLat = quote.warehouse_lat;
-        warehouseLng = quote.warehouse_lng;
-        matchedSlabLabel = quote.matched_slab_label || null;
+        deliveryFee = Math.max(0, Number(storeDoc.delivery_fee || 0));
+        matchedSlabLabel = deliveryFee === 0 ? 'Free Store-Managed Delivery' : `Store-Managed Delivery (₹${deliveryFee})`;
       }
 
-      const tipAmount = fulfillmentType === 'pickup' ? 0 : Math.max(0, Math.round(Number(orderPayload.tipAmount) || 0));
-      const totalAmount = Math.round((subtotal + deliveryFee + handlingFee + tipAmount) * 100) / 100;
+      const tipAmount = 0;
+      const totalAmount = Math.round((subtotal + deliveryFee) * 100) / 100;
 
       // 3. Atomically deduct stock & write inventory logs
       for (const vi of validatedItems) {
@@ -1039,6 +1036,15 @@ export const ordersRepo = {
         scheduled_date: orderPayload.scheduledDate,
         time_slot: fulfillmentType === 'pickup' ? 'Store Pickup' : orderPayload.timeSlot,
         pickup_code: fulfillmentType === 'pickup' ? (orderPayload.pickupCode || null) : null,
+        pickup_attempts: 0,
+        status_history: [
+          {
+            status: 'placed',
+            at: nowIso,
+            actor_role: 'customer',
+            note: fulfillmentType === 'pickup' ? 'Store pickup order placed' : 'Home delivery order placed'
+          }
+        ],
         idempotency_key: cleanIdemKey || null,
         cod_collected: false,
         cod_reconciled: false,
@@ -1048,6 +1054,21 @@ export const ordersRepo = {
 
       const orderRef = doc(firestoreDb, 'orders', String(orderId));
       tx.set(orderRef, newOrder);
+
+      // Record initial payment_history event atomically
+      const payId = Date.now() + 300 + Math.floor(Math.random() * 500);
+      tx.set(doc(firestoreDb, 'payment_history', String(payId)), {
+        id: payId,
+        order_id: orderId,
+        order_number: orderNumber,
+        store_id: storeDoc.id,
+        customer_id: orderPayload.customerId,
+        amount: totalAmount,
+        payment_mode: resolvedPaymentMode,
+        payment_status: 'pending',
+        event: 'order_placed',
+        created_at: nowIso
+      });
 
       if (idemRef) {
         tx.set(idemRef, {
@@ -1249,6 +1270,7 @@ export const ordersRepo = {
       const isStoreOrAdminReject = cancelledBy.role === 'store_owner' || cancelledBy.role === 'admin';
       const cleanReason = reason?.trim() || (isStoreOrAdminReject ? `Rejected by ${cancelledBy.name}` : 'Cancelled by customer');
 
+      const existingHistory = Array.isArray(order.status_history) ? order.status_history : [];
       const updatedOrder: OrderDoc = {
         ...order,
         status: 'cancelled',
@@ -1257,9 +1279,27 @@ export const ordersRepo = {
         rejection_reason: isStoreOrAdminReject ? cleanReason : (order.rejection_reason ?? null),
         cancelled_by_role: cancelledBy.role,
         cancelled_at: nowIso,
+        status_history: [
+          ...existingHistory,
+          { status: 'cancelled', at: nowIso, actor_role: cancelledBy.role, note: cleanReason }
+        ],
         updated_at: nowIso
       };
       tx.set(orderRef, updatedOrder);
+
+      const payId = Date.now() + 25 + Math.floor(Math.random() * 500);
+      tx.set(doc(firestoreDb, 'payment_history', String(payId)), {
+        id: payId,
+        order_id: orderId,
+        order_number: order.order_number,
+        store_id: order.store_id || null,
+        customer_id: order.customer_id,
+        amount: order.total_amount,
+        payment_mode: order.payment_mode,
+        payment_status: 'cancelled',
+        event: isStoreOrAdminReject ? 'order_rejected' : 'order_cancelled',
+        created_at: nowIso
+      });
 
       // Customer Notification
       const cNotifId = Date.now() + 10;
@@ -1320,19 +1360,40 @@ export const ordersRepo = {
     if (!snap.exists()) return null;
     const order = snap.data() as OrderDoc;
     const nowIso = new Date().toISOString();
+    const existingHistory = Array.isArray(order.status_history) ? order.status_history : [];
     const updated: OrderDoc = {
       ...order,
       status,
       ...(status === 'delivered' ? { payment_status: 'paid' as const, cod_collected: true, cod_collected_at: extra?.cod_collected_at || nowIso } : {}),
       ...(extra || {}),
+      status_history: [
+        ...existingHistory,
+        { status, at: nowIso, actor_role: 'store_owner', note: `Order marked ${status}` }
+      ],
       updated_at: nowIso
     };
     await setDoc(ref, updated, { merge: true });
 
+    if (status === 'delivered') {
+      const payId = Date.now() + Math.floor(Math.random() * 500);
+      await setDoc(doc(firestoreDb, 'payment_history', String(payId)), {
+        id: payId,
+        order_id: id,
+        order_number: updated.order_number,
+        store_id: updated.store_id || null,
+        customer_id: updated.customer_id,
+        amount: updated.total_amount,
+        payment_mode: updated.payment_mode,
+        payment_status: 'paid',
+        event: 'payment_collected',
+        created_at: nowIso
+      });
+    }
+
     const labelMap: Record<string, string> = {
       confirmed: 'accepted & confirmed',
       packed: 'being prepared',
-      dispatched: order.fulfillment_type === 'pickup' ? 'ready for store pickup' : 'ready / out for delivery',
+      dispatched: order.fulfillment_type === 'pickup' ? 'ready for store pickup' : 'out for store delivery',
       delivered: 'completed',
       cancelled: 'cancelled'
     };
@@ -1348,6 +1409,76 @@ export const ordersRepo = {
     });
 
     return updated;
+  },
+
+  async verifyPickupAndComplete(
+    id: number,
+    storeId: number,
+    inputCode: string,
+    storeName: string
+  ): Promise<OrderDoc> {
+    const orderRef = doc(firestoreDb, 'orders', String(id));
+    const snap = await getDoc(orderRef);
+    if (!snap.exists()) throw new Error('Order not found.');
+    const order = snap.data() as OrderDoc;
+
+    if (order.store_id !== storeId) {
+      throw new Error('Forbidden: This order belongs to another store.');
+    }
+    if (order.fulfillment_type !== 'pickup') {
+      throw new Error('Pickup code verification applies only to store pickup orders.');
+    }
+    if (order.status !== 'dispatched') {
+      throw new Error(`Order must be marked Ready for Pickup before completing pickup. Current status: ${order.status}`);
+    }
+    const attempts = Number(order.pickup_attempts || 0);
+    if (attempts >= 5) {
+      throw new Error('Maximum pickup code verification attempts exceeded. Please contact Admin for assistance.');
+    }
+    if (!inputCode || String(order.pickup_code || '') !== inputCode.trim()) {
+      await updateDoc(orderRef, { pickup_attempts: attempts + 1, updated_at: new Date().toISOString() });
+      throw new Error('Incorrect 6-digit pickup code. Please verify the code from the customer.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const existingHistory = Array.isArray(order.status_history) ? order.status_history : [];
+    const completed: OrderDoc = {
+      ...order,
+      status: 'delivered',
+      payment_status: 'paid',
+      cod_collected: true,
+      cod_collected_at: nowIso,
+      status_history: [
+        ...existingHistory,
+        { status: 'delivered', at: nowIso, actor_role: 'store_owner', note: 'Pickup verified with customer 6-digit code' }
+      ],
+      updated_at: nowIso
+    };
+    await setDoc(orderRef, completed, { merge: true });
+
+    const payId = Date.now() + Math.floor(Math.random() * 500);
+    await setDoc(doc(firestoreDb, 'payment_history', String(payId)), {
+      id: payId,
+      order_id: id,
+      order_number: completed.order_number,
+      store_id: storeId,
+      customer_id: completed.customer_id,
+      amount: completed.total_amount,
+      payment_mode: completed.payment_mode,
+      payment_status: 'paid',
+      event: 'pickup_verified_paid',
+      created_at: nowIso
+    });
+
+    await notificationsRepo.create({
+      user_id: completed.customer_id,
+      title: 'Store Pickup Completed! 🛍️',
+      message: `Your pickup order #${completed.order_number} at ${storeName} is complete. Thank you for shopping with FMP Supermart!`,
+      type: 'order',
+      order_id: id
+    });
+
+    return completed;
   },
 
   async assignRider(id: number, rider: UserDoc): Promise<OrderDoc | null> {
@@ -1670,12 +1801,12 @@ export const settingsRepo = {
           ? 'approved_active_open_only'
           : 'approved_active_valid_location',
       service_available: existing.service_available !== false,
-      monetization_enabled: Boolean(existing.monetization_enabled),
-      subscriptions_enabled: Boolean(existing.subscriptions_enabled),
-      featured_stores_enabled: Boolean(existing.featured_stores_enabled),
-      store_ads_enabled: Boolean(existing.store_ads_enabled),
-      admob_enabled: Boolean(existing.admob_enabled),
-      adsense_enabled: Boolean(existing.adsense_enabled)
+      monetization_enabled: false,
+      subscriptions_enabled: false,
+      featured_stores_enabled: false,
+      store_ads_enabled: false,
+      admob_enabled: false,
+      adsense_enabled: false
     };
   },
 
@@ -1685,6 +1816,12 @@ export const settingsRepo = {
     const updated: PlatformSettingsDoc = {
       ...current,
       ...data,
+      monetization_enabled: false,
+      subscriptions_enabled: false,
+      featured_stores_enabled: false,
+      store_ads_enabled: false,
+      admob_enabled: false,
+      adsense_enabled: false,
       updated_at: new Date().toISOString()
     };
     await setDoc(ref, updated, { merge: true });
@@ -2319,76 +2456,23 @@ export const addressesRepo = {
 // INITIAL FIRESTORE DATABASE SEEDER (Pure Firestore, Zero Mocks)
 // ----------------------------------------------------
 export async function seedFirestoreIfEmpty(): Promise<void> {
-  console.log('🌱 Checking Firestore collections for Karanja Lad Central Hub (444105)...');
+  const allowDemoSeed =
+    process.env.IS_TEST_SUITE === 'true' ||
+    process.env.ALLOW_INSECURE_SEED_DEFAULTS === 'true';
 
-  // 1. Ensure Default Admin, Rider, and Customer users
-  const adminCheck = await usersRepo.findByPhoneAndRole('9876543210', 'admin');
-  if (!adminCheck) {
-    const adminHash = await bcrypt.hash('AdminPassword@123', 10);
-    await usersRepo.create({
-      phone: '9876543210',
-      name: 'FMP Supermart Admin',
-      email: 'admin@fmpsupermart.in',
-      role: 'admin',
-      password_hash: adminHash,
-      address: 'Central Warehouse, Shivaji Chowk',
-      landmark: 'Near Bus Stand',
-      city: 'Karanja Lad',
-      pincode: '444105',
-      is_active: true,
-      created_at: new Date().toISOString()
-    });
-  }
+  console.log('🌱 Checking Firestore collections for FMP Supermart hyperlocal marketplace...');
 
-  const riderCheck = await usersRepo.findByPhoneAndRole('9898989898', 'rider');
-  if (!riderCheck) {
-    const riderHash = await bcrypt.hash('RiderPassword@123', 10);
-    await usersRepo.create({
-      phone: '9898989898',
-      name: 'Sunil Rathod (Rider)',
-      email: 'sunil.rider@fmpsupermart.in',
-      role: 'rider',
-      password_hash: riderHash,
-      address: 'Station Road, Karanja Lad',
-      landmark: 'Opposite Railway Gate',
-      city: 'Karanja Lad',
-      pincode: '444105',
-      is_active: true,
-      created_at: new Date().toISOString()
-    });
-  }
-
-  const customerCheck = await usersRepo.findByPhoneAndRole('9123456780', 'customer');
-  if (!customerCheck) {
-    const customerHash = await bcrypt.hash('CustomerPassword@123', 10);
-    await usersRepo.create({
-      phone: '9123456780',
-      name: 'Rahul Deshmukh',
-      email: 'rahul.karanja@gmail.com',
-      role: 'customer',
-      password_hash: customerHash,
-      address: 'Plot 14, Anand Nagar, Guru Mandir Marg',
-      landmark: 'Near Guru Mandir',
-      city: 'Karanja Lad',
-      pincode: '444105',
-      is_active: true,
-      created_at: new Date().toISOString()
-    });
-  }
-
-  await ensureSpecialCredentials();
-
-  // 2. Ensure Categories
-  const existingCats = await categoriesRepo.list();
-  if (existingCats.length <= 1) {
+  // 1. Always ensure default product categories & platform config exist
+  const existingCats = await categoriesRepo.list(true);
+  if (existingCats.length === 0) {
     const categoriesData = [
       { id: 1, name: 'Grocery', slug: 'grocery', desc: 'Flours, Grains, Pulses, Cooking Oils & Masalas', order: 1, img: 'https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80' },
       { id: 2, name: 'Fruits', slug: 'fruits', desc: 'Farm fresh regional & seasonal fruits', order: 2, img: 'https://images.unsplash.com/photo-1619566636858-adf3ef46400b?auto=format&fit=crop&w=400&q=80' },
-      { id: 3, name: 'Vegetables', slug: 'vegetables', desc: 'Daily harvest fresh vegetables from Karanja Mandi', order: 3, img: 'https://images.unsplash.com/photo-1597362925123-77861d3fbac7?auto=format&fit=crop&w=400&q=80' },
-      { id: 4, name: 'Dairy', slug: 'dairy', desc: 'Fresh Cow Milk, Curd, Paneer, Amul Butter & Ghee', order: 4, img: 'https://images.unsplash.com/photo-1628088062854-d1870b4553da?auto=format&fit=crop&w=400&q=80' },
-      { id: 5, name: 'Snacks', slug: 'snacks', desc: 'Namkeen, Haldiram Bhujia, Biscuits & Local Poha', order: 5, img: 'https://images.unsplash.com/photo-1621996346565-e3d5d628169e?auto=format&fit=crop&w=400&q=80' },
-      { id: 6, name: 'Beverages', slug: 'beverages', desc: 'Premium Tea, Coffee, Juices & Refreshing Drinks', order: 6, img: 'https://images.unsplash.com/photo-1544787219-7f47ccb76574?auto=format&fit=crop&w=400&q=80' },
-      { id: 7, name: 'Household', slug: 'household', desc: 'Detergents, Surface Cleaners & Daily Home Essentials', order: 7, img: 'https://images.unsplash.com/photo-1583947215259-38e31be8751f?auto=format&fit=crop&w=400&q=80' }
+      { id: 3, name: 'Vegetables', slug: 'vegetables', desc: 'Daily harvest fresh vegetables', order: 3, img: 'https://images.unsplash.com/photo-1597362925123-77861d3fbac7?auto=format&fit=crop&w=400&q=80' },
+      { id: 4, name: 'Dairy', slug: 'dairy', desc: 'Fresh Milk, Curd, Paneer, Butter & Ghee', order: 4, img: 'https://images.unsplash.com/photo-1628088062854-d1870b4553da?auto=format&fit=crop&w=400&q=80' },
+      { id: 5, name: 'Snacks', slug: 'snacks', desc: 'Namkeen, Biscuits & Daily Snacks', order: 5, img: 'https://images.unsplash.com/photo-1621996346565-e3d5d628169e?auto=format&fit=crop&w=400&q=80' },
+      { id: 6, name: 'Beverages', slug: 'beverages', desc: 'Tea, Coffee, Juices & Refreshing Drinks', order: 6, img: 'https://images.unsplash.com/photo-1544787219-7f47ccb76574?auto=format&fit=crop&w=400&q=80' },
+      { id: 7, name: 'Household', slug: 'household', desc: 'Detergents, Cleaners & Daily Home Essentials', order: 7, img: 'https://images.unsplash.com/photo-1583947215259-38e31be8751f?auto=format&fit=crop&w=400&q=80' }
     ];
 
     for (const c of categoriesData) {
@@ -2406,151 +2490,70 @@ export async function seedFirestoreIfEmpty(): Promise<void> {
     }
   }
 
-  // 3. Ensure Products
-  const existingProds = await productsRepo.list();
-  if (existingProds.length <= 1) {
-    const productsData = [
-      // Grocery (cat: 1)
-      { id: 1, catId: 1, name: 'Aashirvaad Shuddh Chakki Atta', unit: '5 kg', price: 235, mrp: 265, disc: 11, stock: 45, img: 'https://images.unsplash.com/photo-1509440159596-0249088772ff?auto=format&fit=crop&w=400&q=80', desc: '100% whole wheat flour, soft rotis guaranteed.' },
-      { id: 2, catId: 1, name: 'Fortune Sunlite Refined Sunflower Oil', unit: '1 L Pouch', price: 138, mrp: 165, disc: 16, stock: 60, img: 'https://images.unsplash.com/photo-1474979266404-7eaacbcd87c5?auto=format&fit=crop&w=400&q=80', desc: 'Light, healthy cooking oil with Vitamin A & D.' },
-      { id: 3, catId: 1, name: 'Kolam Wada Rice (Premium Quality)', unit: '5 kg Bag', price: 340, mrp: 390, disc: 12, stock: 35, img: 'https://images.unsplash.com/photo-1586201375761-83865001e31c?auto=format&fit=crop&w=400&q=80', desc: 'Aromatic short grain rice from local Vidarbha farmers.' },
-      { id: 4, catId: 1, name: 'Tata Sampann Unpolished Toor Dal', unit: '1 kg', price: 165, mrp: 185, disc: 10, stock: 50, img: 'https://images.unsplash.com/photo-1546833999-b9f581a1996d?auto=format&fit=crop&w=400&q=80', desc: 'Rich in natural protein, unpolished toor dal.' },
-      { id: 5, catId: 1, name: 'Tata Salt Vacuum Evaporated Iodized Salt', unit: '1 kg', price: 28, mrp: 30, disc: 6, stock: 120, img: 'https://images.unsplash.com/photo-1518110925495-5fe2fda0442c?auto=format&fit=crop&w=400&q=80', desc: 'Desh Ka Namak with essential iodine.' },
-      { id: 6, catId: 1, name: 'Everest Turmeric Powder (Haldi)', unit: '200 g', price: 42, mrp: 48, disc: 12, stock: 80, img: 'https://images.unsplash.com/photo-1615485290382-441e4d049cb5?auto=format&fit=crop&w=400&q=80', desc: 'Pure aromatic turmeric with high curcumin content.' },
-      // Fruits (cat: 2)
-      { id: 7, catId: 2, name: 'Fresh Karanja Farm Bananas', unit: '1 Dozen', price: 50, mrp: 60, disc: 16, stock: 40, img: 'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?auto=format&fit=crop&w=400&q=80', desc: 'Sweet, ripe and naturally ripened bananas.' },
-      { id: 8, catId: 2, name: 'Nagpur Sweet Oranges (Santra)', unit: '1 kg', price: 75, mrp: 90, disc: 16, stock: 30, img: 'https://images.unsplash.com/photo-1547514701-42782101795e?auto=format&fit=crop&w=400&q=80', desc: 'Juicy, sweet and vitamin C rich Vidarbha santra.' },
-      { id: 9, catId: 2, name: 'Shimla Royal Red Apples', unit: '1 kg (approx 4-5 pcs)', price: 175, mrp: 210, disc: 16, stock: 25, img: 'https://images.unsplash.com/photo-1560806887-1e4cd0b6cbd6?auto=format&fit=crop&w=400&q=80', desc: 'Crisp, sweet handpicked Himachal apples.' },
-      { id: 10, catId: 2, name: 'Fresh Anar (Pomegranate)', unit: '1 kg', price: 160, mrp: 190, disc: 15, stock: 20, img: 'https://images.unsplash.com/photo-1615485290382-441e4d049cb5?auto=format&fit=crop&w=400&q=80', desc: 'Ruby red seeds loaded with antioxidants.' },
-      // Vegetables (cat: 3)
-      { id: 11, catId: 3, name: 'Nashik Fresh Red Onions (Kanda)', unit: '2 kg', price: 65, mrp: 80, disc: 18, stock: 85, img: 'https://images.unsplash.com/photo-1508747703725-719777637510?auto=format&fit=crop&w=400&q=80', desc: 'Fresh crunchy red onions, essential for Indian tadka.' },
-      { id: 12, catId: 3, name: 'Fresh Desi Potatoes (Batata)', unit: '2 kg', price: 55, mrp: 70, disc: 21, stock: 90, img: 'https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&w=400&q=80', desc: 'Firm, clean golden potatoes.' },
-      { id: 13, catId: 3, name: 'Local Hybrid Tomatoes (Tamatar)', unit: '1 kg', price: 35, mrp: 45, disc: 22, stock: 65, img: 'https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&w=400&q=80', desc: 'Juicy, farm fresh red tomatoes.' },
-      { id: 14, catId: 3, name: 'Fresh Tender Bhendi (Ladyfinger)', unit: '500 g', price: 28, mrp: 35, disc: 20, stock: 35, img: 'https://images.unsplash.com/photo-1425543103986-22abb7d7e8d2?auto=format&fit=crop&w=400&q=80', desc: 'Handpicked tender okra without fibers.' },
-      { id: 15, catId: 3, name: 'Fresh Spicy Green Chillies (Mirchi)', unit: '250 g', price: 18, mrp: 25, disc: 28, stock: 40, img: 'https://images.unsplash.com/photo-1588252303782-cb80119abd6d?auto=format&fit=crop&w=400&q=80', desc: 'Fiery green chillies for authentic spicy flavor.' },
-      // Dairy (cat: 4)
-      { id: 16, catId: 4, name: 'Amul Taaza Homogenised Toned Milk', unit: '1 L Tetra Pack', price: 74, mrp: 76, disc: 2, stock: 40, img: 'https://images.unsplash.com/photo-1550583724-b2692b85b150?auto=format&fit=crop&w=400&q=80', desc: 'Fresh pasteurised toned milk with 3.0% fat.' },
-      { id: 17, catId: 4, name: 'Amul Pasteurised Salted Butter', unit: '100 g', price: 58, mrp: 60, disc: 3, stock: 50, img: 'https://images.unsplash.com/photo-1589985270826-4b7bb135bc9d?auto=format&fit=crop&w=400&q=80', desc: 'Utterly butterly delicious butter.' },
-      { id: 18, catId: 4, name: 'Gowardhan Fresh Paneer Block', unit: '200 g', price: 95, mrp: 105, disc: 9, stock: 30, img: 'https://images.unsplash.com/photo-1631451095765-2c91616fc9e6?auto=format&fit=crop&w=400&q=80', desc: 'Soft and melt-in-the-mouth paneer made from pure cow milk.' },
-      { id: 19, catId: 4, name: 'Mother Dairy Classic Dahi (Curd)', unit: '400 g Cup', price: 38, mrp: 40, disc: 5, stock: 35, img: 'https://images.unsplash.com/photo-1571212515416-fef01fc43637?auto=format&fit=crop&w=400&q=80', desc: 'Thick, creamy and naturally set dahi.' },
-      { id: 20, catId: 4, name: 'Amul Pure Cow Ghee Jar', unit: '500 ml', price: 320, mrp: 350, disc: 8, stock: 25, img: 'https://images.unsplash.com/photo-1589985270826-4b7bb135bc9d?auto=format&fit=crop&w=400&q=80', desc: 'Traditional golden cow ghee with rich granular texture.' },
-      // Snacks (cat: 5)
-      { id: 21, catId: 5, name: 'Haldiram Nagpur Aloo Bhujia', unit: '200 g', price: 55, mrp: 60, disc: 8, stock: 70, img: 'https://images.unsplash.com/photo-1566478989037-eec170784d0b?auto=format&fit=crop&w=400&q=80', desc: 'Crispy mint and spicy potato extruded snack.' },
-      { id: 22, catId: 5, name: 'Vidarbha Special Thick Poha', unit: '1 kg', price: 52, mrp: 65, disc: 20, stock: 60, img: 'https://images.unsplash.com/photo-1589301760014-d929f3979dbc?auto=format&fit=crop&w=400&q=80', desc: 'Premium thick poha for hearty breakfast kanda poha.' },
-      { id: 23, catId: 5, name: 'Parle-G Original Gluco Biscuits Family Pack', unit: '800 g', price: 80, mrp: 90, disc: 11, stock: 80, img: 'https://images.unsplash.com/photo-1558961363-fa8fdf82db35?auto=format&fit=crop&w=400&q=80', desc: 'India’s most loved glucose biscuit with tea.' },
-      { id: 24, catId: 5, name: 'Britannia Good Day Butter Cookies', unit: '200 g', price: 40, mrp: 45, disc: 11, stock: 65, img: 'https://images.unsplash.com/photo-1590080875515-8a3a8dc5735e?auto=format&fit=crop&w=400&q=80', desc: 'Rich buttery cookies with a pleasant crunch.' },
-      // Beverages (cat: 6)
-      { id: 25, catId: 6, name: 'Society Premium Tea Leaf Powder', unit: '500 g', price: 260, mrp: 295, disc: 11, stock: 45, img: 'https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=400&q=80', desc: 'Rich aroma and strong taste for morning freshness.' },
-      { id: 26, catId: 6, name: 'Bru Instant Coffee Jar', unit: '100 g', price: 190, mrp: 215, disc: 11, stock: 35, img: 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=400&q=80', desc: 'Finest robusta and arabica blend for aromatic coffee.' },
-      { id: 27, catId: 6, name: 'Real Fruit Power Mixed Fruit Juice', unit: '1 L', price: 110, mrp: 130, disc: 15, stock: 40, img: 'https://images.unsplash.com/photo-1621506289937-a8e4df240d0b?auto=format&fit=crop&w=400&q=80', desc: 'Blend of 9 wholesome fruits without added preservatives.' },
-      // Household (cat: 7)
-      { id: 28, catId: 7, name: 'Surf Excel Quick Wash Detergent Powder', unit: '1 kg', price: 145, mrp: 160, disc: 9, stock: 55, img: 'https://images.unsplash.com/photo-1585421514738-01798e348b17?auto=format&fit=crop&w=400&q=80', desc: 'Faster stain removal in machines and bucket wash.' },
-      { id: 29, catId: 7, name: 'Vim Lemon Dishwash Bar Combo', unit: '3 x 150 g', price: 45, mrp: 54, disc: 16, stock: 80, img: 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?auto=format&fit=crop&w=400&q=80', desc: 'Power of 100 lemons cuts through stubborn oil grease.' },
-      { id: 30, catId: 7, name: 'Dettol Original Germ Protection Soap', unit: '4 x 125 g Pack', price: 185, mrp: 210, disc: 11, stock: 60, img: 'https://images.unsplash.com/photo-1607613009820-a29f7bb81c04?auto=format&fit=crop&w=400&q=80', desc: 'Trusted antibacterial soap protection for entire family.' },
-      { id: 31, catId: 7, name: 'Lizol Floral Floor Cleaner Disinfectant', unit: '1 L Bottle', price: 195, mrp: 220, disc: 11, stock: 40, img: 'https://images.unsplash.com/photo-1583947215259-38e31be8751f?auto=format&fit=crop&w=400&q=80', desc: 'Kills 99.9% germs, leaves long lasting floral fragrance.' }
-    ];
-
-    for (const p of productsData) {
-      await productsRepo.create(
-        {
-          category_id: p.catId,
-          name: p.name,
-          unit: p.unit,
-          price: p.price,
-          mrp: p.mrp,
-          discount_percent: p.disc,
-          stock: p.stock,
-          image_url: p.img,
-          description: p.desc,
-          is_active: true,
-          created_at: new Date().toISOString()
-        },
-        p.id
-      );
-    }
-  }
-
-  // 4. Ensure Delivery Settings & Platform Settings
-  await settingsRepo.getDeliverySettings();
   await settingsRepo.getPlatformSettings();
 
-  // 5. Ensure Delivery Slots
-  const existingSlots = await deliverySlotsRepo.list();
-  if (existingSlots.length === 0) {
-    const slots = [
-      { id: 1, name: 'Early Morning Fresh', time_window: '07:00 AM - 09:00 AM', max_orders_per_slot: 25, is_active: true, display_order: 1 },
-      { id: 2, name: 'Morning Regular', time_window: '09:00 AM - 12:00 PM', max_orders_per_slot: 30, is_active: true, display_order: 2 },
-      { id: 3, name: 'Afternoon Express', time_window: '12:00 PM - 03:00 PM', max_orders_per_slot: 25, is_active: true, display_order: 3 },
-      { id: 4, name: 'Evening Prime', time_window: '03:00 PM - 06:00 PM', max_orders_per_slot: 35, is_active: true, display_order: 4 },
-      { id: 5, name: 'Dinner Slot', time_window: '06:00 PM - 09:00 PM', max_orders_per_slot: 30, is_active: true, display_order: 5 }
-    ];
-    for (const s of slots) {
-      await deliverySlotsRepo.create(s, s.id);
+  // 2. Demo / automated test accounts are ONLY seeded when explicitly opted-in (never in normal production)
+  if (allowDemoSeed) {
+    const adminCheck = await usersRepo.findByPhoneAndRole('9876543210', 'admin');
+    if (!adminCheck) {
+      const adminHash = await bcrypt.hash('AdminPassword@123', 10);
+      await usersRepo.create({
+        phone: '9876543210',
+        name: 'FMP Supermart Admin',
+        email: 'admin@fmpsupermart.in',
+        role: 'admin',
+        password_hash: adminHash,
+        address: 'FMP Supermart Platform Office',
+        landmark: 'Karanja Lad',
+        city: 'Karanja Lad',
+        pincode: '444105',
+        is_active: true,
+        created_at: new Date().toISOString()
+      });
+    }
+
+    const customerCheck = await usersRepo.findByPhoneAndRole('9123456780', 'customer');
+    if (!customerCheck) {
+      const customerHash = await bcrypt.hash('CustomerPassword@123', 10);
+      await usersRepo.create({
+        phone: '9123456780',
+        name: 'Rahul Deshmukh',
+        email: 'rahul.karanja@gmail.com',
+        role: 'customer',
+        password_hash: customerHash,
+        address: 'Plot 14, Anand Nagar, Guru Mandir Marg',
+        landmark: 'Near Guru Mandir',
+        city: 'Karanja Lad',
+        pincode: '444105',
+        is_active: true,
+        created_at: new Date().toISOString()
+      });
+    }
+
+    const primaryAdmin = await usersRepo.findByPhoneAndRole('9699925206', 'admin');
+    if (!primaryAdmin) {
+      const primaryAdminHash = await bcrypt.hash('test@12345', 10);
+      await usersRepo.create({
+        phone: '9699925206',
+        name: 'FMP Supermart Admin',
+        email: 'admin@fmpsupermart.in',
+        role: 'admin',
+        password_hash: primaryAdminHash,
+        address: 'Karanja Lad',
+        landmark: 'Maharashtra',
+        city: 'Karanja Lad',
+        pincode: '444105',
+        is_active: true,
+        created_at: new Date().toISOString()
+      });
     }
   }
 
-  // 6. Ensure Suppliers
-  const existingSuppliers = await suppliersRepo.list();
-  if (existingSuppliers.length === 0) {
-    const suppliers = [
-      { id: 1, name: 'Vidarbha Agro & Grains Mart', contact_person: 'Gajanan Patil', phone: '9422113344', email: 'vidarbha.agro@karanjamandi.in', address: 'Shop 12, Krishi Utpanna Bazar Samiti (APMC), Karanja Lad', city: 'Karanja Lad', gst_number: '27AABCV1234F1Z1' },
-      { id: 2, name: 'Washim Dairy & Amul Agency', contact_person: 'Nitin Sharma', phone: '9422556677', email: 'amulwashim@gmail.com', address: 'Near Bus Stand, Station Road, Karanja Lad', city: 'Karanja Lad', gst_number: '27BCCDE5678G2Z2' },
-      { id: 3, name: 'Karanja FMCG Wholesale Depot', contact_person: 'Rajendra Bhutada', phone: '9822334455', email: 'bhutada.wholesale@gmail.com', address: 'Gandhi Chowk, Main Market, Karanja Lad', city: 'Karanja Lad', gst_number: '27AABCR9988H1Z5' }
-    ];
-    for (const sup of suppliers) {
-      await suppliersRepo.create(sup, sup.id);
-    }
-  }
-
-  // 7. Ensure Counters
+  // Ensure sequence counters have safe floors
   await ensureCounterMin('users', 10);
   await ensureCounterMin('categories', 10);
   await ensureCounterMin('products', 35);
-  await ensureCounterMin('suppliers', 5);
-  await ensureCounterMin('delivery_slots', 6);
+  await ensureCounterMin('stores', 5);
 
-  console.log('✅ Pure Firestore database collections verified and ready for Karanja Lad!');
-}
-
-async function ensureSpecialCredentials(): Promise<void> {
-  const adminHash = await bcrypt.hash('test@12345', 10);
-  const riderHash = await bcrypt.hash('Shubham@7', 10);
-
-  const adminUser = await usersRepo.findByPhoneAndRole('9699925206', 'admin');
-  if (!adminUser) {
-    await usersRepo.create({
-      phone: '9699925206',
-      name: 'FMP Supermart Admin',
-      email: 'admin@fmpsupermart.in',
-      role: 'admin',
-      password_hash: adminHash,
-      address: 'Central Warehouse, Shivaji Chowk',
-      landmark: 'Near Bus Stand',
-      city: 'Karanja Lad',
-      pincode: '444105',
-      is_active: true,
-      created_at: new Date().toISOString()
-    });
-  } else {
-    await usersRepo.update(adminUser.id, { password_hash: adminHash });
-  }
-
-  const riderUser = await usersRepo.findByPhoneAndRole('9699925206', 'rider');
-  if (!riderUser) {
-    await usersRepo.create({
-      phone: '9699925206',
-      name: 'Shubham (Delivery Partner)',
-      email: 'shubham.rider@fmpsupermart.in',
-      role: 'rider',
-      password_hash: riderHash,
-      address: 'Station Road, Karanja Lad',
-      landmark: 'Opposite Railway Gate',
-      city: 'Karanja Lad',
-      pincode: '444105',
-      is_active: true,
-      created_at: new Date().toISOString()
-    });
-  } else {
-    await usersRepo.update(riderUser.id, { password_hash: riderHash });
-  }
+  console.log('✅ Pure Firestore hyperlocal marketplace collections verified and ready!');
 }

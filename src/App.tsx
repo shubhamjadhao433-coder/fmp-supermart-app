@@ -3,24 +3,22 @@ import { User, CartItem, Product } from './types.ts';
 import { api, authStorage } from './services/api.ts';
 import { CustomerApp } from './components/CustomerApp.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
-import { DeliveryBoyApp } from './components/DeliveryBoyApp.tsx';
 import { StoreOwnerDashboard } from './components/StoreOwnerDashboard.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
 import { OfflineIndicator } from './components/OfflineIndicator.tsx';
-import { ShieldAlert, ArrowLeft, LogOut, Lock, ShieldCheck, Truck, Store as StoreIcon } from 'lucide-react';
+import { ShieldAlert, ArrowLeft, LogOut, Lock, ShieldCheck, Store as StoreIcon } from 'lucide-react';
 
 const CART_STORAGE_KEY = 'fmp_supermart_cart';
 
-function getRouteFromHash(): 'customer' | 'admin' | 'rider' | 'store' {
+function getRouteFromHash(): 'customer' | 'admin' | 'store' {
   const hash = window.location.hash.toLowerCase();
   if (hash.startsWith('#/admin') || hash === '#admin') return 'admin';
-  if (hash.startsWith('#/rider') || hash === '#rider') return 'rider';
   if (hash.startsWith('#/store') || hash === '#store') return 'store';
   return 'customer';
 }
 
 export default function App() {
-  const [route, setRoute] = useState<'customer' | 'admin' | 'rider' | 'store'>(getRouteFromHash());
+  const [route, setRoute] = useState<'customer' | 'admin' | 'store'>(getRouteFromHash());
   // Hydrate user immediately from secure browser session storage to eliminate flicker on page refresh
   const [currentUser, setCurrentUser] = useState<User | null>(() => authStorage.getUser());
   // If we already have a cached session, don't show full-page loading spinner while revalidating
@@ -44,9 +42,15 @@ export default function App() {
   const [isFavoritesOpen, setIsFavoritesOpen] = useState<boolean>(false);
   const [isOrdersOpen, setIsOrdersOpen] = useState<boolean>(false);
 
-  // Sync route on hashchange
+  // Sync route on hashchange & redirect retired #/rider hash cleanly
   useEffect(() => {
+    if (window.location.hash.toLowerCase().startsWith('#/rider')) {
+      window.location.hash = '#/';
+    }
     const handleHashChange = () => {
+      if (window.location.hash.toLowerCase().startsWith('#/rider')) {
+        window.location.hash = '#/';
+      }
       setRoute(getRouteFromHash());
     };
     window.addEventListener('hashchange', handleHashChange);
@@ -56,8 +60,11 @@ export default function App() {
   // Sync session across browser tabs
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'fmp_supermart_token' || e.key === 'fmp_supermart_user') {
+      if (e.key === 'fmp_supermart_user') {
         const user = authStorage.getUser();
+        if (!user) {
+          authStorage.clearToken();
+        }
         setCurrentUser(user);
       }
     };
@@ -184,9 +191,6 @@ export default function App() {
     if (user.role === 'admin') {
       window.location.hash = '#/admin';
       setRoute('admin');
-    } else if (user.role === 'rider') {
-      window.location.hash = '#/rider';
-      setRoute('rider');
     } else if (user.role === 'store_owner') {
       window.location.hash = '#/store';
       setRoute('store');
@@ -298,99 +302,6 @@ export default function App() {
           window.location.hash = '#/';
           setRoute('customer');
         }}
-      />
-    );
-  }
-
-  // ========================================================
-  // ROUTE 2: DELIVERY PARTNER DASHBOARD (#/rider)
-  // ========================================================
-  if (route === 'rider') {
-    // If not logged in, prompt sign in via single login modal/screen
-    if (!currentUser) {
-      return (
-        <div className="min-h-screen bg-linear-to-br from-amber-950 via-gray-900 to-amber-900 flex items-center justify-center p-3 sm:p-4">
-          <div className="max-w-md w-full bg-white rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl border border-amber-100 text-center space-y-4 sm:space-y-5">
-            <div className="w-14 h-14 sm:w-16 sm:h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
-              <Truck className="w-7 h-7 sm:w-8 sm:h-8" />
-            </div>
-            <div>
-              <h2 className="text-lg sm:text-xl font-black text-gray-900">Delivery Partner Portal</h2>
-              <p className="text-xs text-gray-500 mt-1">
-                Please sign in with your registered delivery partner account.
-              </p>
-            </div>
-            <button
-              onClick={() => setIsAuthOpen(true)}
-              className="w-full py-3 bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2"
-            >
-              <Lock className="w-4 h-4" />
-              <span>Sign In to Continue</span>
-            </button>
-            <div className="pt-2 border-t border-gray-100 flex items-center justify-between text-xs">
-              <button
-                onClick={() => {
-                  window.location.hash = '#/';
-                  setRoute('customer');
-                }}
-                className="text-gray-500 hover:text-gray-900 font-semibold flex items-center gap-1 cursor-pointer"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Return to Storefront</span>
-              </button>
-              <span className="text-[11px] text-gray-400 font-medium">OTP Verification Enabled</span>
-            </div>
-          </div>
-
-          <AuthModal
-            isOpen={isAuthOpen}
-            onClose={() => setIsAuthOpen(false)}
-            onAuthSuccess={handleAuthSuccess}
-          />
-        </div>
-      );
-    }
-
-    // Role-based Access Control: Customers cannot view rider dashboard
-    if (currentUser.role !== 'rider' && currentUser.role !== 'admin') {
-      return (
-        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-3 sm:p-4">
-          <div className="max-w-md w-full bg-white rounded-2xl sm:rounded-3xl p-5 sm:p-8 shadow-2xl border border-amber-200 text-center space-y-4">
-            <div className="w-16 h-16 bg-amber-100 text-amber-700 rounded-2xl flex items-center justify-center mx-auto">
-              <ShieldAlert className="w-8 h-8" />
-            </div>
-            <h2 className="text-lg font-black text-gray-900">Access Denied (403 Forbidden)</h2>
-            <p className="text-xs text-gray-600 leading-relaxed">
-              You are signed in as <span className="font-bold text-gray-900">{currentUser.name}</span> (Customer).
-              This console is reserved exclusively for registered FMP delivery riders.
-            </p>
-            <div className="flex flex-col gap-2 pt-2">
-              <button
-                onClick={() => {
-                  window.location.hash = '#/';
-                  setRoute('customer');
-                }}
-                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition cursor-pointer"
-              >
-                Return to Customer Storefront
-              </button>
-              <button
-                onClick={handleLogout}
-                className="w-full py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5"
-              >
-                <LogOut className="w-4 h-4" />
-                <span>Sign Out & Switch Account</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <DeliveryBoyApp
-        currentUser={currentUser}
-        onLogout={handleLogout}
       />
     );
   }
@@ -545,8 +456,8 @@ export default function App() {
               Your cart contains products from another store. Would you like to clear your current cart and continue with this store?
             </p>
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900 space-y-0.5">
-              <div>Current cart: <strong>{cart[0]?.product.store_name || 'FMP Supermart Central'}</strong></div>
-              <div>New store: <strong>{pendingStoreSwitch.product.store_name || 'FMP Supermart Central'}</strong></div>
+              <div>Current cart: <strong>{cart[0]?.product.store_name || 'Previous Store'}</strong></div>
+              <div>New store: <strong>{pendingStoreSwitch.product.store_name || 'Selected Store'}</strong></div>
             </div>
             <div className="flex gap-2 pt-1">
               <button

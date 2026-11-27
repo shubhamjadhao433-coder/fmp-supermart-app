@@ -52,7 +52,6 @@ import {
   User,
   ProductReview,
   NotificationItem,
-  DeliverySettings,
   DeliveryQuote,
   CartQuoteItem,
   CartQuoteResponse,
@@ -67,7 +66,6 @@ import {
   normalizeProductType,
   formatSlabRangeLabel
 } from '../shared/quantityPricing.ts';
-import { OrderLiveTrackingMap } from './OrderLiveTrackingMap.tsx';
 import { OsmMapPicker } from './OsmMapPicker.tsx';
 import { PWAInstallButton } from './PWAInstallButton.tsx';
 
@@ -249,10 +247,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [profileSaving, setProfileSaving] = useState<boolean>(false);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
 
-  // Delivery settings & live backend OSRM quote
-  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings | null>(null);
-  const [handlingFeeConfig, setHandlingFeeConfig] = useState<number>(5);
-  const [deliverySlots, setDeliverySlots] = useState<{ id: number; name: string; time_window: string }[]>([]);
+  // Live backend OSRM store delivery quote
   const [customerLat, setCustomerLat] = useState<number>(20.4839);
   const [customerLng, setCustomerLng] = useState<number>(77.4877);
   const [hasUserMovedPin, setHasUserMovedPin] = useState<boolean>(false);
@@ -312,9 +307,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     '06:00 PM - 09:00 PM (Night Dinner Slot)'
   ];
 
-  const availableSlotOptions = deliverySlots.length > 0
-    ? deliverySlots.map(s => `${s.time_window} (${s.name})`)
-    : defaultSlots;
+  const availableSlotOptions = defaultSlots;
 
   // Next 7 days for scheduling
   const next7Days = Array.from({ length: 7 }).map((_, i) => {
@@ -324,11 +317,6 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     if (i === 1) return 'Tomorrow, ' + d.toLocaleDateString('en-IN', { month: 'short', day: 'numeric' });
     return d.toLocaleDateString('en-IN', { weekday: 'short', month: 'short', day: 'numeric' });
   });
-
-  // Delivery Partner Tip State
-  const [tipAmount, setTipAmount] = useState<number>(0);
-  const [customTip, setCustomTip] = useState<string>('');
-  const [isCustomTip, setIsCustomTip] = useState<boolean>(false);
 
   // Backend Authoritative Quantity-Based Pricing State
   const [cartQuote, setCartQuote] = useState<CartQuoteResponse | null>(null);
@@ -398,14 +386,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     : deliveryQuote && deliveryQuote.deliverable
     ? deliveryQuote.delivery_fee
     : 0;
-  const handlingCharge = cartSubtotal === 0 || isStorePickup
-    ? 0
-    : deliveryQuote
-    ? deliveryQuote.handling_fee
-    : cartStoreId
-    ? 0
-    : handlingFeeConfig;
-  const totalAmount = Math.round((cartSubtotal + deliveryCharge + handlingCharge + (cartSubtotal === 0 || isStorePickup ? 0 : tipAmount)) * 100) / 100;
+  const totalAmount = Math.round((cartSubtotal + deliveryCharge) * 100) / 100;
   const cartItemCount = cart.length;
 
   // Load Catalog & Customer Data
@@ -413,25 +394,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     setLoading(true);
     setStoresLoading(true);
     try {
-      const [cats, prods, feeRes, slotsRes, storesRes] = await Promise.all([
+      const [cats, prods, storesRes] = await Promise.all([
         api.getCategories().catch(() => []),
         api.getProducts().catch(() => []),
-        api.getDeliverySettings().catch(() => null),
-        api.getDeliverySlots().catch(() => []),
         api.getNearbyStores({ lat: customerLat, lng: customerLng }).catch(() => [])
       ]);
       if (cats && cats.length > 0) setCategories(cats);
       if (prods && prods.length > 0) setProducts(prods);
       if (Array.isArray(storesRes)) setNearbyStores(storesRes);
-      if (feeRes) {
-        setDeliverySettings(feeRes);
-        if (typeof feeRes.handling_fee === 'number') setHandlingFeeConfig(feeRes.handling_fee);
-        if (!hasUserMovedPin && typeof feeRes.warehouse_lat === 'number' && typeof feeRes.warehouse_lng === 'number') {
-          setCustomerLat(feeRes.warehouse_lat);
-          setCustomerLng(feeRes.warehouse_lng);
-        }
-      }
-      if (slotsRes && slotsRes.length > 0) setDeliverySlots(slotsRes);
 
       // Auto retry if catalog was empty on initial cold start
       if ((!cats || cats.length === 0) || (!prods || prods.length === 0)) {
@@ -670,7 +640,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
   // Backend OSRM Distance & Fee Calculation (for Home Delivery; skipped for Store Pickup)
   useEffect(() => {
-    if (cart.length === 0 || isStorePickup || !hasUserMovedPin) {
+    if (cart.length === 0 || isStorePickup || !hasUserMovedPin || !cartStoreId) {
       setDeliveryQuote(null);
       setQuoteError(null);
       setQuoteLoading(false);
@@ -683,9 +653,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
     const timer = setTimeout(async () => {
       try {
-        const quote = cartStoreId
-          ? await api.calculateStoreDeliveryQuote(cartStoreId, customerLat, customerLng)
-          : await api.calculateDeliveryFee(customerLat, customerLng);
+        const quote = await api.calculateStoreDeliveryQuote(cartStoreId, customerLat, customerLng);
         if (!cancelled) {
           setDeliveryQuote(quote);
           setQuoteError(null);
@@ -1029,6 +997,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       return;
     }
 
+    if (!cartStoreId) {
+      setCheckoutError('Please select products from an approved nearby store before placing an order.');
+      return;
+    }
+
     setCheckoutSubmitting(true);
     setCheckoutError(null);
 
@@ -1036,7 +1009,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       const payload = {
         items: cart.map(i => ({ product_id: i.product.id, quantity: i.quantity })),
         store_id: cartStoreId,
-        fulfillment_type: cartStoreId ? fulfillmentType : ('delivery' as const),
+        fulfillment_type: fulfillmentType,
         payment_mode: isStorePickup ? ('Pay at Store' as const) : ('COD' as const),
         idempotency_key: checkoutIdempotencyKey,
         customer_name: finalName,
@@ -1047,7 +1020,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         delivery_type: isStorePickup ? ('immediate' as const) : deliveryType,
         scheduled_date: isStorePickup ? 'Store Pickup' : (deliveryType === 'scheduled' ? scheduledDate : 'Immediate Express'),
         time_slot: isStorePickup ? 'Ready at Store Counter' : (deliveryType === 'scheduled' ? scheduledSlot : 'Within 30-45 mins'),
-        tip_amount: isStorePickup ? 0 : tipAmount,
+        tip_amount: 0,
         customer_lat: isStorePickup ? (cartStore?.lat ?? customerLat) : customerLat,
         customer_lng: isStorePickup ? (cartStore?.lng ?? customerLng) : customerLng
       };
@@ -1064,9 +1037,6 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
       setCheckoutIdempotencyKey(makeOrderIdempotencyKey());
       onClearCart();
-      setTipAmount(0);
-      setCustomTip('');
-      setIsCustomTip(false);
       onCloseCart();
       onOrderPlaced(res.order);
       loadCatalogData();
@@ -1580,7 +1550,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   <p className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
                     {searchQuery.trim()
                       ? 'Try searching another store name or product, or change your selected area.'
-                      : 'FMP Central Catalog is available below. You can also change your location or register a local kirana store for free.'}
+                      : 'Browse available products below, change your selected area, or register your local kirana store for free.'}
                   </p>
                 </div>
               </div>
@@ -2198,7 +2168,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 <span className="font-black text-gray-900 text-sm">FMP Supermart</span>
               </div>
               <p className="text-gray-500 leading-relaxed">
-                Karanja Lad's dedicated central grocery supermarket delivering daily fresh essentials directly to your doorstep.
+                Karanja Lad&apos;s hyperlocal multi-store grocery &amp; kirana marketplace connecting neighborhoods directly with trusted local shops.
               </p>
               <div className="text-emerald-800 font-semibold flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5 shrink-0 text-emerald-600" />
@@ -2207,38 +2177,33 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             </div>
 
             <div>
-              <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Delivery & Charges</h4>
+              <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Fulfillment &amp; Charges</h4>
               <ul className="space-y-2 text-gray-500">
-                <li>
-                  • Distance-based Delivery:{' '}
-                  {deliverySettings?.delivery_pricing_mode === 'per_km'
-                    ? `Free up to ${deliverySettings.free_delivery_up_to_km} km, then ₹${deliverySettings.per_km_rate}/km`
-                    : '0–2 km FREE • Slab-based (Admin Configurable)'}
-                </li>
-                <li>• Max Delivery Radius: {deliverySettings?.max_delivery_distance_km || 8} km from Central Warehouse</li>
-                <li>• Packaging & Handling: ₹{handlingFeeConfig}</li>
-                <li>• Payment Mode: Cash on Delivery (COD) only</li>
+                <li>• Store Delivery: Store-managed within store service radius (COD)</li>
+                <li>• Store Pickup: ₹0 delivery fee with 6-digit Pickup Code</li>
+                <li>• Zero platform handling fee &amp; free local store onboarding</li>
+                <li>• Single-store checkout per order for faster fulfillment</li>
               </ul>
             </div>
 
             <div>
               <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Hours & Support</h4>
               <ul className="space-y-2 text-gray-500">
-                <li>• Open 7 Days: 7:00 AM – 9:00 PM</li>
-                <li>• Service Location: Karanja Lad</li>
+                <li>• Store Hours: Displayed individually on each kirana store</li>
+                <li>• Service Location: Karanja Lad, Maharashtra</li>
                 <li>• Customer Helpline: 9699925206</li>
-                <li>• Delivery OTP verification for secure handovers</li>
+                <li>• Secure 6-digit counter verification for Store Pickup</li>
               </ul>
             </div>
 
             <div>
-              <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Quality Promise</h4>
+              <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Local Store Promise</h4>
               <p className="text-gray-500 mb-3 leading-relaxed">
-                Handpicked fresh produce, direct local farm sourcing, sealed grocery packets with easy door-step verification during COD delivery.
+                Fresh daily essentials directly from approved neighborhood stores in Karanja Lad with transparent store pricing and instant pickup or COD delivery.
               </p>
               <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-800 rounded-xl font-bold text-xs border border-emerald-200">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                <span>100% Fresh & Authentic</span>
+                <span>Verified Local Kirana Network</span>
               </div>
             </div>
           </div>
@@ -2486,7 +2451,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               >
                 <div className="flex items-center gap-2">
                   <Package className="w-4 h-4 text-emerald-600" />
-                  <span>View Order History &amp; Delivery OTP</span>
+                  <span>View Order History &amp; Pickup Code</span>
                 </div>
                 <ChevronRight className="w-4 h-4 text-gray-400" />
               </button>
@@ -2871,7 +2836,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 <h4 className="font-bold text-xs text-gray-900">Customer Ratings & Reviews</h4>
                 <div className="flex items-center gap-1 text-amber-500 font-bold text-xs">
                   <Star className="w-4 h-4 fill-amber-400" />
-                  <span>{selectedProduct.average_rating || 5.0}</span>
+                  <span>
+                    {(selectedProduct.review_count || 0) > 0 && Number(selectedProduct.average_rating) > 0
+                      ? Number(selectedProduct.average_rating).toFixed(1)
+                      : 'New'}
+                  </span>
                   <span className="text-gray-400 font-normal">({selectedProduct.review_count || 0})</span>
                 </div>
               </div>
@@ -3341,7 +3310,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                                 : quoteLoading
                                 ? 'Calculating road distance & delivery fee via OSRM...'
                                 : deliveryQuote
-                                ? `${deliveryQuote.distance_km} km from ${cartStore ? cartStore.name : 'Warehouse'} • ${
+                                ? `${deliveryQuote.distance_km} km from ${cartStore ? cartStore.name : 'Store'} • ${
                                     !deliveryQuote.deliverable
                                       ? 'Outside Zone'
                                       : deliveryQuote.delivery_fee === 0
@@ -3366,9 +3335,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         <OsmMapPicker
                           lat={customerLat}
                           lng={customerLng}
-                          warehouseLat={cartStore ? cartStore.lat : (deliverySettings?.warehouse_lat ?? 20.4839)}
-                          warehouseLng={cartStore ? cartStore.lng : (deliverySettings?.warehouse_lng ?? 77.4877)}
-                          warehouseLabel={cartStore ? cartStore.name : 'FMP Warehouse'}
+                          warehouseLat={cartStore ? cartStore.lat : 20.4839}
+                          warehouseLng={cartStore ? cartStore.lng : 77.4877}
+                          warehouseLabel={cartStore ? cartStore.name : 'Store Location'}
                           pinLabel="Your Location"
                           pinColor="emerald"
                           heightClass="h-44"
@@ -3579,103 +3548,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       </span>
                     </div>
 
-                    {/* Delivery Partner Tip Selection (Central / Delivery Orders Only) */}
-                    {!isStorePickup && !cartStoreId && (
-                    <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl p-3 space-y-2 text-xs">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1.5 font-bold text-amber-900 text-xs">
-                          <Heart className="w-4 h-4 text-red-500 fill-red-500" />
-                          <span>Delivery Partner Tip</span>
-                        </div>
-                        {tipAmount > 0 && (
-                          <span className="text-[10px] font-black text-amber-800 bg-amber-200/60 px-2 py-0.5 rounded-full">
-                            +₹{tipAmount} Added
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-amber-800 leading-snug">
-                        Say thanks to your Karanja Lad delivery partner. 100% of this tip goes directly to them.
-                      </p>
-
-                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                        {[
-                          { label: 'No Tip', value: 0 },
-                          { label: '₹10', value: 10 },
-                          { label: '₹20', value: 20 },
-                          { label: '₹30', value: 30 },
-                          { label: '₹50', value: 50 },
-                        ].map(opt => {
-                          const isSelected = !isCustomTip && tipAmount === opt.value;
-                          return (
-                            <button
-                              type="button"
-                              key={opt.label}
-                              onClick={() => {
-                                setIsCustomTip(false);
-                                setTipAmount(opt.value);
-                                setCustomTip('');
-                              }}
-                              className={`px-2.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer border ${
-                                isSelected
-                                  ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                                  : 'bg-white text-gray-700 border-gray-200 hover:bg-amber-50'
-                              }`}
-                            >
-                              {opt.label}
-                            </button>
-                          );
-                        })}
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsCustomTip(true);
-                          }}
-                          className={`px-2.5 py-1.5 rounded-xl font-bold text-xs transition cursor-pointer border ${
-                            isCustomTip
-                              ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
-                              : 'bg-white text-gray-700 border-gray-200 hover:bg-amber-50'
-                          }`}
-                        >
-                          Custom
-                        </button>
-                      </div>
-
-                      {isCustomTip && (
-                        <div className="flex items-center gap-2 pt-1">
-                          <div className="relative flex-1">
-                            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 font-bold">₹</span>
-                            <input
-                              type="number"
-                              min="0"
-                              max="500"
-                              value={customTip}
-                              onChange={e => {
-                                const val = e.target.value.replace(/\D/g, '');
-                                setCustomTip(val);
-                                setTipAmount(Math.max(0, parseInt(val, 10) || 0));
-                              }}
-                              placeholder="Enter tip (e.g. 25)"
-                              className="w-full pl-6 pr-2 py-1.5 bg-white border border-amber-300 rounded-xl text-xs font-bold text-gray-900 outline-hidden focus:ring-1 focus:ring-amber-500"
-                            />
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setIsCustomTip(false);
-                              setTipAmount(0);
-                              setCustomTip('');
-                            }}
-                            className="text-[11px] text-gray-500 hover:text-gray-800 font-semibold px-2 py-1 cursor-pointer"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    )}
-
-                    {/* Zomato-Style Bill Summary Breakdown (Backend Distance & Fee Calculated) */}
+                    {/* Bill Summary Breakdown */}
                     <div className="p-3.5 bg-white rounded-2xl border border-gray-200 text-xs space-y-2 shadow-xs">
                       <div className="flex items-center justify-between pb-2 border-b border-gray-100">
                         <span className="font-extrabold text-gray-900 flex items-center gap-1.5">
@@ -3699,7 +3572,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                       {!isStorePickup && deliveryQuote && (
                         <div className="flex justify-between items-center text-[11px] text-gray-500">
-                          <span>{cartStore ? `${cartStore.name} to Pin Distance:` : 'Warehouse to Pin Road Distance:'}</span>
+                          <span>{cartStore ? `${cartStore.name} to Pin Distance:` : 'Store to Pin Distance:'}</span>
                           <span className="font-bold text-gray-800">
                             {deliveryQuote.distance_km} km ({deliveryQuote.distance_source === 'osrm' ? 'OSRM Road' : 'Estimated'})
                           </span>
@@ -3748,25 +3621,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         </span>
                       </div>
 
-                      {handlingCharge > 0 && (
-                        <div className="flex justify-between text-gray-600">
-                          <span>Handling Fee:</span>
-                          <span className="text-gray-900 font-semibold">₹{handlingCharge}</span>
-                        </div>
-                      )}
-
-                      {!isStorePickup && !cartStoreId && tipAmount > 0 && (
-                        <div className="flex justify-between text-amber-800 font-semibold">
-                          <span className="flex items-center gap-1">
-                            <Heart className="w-3.5 h-3.5 text-red-500 fill-red-500" />
-                            <span>Delivery Partner Tip:</span>
-                          </span>
-                          <span>₹{tipAmount}</span>
-                        </div>
-                      )}
-
                       <div className="flex justify-between font-black text-gray-900 text-sm pt-2 border-t border-gray-100">
-                        <span>Final COD Amount:</span>
+                        <span>{isStorePickup ? 'Pay at Store Total:' : 'Final COD Amount:'}</span>
                         <span className="text-emerald-700 text-base">₹{totalAmount}</span>
                       </div>
 
@@ -3990,7 +3846,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         )}
                       </div>
 
-                      {/* Pickup Code or Delivery OTP */}
+                      {/* Pickup Code */}
                       {detail.fulfillment_type === 'pickup' && detail.pickup_code && !isCancelled && detail.status !== 'delivered' && (
                         <div className="bg-emerald-700 text-white rounded-2xl p-3.5 shadow-sm space-y-1">
                           <div className="flex items-center justify-between text-[11px]">
@@ -4003,33 +3859,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         </div>
                       )}
 
-                      {detail.status === 'dispatched' && detail.fulfillment_type !== 'pickup' && detail.delivery_otp && (
-                        <div className="bg-linear-to-r from-amber-500 to-amber-600 text-white rounded-2xl p-4 shadow-md space-y-1">
-                          <div className="flex items-center justify-between text-[11px]">
-                            <span className="font-bold uppercase tracking-wider text-amber-100 flex items-center gap-1">
-                              <ShieldCheck className="w-4 h-4" />
-                              <span>Customer-Only Delivery OTP</span>
-                            </span>
-                            <span className="text-[9px] bg-white/20 px-2 py-0.5 rounded-full font-semibold">Share on delivery</span>
-                          </div>
-                          <div className="text-3xl font-black tracking-widest text-center py-2 bg-amber-700/40 rounded-xl my-1 border border-amber-300/30">
-                            {detail.delivery_otp.split('').join('  ')}
-                          </div>
-                          <p className="text-[11px] text-amber-100 text-center">
-                            Share this OTP only after receiving your groceries and paying ₹{detail.total_amount}.
-                          </p>
-                        </div>
-                      )}
-
-                      {detail.status === 'dispatched' && !detail.store_id && detail.fulfillment_type !== 'pickup' && (
-                        <OrderLiveTrackingMap order={detail} />
-                      )}
-
                       {/* Store & Fulfillment Details */}
                       <div className="bg-white border border-gray-200 rounded-2xl p-3.5 space-y-2">
                         <div className="font-extrabold text-gray-900 flex items-center gap-1.5">
                           <StoreIcon className="w-4 h-4 text-amber-700" />
-                          <span>{detail.store_name || 'FMP Supermart Central Store'}</span>
+                          <span>{detail.store_name || 'Local Partner Store'}</span>
                         </div>
                         {detail.store_address && (
                           <div className="text-[11px] text-gray-600">
@@ -4316,34 +4150,6 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                                     <div className="text-2xl font-black tracking-widest text-center py-1.5 bg-emerald-800/60 rounded-xl">
                                       {order.pickup_code}
                                     </div>
-                                  </div>
-                                )}
-
-                                {/* CUSTOMER-ONLY DELIVERY OTP CARD (Central Fleet) */}
-                                {isDispatched && order.fulfillment_type !== 'pickup' && order.delivery_otp && (
-                                  <div className="bg-linear-to-r from-amber-500 to-amber-600 text-white rounded-2xl p-4 shadow-md space-y-1">
-                                    <div className="flex items-center justify-between text-[11px]">
-                                      <span className="font-bold uppercase tracking-wider text-amber-100 flex items-center gap-1">
-                                        <ShieldCheck className="w-4 h-4" />
-                                        <span>Customer-Only Delivery OTP</span>
-                                      </span>
-                                      <span className="text-[9px] bg-white/20 px-2 py-0.5 rounded-full font-semibold">
-                                        Share only upon delivery
-                                      </span>
-                                    </div>
-                                    <div className="text-3xl font-black tracking-widest text-center py-2 bg-amber-700/40 rounded-xl my-1 border border-amber-300/30">
-                                      {order.delivery_otp.split('').join('  ')}
-                                    </div>
-                                    <p className="text-[11px] text-amber-100 text-center">
-                                      Give this 4-digit OTP to rider <strong className="text-white">{order.rider_name || 'Sunil'}</strong> only after receiving your package and paying ₹{order.total_amount} COD.
-                                    </p>
-                                  </div>
-                                )}
-
-                                {/* GOOGLE MAPS REAL-TIME GPS TRACKING COMPONENT (Central Fleet) */}
-                                {isDispatched && !order.store_id && order.fulfillment_type !== 'pickup' && (
-                                  <div className="pt-1">
-                                    <OrderLiveTrackingMap order={order} />
                                   </div>
                                 )}
 

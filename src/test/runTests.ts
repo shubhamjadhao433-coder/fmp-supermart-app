@@ -30,17 +30,21 @@ async function main() {
   const address = server.address() as any;
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
+  let seedStoreOwnerToken = '';
+  let seedStoreId = 0;
+  let createdProductId = 0;
+
   try {
     await seedFirestoreIfEmpty();
 
     // 1. Health check test
-    await test('Health check endpoint returns healthy status and Karanja Lad warehouse config', async () => {
+    await test('Health check endpoint returns healthy hyperlocal marketplace status', async () => {
       const res = await fetch(`${baseUrl}/api/health`);
       const data = await res.json();
       assert.strictEqual(res.status, 200);
       assert.strictEqual(data.status, 'healthy');
-      assert.strictEqual(data.warehouse.location, 'Shivaji Chowk, Karanja Lad, Maharashtra 444105');
-      assert.strictEqual(data.businessRules.paymentMode, 'Cash on Delivery (COD) Only');
+      assert.strictEqual(data.businessRules.paymentMode, 'Cash on Delivery (COD) & Pay at Store');
+      assert.strictEqual(data.businessRules.handlingCharge, 0);
       assert.strictEqual(data.database.type, 'Firebase Firestore (Single Source of Truth)');
     });
 
@@ -50,7 +54,6 @@ async function main() {
     const uniquePhone = `9823${Math.floor(100000 + Math.random() * 900000)}`;
 
     await test('Registration and login for new customer in Karanja Lad', async () => {
-      // Register
       const regRes = await fetch(`${baseUrl}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -69,7 +72,6 @@ async function main() {
       assert.strictEqual(regData.user.name, 'Amol Deshmukh');
       assert.strictEqual(regData.user.role, 'customer');
 
-      // Login
       const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -85,13 +87,11 @@ async function main() {
       testCustomerId = loginData.user.id;
     });
 
-    // 3. Admin & Rider Auth & Permissions (RBAC)
+    // 3. Admin & Store Owner Auth + RBAC + Shared Hyperlocal Seed Store
     let adminToken = '';
-    let riderToken = '';
-    let riderId = 0;
+    const seedStorePhone = `9819${Math.floor(100000 + Math.random() * 900000)}`;
 
-    await test('Admin and rider permissions and RBAC enforcement', async () => {
-      // Login as Admin
+    await test('Admin authentication, RBAC enforcement & verified local kirana store setup', async () => {
       const adminLogin = await fetch(`${baseUrl}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -102,19 +102,7 @@ async function main() {
       assert.strictEqual(adminData.user.role, 'admin');
       adminToken = adminData.token;
 
-      // Login as Rider
-      const riderLogin = await fetch(`${baseUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: '9898989898', password: 'RiderPassword@123' })
-      });
-      const riderData = await riderLogin.json();
-      assert.strictEqual(riderLogin.status, 200);
-      assert.strictEqual(riderData.user.role, 'rider');
-      riderToken = riderData.token;
-      riderId = riderData.user.id;
-
-      // Customer should NOT be allowed to access admin routes (e.g. /api/admin/stats)
+      // Customer blocked from admin routes
       const forbiddenRes = await fetch(`${baseUrl}/api/admin/stats`, {
         headers: { Authorization: `Bearer ${testCustomerToken}` }
       });
@@ -125,16 +113,73 @@ async function main() {
         headers: { Authorization: `Bearer ${adminToken}` }
       });
       assert.strictEqual(allowedRes.status, 200, 'Admin can access stats');
+
+      // Register & approve a local store for core integration tests
+      const regStore = await fetch(`${baseUrl}/api/stores/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          owner_name: 'Karanja Core Mart Owner',
+          phone: seedStorePhone,
+          password: 'SeedStorePass@123',
+          store_name: 'Karanja Core Hyperlocal Mart',
+          address: 'Shivaji Chowk, Karanja Lad',
+          lat: 20.4839,
+          lng: 77.4877,
+          opening_hours: '07:00 AM - 10:00 PM',
+          service_type: 'both',
+          delivery_radius_km: 8,
+          delivery_fee: 15,
+          min_order_amount: 0
+        })
+      });
+      assert.strictEqual(regStore.status, 201);
+      const regStoreData = await regStore.json();
+      seedStoreId = regStoreData.store.id;
+      seedStoreOwnerToken = regStoreData.token;
+
+      const appRes = await fetch(`${baseUrl}/api/admin/stores/${seedStoreId}/approval`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify({ approval_status: 'approved' })
+      });
+      assert.strictEqual(appRes.status, 200);
     });
 
-    // 4. Product Management (Add, Edit, Stock Adjust)
-    let createdProductId = 0;
-    await test('Product management (Admin product creation, editing and stock adjust)', async () => {
-      const addRes = await fetch(`${baseUrl}/api/products`, {
+    // 4. Retired Central Warehouse & Rider Routes Must Return 410 Gone
+    await test('Retired central warehouse & platform rider routes return 410 Gone', async () => {
+      const retiredChecks: Array<{ method: string; path: string; body?: any }> = [
+        { method: 'POST', path: '/api/products', body: { name: 'Central Wheat' } },
+        { method: 'PUT', path: '/api/products/1/stock', body: { stock: 10 } },
+        { method: 'GET', path: '/api/admin/riders' },
+        { method: 'POST', path: '/api/admin/riders', body: { name: 'Test Rider' } },
+        { method: 'GET', path: '/api/delivery-slots' },
+        { method: 'GET', path: '/api/admin/settings/delivery' },
+        { method: 'POST', path: '/api/delivery/calculate-fee', body: { customer_lat: 20.48, customer_lng: 77.48 } },
+        { method: 'POST', path: '/api/orders/1/dispatch' },
+        { method: 'POST', path: '/api/admin/cod-reconcile', body: { rider_id: 1 } }
+      ];
+
+      for (const chk of retiredChecks) {
+        const res = await fetch(`${baseUrl}${chk.path}`, {
+          method: chk.method,
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`
+          },
+          body: chk.body ? JSON.stringify(chk.body) : undefined
+        });
+        assert.strictEqual(res.status, 410, `${chk.method} ${chk.path} must return 410 Gone`);
+      }
+    });
+
+    // 5. Store-Owner Product Creation, Stock Adjustment & Inventory Movement Logs
+    await test('Store-owner product creation, stock adjustment & inventory movement logs', async () => {
+      const addRes = await fetch(`${baseUrl}/api/store-owner/products`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
+          Authorization: `Bearer ${seedStoreOwnerToken}`
         },
         body: JSON.stringify({
           category_id: 1,
@@ -151,148 +196,189 @@ async function main() {
       assert.strictEqual(addData.name, 'Premium Sharbati Wheat Flour');
       createdProductId = addData.id;
 
-      // Adjust stock
-      const stockRes = await fetch(`${baseUrl}/api/products/${createdProductId}/stock`, {
+      // Adjust stock (30 -> 50)
+      const stockRes = await fetch(`${baseUrl}/api/store-owner/products/${createdProductId}/stock`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
+          Authorization: `Bearer ${seedStoreOwnerToken}`
         },
-        body: JSON.stringify({ stock: 50, reason: 'Restocked from mandi' })
+        body: JSON.stringify({ stock: 50, reason: 'Restocked from local supplier' })
       });
       const stockData = await stockRes.json();
       assert.strictEqual(stockRes.status, 200);
       assert.strictEqual(stockData.stock, 50);
+
+      // Verify inventory movement logs recorded both creation and manual adjust
+      const logsRes = await fetch(`${baseUrl}/api/store-owner/inventory-logs`, {
+        headers: { Authorization: `Bearer ${seedStoreOwnerToken}` }
+      });
+      assert.strictEqual(logsRes.status, 200);
+      const logs = await logsRes.json();
+      assert.ok(Array.isArray(logs) && logs.some((l: any) => l.product_id === createdProductId && l.change_type === 'store_stock_adjust' && l.quantity_change === 20 && l.stock_after === 50));
     });
 
-    // 5. Admin-Controlled Delivery Charge Business Rules (Distance Slabs & Historical Snapshot)
-    await test('Admin-controlled delivery charge & handling fee calculations', async () => {
-      const origRes = await fetch(`${baseUrl}/api/admin/settings/delivery`, {
-        headers: { Authorization: `Bearer ${adminToken}` }
+    // 6. Single-Store Checkout Requirement & Zero Handling Fee / Tip Lock
+    await test('Hyperlocal single-store checkout requirement & zero handling/tip fee enforcement', async () => {
+      // Missing store_id must be rejected with 400
+      const noStoreRes = await fetch(`${baseUrl}/api/orders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${testCustomerToken}`
+        },
+        body: JSON.stringify({
+          items: [{ product_id: createdProductId, quantity: 1 }],
+          delivery_address: 'Near Guru Mandir, Karanja Lad',
+          customer_lat: 20.4839,
+          customer_lng: 77.4877
+        })
       });
-      const origSettings = await origRes.json();
-      const pinLat = Number(origSettings.warehouse_lat || 20.4839);
-      const pinLng = Number(origSettings.warehouse_lng || 77.4877);
+      assert.strictEqual(noStoreRes.status, 400, 'Orders without store_id must be rejected');
 
-      try {
-        // Set slab charge to ₹25 for 0–8 km
-        await fetch(`${baseUrl}/api/admin/settings/delivery`, {
+      // Client-submitted tip_amount / handling_fee tampering must be ignored (always ₹0)
+      const orderRes = await fetch(`${baseUrl}/api/orders`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${testCustomerToken}`
+        },
+        body: JSON.stringify({
+          store_id: seedStoreId,
+          fulfillment_type: 'delivery',
+          items: [{ product_id: createdProductId, quantity: 1 }],
+          delivery_address: 'Near Guru Mandir, Karanja Lad',
+          tip_amount: 99,
+          handling_fee: 45,
+          customer_lat: 20.4840,
+          customer_lng: 77.4878
+        })
+      });
+      assert.strictEqual(orderRes.status, 201);
+      const orderData = await orderRes.json();
+      assert.strictEqual(Number(orderData.order.delivery_fee), 15, 'Store delivery fee ₹15 must apply');
+      assert.strictEqual(Number(orderData.order.handling_fee), 0, 'Handling fee must be locked at ₹0');
+      assert.strictEqual(Number(orderData.order.tip_amount), 0, 'Tip amount must be locked at ₹0');
+      assert.strictEqual(Number(orderData.order.total_amount), Number(orderData.order.subtotal) + 15);
+    });
+
+    // 7. Pickup Code Security: Customer Visibility, Store/Admin Stripping, Brute-Force Lock & Valid Verification
+    await test('Pickup order 6-digit code privacy, invalid/brute-force guard & valid verification', async () => {
+      // Place Pickup Order #1 for valid verification test
+      const p1Res = await fetch(`${baseUrl}/api/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+        body: JSON.stringify({
+          store_id: seedStoreId,
+          fulfillment_type: 'pickup',
+          payment_mode: 'Pay at Store',
+          idempotency_key: `pickup_valid_${Date.now()}`,
+          items: [{ product_id: createdProductId, quantity: 1 }]
+        })
+      });
+      assert.strictEqual(p1Res.status, 201);
+      const p1 = (await p1Res.json()).order;
+      assert.ok(/^\d{6}$/.test(String(p1.pickup_code || '')), 'Pickup order must generate 6-digit pickup_code for customer');
+
+      // Store Owner MUST NOT see pickup_code in /api/store-owner/orders
+      const ownerOrders = await (await fetch(`${baseUrl}/api/store-owner/orders`, {
+        headers: { Authorization: `Bearer ${seedStoreOwnerToken}` }
+      })).json();
+      const ownerP1 = ownerOrders.find((o: any) => o.id === p1.id);
+      assert.ok(ownerP1);
+      assert.strictEqual(ownerP1.pickup_code, undefined, 'pickup_code must be hidden from Store Owner');
+
+      // Admin MUST NOT see pickup_code in /api/orders
+      const adminOrders = await (await fetch(`${baseUrl}/api/orders`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      })).json();
+      const adminP1 = adminOrders.find((o: any) => o.id === p1.id);
+      assert.ok(adminP1);
+      assert.strictEqual(adminP1.pickup_code, undefined, 'pickup_code must be hidden from Admin');
+
+      // Progress P1 -> confirmed -> packed -> dispatched
+      for (const st of ['confirmed', 'packed', 'dispatched']) {
+        const sr = await fetch(`${baseUrl}/api/store-owner/orders/${p1.id}/status`, {
           method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${adminToken}`
-          },
-          body: JSON.stringify({
-            delivery_pricing_mode: 'slabs',
-            handling_fee: 5,
-            max_delivery_distance_km: 8,
-            delivery_slabs: [
-              { id: 'slab-test-1', min_km: 0, max_km: 8, charge_type: 'fixed', charge: 25, label: '0–8 km' }
-            ]
-          })
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+          body: JSON.stringify({ status: st })
         });
+        assert.strictEqual(sr.status, 200);
+      }
 
-        // 5a. Order with ₹25 slab fee: 1 item
-        const prods = await productsRepo.list();
-        const testProd = prods.find(p => p.price < 200 && p.stock > 5) || prods[0];
+      // Missing code -> 400
+      const noCodeRes = await fetch(`${baseUrl}/api/store-owner/orders/${p1.id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+        body: JSON.stringify({ status: 'delivered' })
+      });
+      assert.strictEqual(noCodeRes.status, 400);
 
-        const orderRes1 = await fetch(`${baseUrl}/api/orders`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${testCustomerToken}`
-          },
-          body: JSON.stringify({
-            items: [{ product_id: testProd.id, quantity: 1 }],
-            delivery_address: 'Near Guru Mandir, Karanja Lad',
-            customer_lat: pinLat,
-            customer_lng: pinLng
-          })
-        });
-        const orderData1 = await orderRes1.json();
-        assert.strictEqual(orderRes1.status, 201);
-        assert.strictEqual(Number(orderData1.order.delivery_fee), 25, 'Admin-configured ₹25 slab delivery fee must be applied');
-        assert.strictEqual(Number(orderData1.order.handling_fee), 5, 'Handling fee must be ₹5');
-        assert.strictEqual(
-          Number(orderData1.order.total_amount),
-          Number(orderData1.order.subtotal) + 25 + 5
-        );
+      // Wrong code -> 400
+      const badCodeRes = await fetch(`${baseUrl}/api/store-owner/orders/${p1.id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+        body: JSON.stringify({ status: 'delivered', pickup_code: '000000' })
+      });
+      assert.strictEqual(badCodeRes.status, 400);
 
-        // 5b. Admin sets promotional slab delivery fee to ₹0 (Free)
-        const updateFeeRes = await fetch(`${baseUrl}/api/admin/settings/delivery`, {
+      // Correct 6-digit pickup code -> 200 Delivered & Paid
+      const goodCodeRes = await fetch(`${baseUrl}/api/store-owner/orders/${p1.id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+        body: JSON.stringify({ status: 'delivered', pickup_code: p1.pickup_code })
+      });
+      assert.strictEqual(goodCodeRes.status, 200);
+      const completedP1 = await goodCodeRes.json();
+      assert.strictEqual(completedP1.status, 'delivered');
+      assert.strictEqual(completedP1.payment_status, 'paid');
+
+      // Place Pickup Order #2 to verify 5-attempt brute-force lockout
+      const p2Res = await fetch(`${baseUrl}/api/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+        body: JSON.stringify({
+          store_id: seedStoreId,
+          fulfillment_type: 'pickup',
+          payment_mode: 'Pay at Store',
+          idempotency_key: `pickup_lock_${Date.now()}`,
+          items: [{ product_id: createdProductId, quantity: 2 }]
+        })
+      });
+      assert.strictEqual(p2Res.status, 201);
+      const p2 = (await p2Res.json()).order;
+      for (const st of ['confirmed', 'packed', 'dispatched']) {
+        await fetch(`${baseUrl}/api/store-owner/orders/${p2.id}/status`, {
           method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${adminToken}`
-          },
-          body: JSON.stringify({
-            delivery_pricing_mode: 'slabs',
-            handling_fee: 5,
-            max_delivery_distance_km: 8,
-            delivery_slabs: [
-              { id: 'slab-test-free', min_km: 0, max_km: 8, charge_type: 'free', charge: 0, label: '0–8 km' }
-            ]
-          })
-        });
-        assert.strictEqual(updateFeeRes.status, 200);
-
-        // Order with updated promotional fee ₹0
-        const orderRes2 = await fetch(`${baseUrl}/api/orders`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${testCustomerToken}`
-          },
-          body: JSON.stringify({
-            items: [{ product_id: createdProductId, quantity: 1 }],
-            delivery_address: 'Anand Nagar, Karanja Lad',
-            customer_lat: pinLat,
-            customer_lng: pinLng
-          })
-        });
-        const orderData2 = await orderRes2.json();
-        assert.strictEqual(orderRes2.status, 201);
-        assert.strictEqual(Number(orderData2.order.delivery_fee), 0, 'Admin-configured ₹0 delivery fee must be applied');
-        assert.strictEqual(Number(orderData2.order.handling_fee), 5, 'Handling fee must be ₹5');
-        assert.strictEqual(
-          Number(orderData2.order.total_amount),
-          Number(orderData2.order.subtotal) + 5
-        );
-
-        // Verify past order 1 fee did NOT shift
-        const pastOrderCheck = await fetch(`${baseUrl}/api/orders/${orderData1.order.id}`, {
-          headers: { Authorization: `Bearer ${testCustomerToken}` }
-        });
-        const pastOrderData = await pastOrderCheck.json();
-        assert.strictEqual(Number(pastOrderData.delivery_fee), 25, 'Past order delivery fee must remain permanently preserved');
-      } finally {
-        // Restore original delivery settings so production slab config is preserved
-        await fetch(`${baseUrl}/api/admin/settings/delivery`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${adminToken}`
-          },
-          body: JSON.stringify({
-            default_delivery_fee: origSettings.default_delivery_fee,
-            handling_fee: origSettings.handling_fee,
-            min_order_amount: origSettings.min_order_amount,
-            delivery_pricing_mode: origSettings.delivery_pricing_mode,
-            per_km_rate: origSettings.per_km_rate,
-            free_delivery_up_to_km: origSettings.free_delivery_up_to_km,
-            max_delivery_distance_km: origSettings.max_delivery_distance_km,
-            delivery_slabs: origSettings.delivery_slabs
-          })
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+          body: JSON.stringify({ status: st })
         });
       }
+      const wrongCode = p2.pickup_code === '111111' ? '222222' : '111111';
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const failRes = await fetch(`${baseUrl}/api/store-owner/orders/${p2.id}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+          body: JSON.stringify({ status: 'delivered', pickup_code: wrongCode })
+        });
+        assert.strictEqual(failRes.status, 400);
+      }
+      // Even valid code must now be locked after 5 failed attempts
+      const lockedRes = await fetch(`${baseUrl}/api/store-owner/orders/${p2.id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+        body: JSON.stringify({ status: 'delivered', pickup_code: p2.pickup_code })
+      });
+      assert.strictEqual(lockedRes.status, 400);
+      const lockedErr = await lockedRes.json();
+      assert.ok(String(lockedErr.error || '').includes('Maximum pickup code'), `Expected brute-force lockout error, got: ${lockedErr.error}`);
     });
 
-    // 6. Inventory Reservation and Rollback on Insufficient Stock
+    // 8. Inventory Reservation and Rollback on Insufficient Stock
     await test('Inventory reservation & rollback (Never allow negative inventory)', async () => {
       const prod = await productsRepo.findById(createdProductId);
       const currentStock = prod!.stock;
 
-      // Attempt to purchase more than available
       const failRes = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
         headers: {
@@ -300,6 +386,8 @@ async function main() {
           Authorization: `Bearer ${testCustomerToken}`
         },
         body: JSON.stringify({
+          store_id: seedStoreId,
+          fulfillment_type: 'delivery',
           items: [{ product_id: createdProductId, quantity: currentStock + 999 }],
           delivery_address: 'Karanja Main Market',
           customer_lat: 20.4839,
@@ -313,17 +401,15 @@ async function main() {
         `Unexpected stock error: ${failData.error}`
       );
 
-      // Check stock was untouched
       const prodAfter = await productsRepo.findById(createdProductId);
       assert.strictEqual(prodAfter!.stock, currentStock, 'Stock must not change when order fails');
     });
 
-    // 7. Order Cancellation and Automatic Stock Restoration
-    await test('Order cancellation automatically restores reserved stock to inventory', async () => {
+    // 9. Order Cancellation & Automatic Stock Restoration + Inventory Log Verification
+    await test('Order cancellation automatically restores reserved stock & writes cancel_restore log', async () => {
       const prodBefore = await productsRepo.findById(createdProductId);
       const initialStock = prodBefore!.stock;
 
-      // Place order for 3 units
       const placeRes = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
         headers: {
@@ -331,6 +417,8 @@ async function main() {
           Authorization: `Bearer ${testCustomerToken}`
         },
         body: JSON.stringify({
+          store_id: seedStoreId,
+          fulfillment_type: 'delivery',
           items: [{ product_id: createdProductId, quantity: 3 }],
           delivery_address: 'Shastri Nagar, Karanja Lad',
           customer_lat: 20.4839,
@@ -341,11 +429,9 @@ async function main() {
       assert.strictEqual(placeRes.status, 201);
       const orderId = orderData.order.id;
 
-      // Stock must be reserved (-3)
       const prodAfterReserve = await productsRepo.findById(createdProductId);
       assert.strictEqual(prodAfterReserve!.stock, initialStock - 3);
 
-      // Now cancel order
       const cancelRes = await fetch(`${baseUrl}/api/orders/${orderId}/cancel`, {
         method: 'POST',
         headers: {
@@ -356,141 +442,14 @@ async function main() {
       });
       assert.strictEqual(cancelRes.status, 200);
 
-      // Stock must be restored (+3)
       const prodAfterCancel = await productsRepo.findById(createdProductId);
       assert.strictEqual(prodAfterCancel!.stock, initialStock, 'Stock must be fully restored upon cancellation');
-    });
 
-    // 8. Complete Customer-to-Delivery Workflow
-    await test('Complete customer-to-delivery workflow: Order -> Pack -> Assign Rider -> Dispatch (OTP) -> Deliver -> COD Collection', async () => {
-      // 8a. Place order
-      const placeRes = await fetch(`${baseUrl}/api/orders`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${testCustomerToken}`
-        },
-        body: JSON.stringify({
-          items: [{ product_id: createdProductId, quantity: 1 }],
-          delivery_address: 'Guru Mandir Marg, Karanja Lad, Maharashtra 444105',
-          customer_lat: 20.4839,
-          customer_lng: 77.4877
-        })
-      });
-      const placed = await placeRes.json();
-      const orderId = placed.order.id;
-      assert.strictEqual(placed.order.status, 'placed');
-
-      // 8b. Admin packs order
-      const packRes = await fetch(`${baseUrl}/api/orders/${orderId}/status`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ status: 'packed' })
-      });
-      assert.strictEqual(packRes.status, 200);
-
-      // 8c. Admin assigns rider
-      const assignRes = await fetch(`${baseUrl}/api/orders/${orderId}/assign-rider`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ rider_id: riderId })
-      });
-      assert.strictEqual(assignRes.status, 200);
-
-      // 8d. Admin dispatches order -> Generates secure OTP
-      const dispatchRes = await fetch(`${baseUrl}/api/orders/${orderId}/dispatch`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        }
-      });
-      assert.strictEqual(dispatchRes.status, 200);
-
-      // 8e. Customer checks order details: Customer-only OTP IS visible to customer
-      const custCheck = await fetch(`${baseUrl}/api/orders/${orderId}`, {
-        headers: { Authorization: `Bearer ${testCustomerToken}` }
-      });
-      const custData = await custCheck.json();
-      assert.ok(custData.delivery_otp, 'Customer must see their delivery OTP after dispatch');
-      const deliveryOtp = custData.delivery_otp;
-
-      // 8f. Rider checks assigned orders: Rider CANNOT see delivery_otp (Security rule)
-      const riderOrders = await fetch(`${baseUrl}/api/rider/assigned-orders`, {
-        headers: { Authorization: `Bearer ${riderToken}` }
-      });
-      const riderOrdersData = await riderOrders.json();
-      const riderOrder = riderOrdersData.find((o: any) => o.id === orderId);
-      assert.ok(riderOrder, 'Rider must find order');
-      assert.strictEqual(riderOrder.delivery_otp, undefined, 'Delivery OTP must be HIDDEN from rider payload');
-
-      // 8g. Rider tries invalid OTP -> Must be rejected
-      const wrongOtpRes = await fetch(`${baseUrl}/api/rider/orders/${orderId}/verify-otp-deliver`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${riderToken}`
-        },
-        body: JSON.stringify({ otp: '0000' })
-      });
-      assert.strictEqual(wrongOtpRes.status, 400, 'Invalid OTP must fail');
-
-      // 8h. Rider enters valid OTP provided by customer -> Successful delivery and COD collection
-      const deliverRes = await fetch(`${baseUrl}/api/rider/orders/${orderId}/verify-otp-deliver`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${riderToken}`
-        },
-        body: JSON.stringify({ otp: deliveryOtp })
-      });
-      assert.strictEqual(deliverRes.status, 200);
-      const deliverData = await deliverRes.json();
-      assert.strictEqual(deliverData.order.status, 'delivered');
-      assert.strictEqual(deliverData.order.cod_collected, true);
-    });
-
-    // 9. COD Reconciliation & Duplicate Reconciliation Prevention
-    await test('COD reconciliation and duplicate reconciliation prevention', async () => {
-      // 9a. Check rider unreconciled summary
-      const sumRes = await fetch(`${baseUrl}/api/rider/cod-summary`, {
-        headers: { Authorization: `Bearer ${riderToken}` }
-      });
-      const sumData = await sumRes.json();
-      assert.ok(Number(sumData.summary.cash_in_hand) > 0, 'Rider must have cash in hand from delivered order');
-
-      // 9b. Admin reconciles rider COD
-      const recRes = await fetch(`${baseUrl}/api/admin/cod-reconcile`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({
-          rider_id: riderId,
-          notes: 'Handover at Karanja Central Warehouse cash counter'
-        })
-      });
-      assert.strictEqual(recRes.status, 200);
-      const recData = await recRes.json();
-      assert.ok(recData.reconciliation.reconciliation_number.startsWith('REC-KL-'));
-
-      // 9c. Reconcile again immediately -> Must fail (Prevent duplicate reconciliation)
-      const dupRes = await fetch(`${baseUrl}/api/admin/cod-reconcile`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ rider_id: riderId })
-      });
-      assert.strictEqual(dupRes.status, 400, 'Duplicate reconciliation must be prevented');
+      const logs = await (await fetch(`${baseUrl}/api/store-owner/inventory-logs`, {
+        headers: { Authorization: `Bearer ${seedStoreOwnerToken}` }
+      })).json();
+      assert.ok(logs.some((l: any) => l.product_id === createdProductId && l.change_type === 'order_reserve' && l.quantity_change === -3));
+      assert.ok(logs.some((l: any) => l.product_id === createdProductId && l.change_type === 'order_cancel_restore' && l.quantity_change === 3));
     });
 
     // 10. Order Scheduling Feature
@@ -502,6 +461,8 @@ async function main() {
           Authorization: `Bearer ${testCustomerToken}`
         },
         body: JSON.stringify({
+          store_id: seedStoreId,
+          fulfillment_type: 'delivery',
           items: [{ product_id: createdProductId, quantity: 1 }],
           delivery_address: 'Court Road, Karanja Lad, Maharashtra',
           delivery_type: 'scheduled',
@@ -520,7 +481,6 @@ async function main() {
 
     // 11. Favorite Products (Wishlist & Quick-Add)
     await test('Favorite products toggling and retrieval for customer quick-add', async () => {
-      // Toggle favorite on created product
       const favRes = await fetch(`${baseUrl}/api/favorites/${createdProductId}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${testCustomerToken}` }
@@ -529,7 +489,6 @@ async function main() {
       assert.strictEqual(favRes.status, 200);
       assert.strictEqual(favData.is_favorite, true);
 
-      // Fetch customer favorites
       const getFavRes = await fetch(`${baseUrl}/api/favorites`, {
         headers: { Authorization: `Bearer ${testCustomerToken}` }
       });
@@ -538,7 +497,6 @@ async function main() {
       const found = getFavData.find((p: any) => p.id === createdProductId);
       assert.ok(found, 'Created product must be in customer favorites list');
 
-      // Toggle off
       const unfavRes = await fetch(`${baseUrl}/api/favorites/${createdProductId}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${testCustomerToken}` }
@@ -549,7 +507,6 @@ async function main() {
 
     // 12. User Review and Rating System
     await test('Product reviews and star rating submission, rating calculation, and admin moderation', async () => {
-      // Submit a 5-star review for created product
       const reviewRes = await fetch(`${baseUrl}/api/products/${createdProductId}/reviews`, {
         method: 'POST',
         headers: {
@@ -566,14 +523,12 @@ async function main() {
       assert.strictEqual(reviewData.review.rating, 5);
       const reviewId = reviewData.review.id;
 
-      // Check product reviews & average rating
       const prodRevRes = await fetch(`${baseUrl}/api/products/${createdProductId}/reviews`);
       const prodRevData = await prodRevRes.json();
       assert.strictEqual(prodRevRes.status, 200);
       assert.ok(prodRevData.stats.review_count >= 1);
       assert.strictEqual(prodRevData.stats.average_rating, 5);
 
-      // Admin review moderation: reject review
       const modRes = await fetch(`${baseUrl}/api/admin/reviews/${reviewId}/status`, {
         method: 'PUT',
         headers: {
@@ -585,214 +540,6 @@ async function main() {
       assert.strictEqual(modRes.status, 200);
       const modData = await modRes.json();
       assert.strictEqual(modData.status, 'rejected');
-    });
-
-    // 13. Admin Delivery Boy Fleet Management
-    await test('Admin delivery rider account creation, password reset, and order reassignment', async () => {
-      const newRiderPhone = `9822${Math.floor(100000 + Math.random() * 900000)}`;
-      const createRiderRes = await fetch(`${baseUrl}/api/admin/riders`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({
-          name: 'Vikas Gawande',
-          phone: newRiderPhone,
-          password: 'RiderSecret@123',
-          email: 'vikas.rider@fmpsupermart.in',
-          address: 'Station Road, Karanja Lad'
-        })
-      });
-      const createRiderData = await createRiderRes.json();
-      assert.strictEqual(createRiderRes.status, 201);
-      assert.strictEqual(createRiderData.rider.name, 'Vikas Gawande');
-      const newRiderId = createRiderData.rider.id;
-
-      // Reset password for rider
-      const resetPassRes = await fetch(`${baseUrl}/api/admin/riders/${newRiderId}/reset-password`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ password: 'NewRiderPass@789' })
-      });
-      assert.strictEqual(resetPassRes.status, 200);
-
-      // Verify new rider can log in with new password
-      const riderLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: newRiderPhone, password: 'NewRiderPass@789' })
-      });
-      assert.strictEqual(riderLoginRes.status, 200);
-      const riderLoginData = await riderLoginRes.json();
-      assert.strictEqual(riderLoginData.user.role, 'rider');
-    });
-
-    // 14. Delivery Slots Management
-    await test('Delivery slots listing and capacity management', async () => {
-      const slotsRes = await fetch(`${baseUrl}/api/delivery-slots`);
-      const slotsData = await slotsRes.json();
-      assert.strictEqual(slotsRes.status, 200);
-      assert.ok(Array.isArray(slotsData) && slotsData.length >= 1, 'Delivery slots must be available');
-      assert.ok(slotsData[0].time_window, 'Slot must have a time window');
-    });
-
-    // 15. Admin Individual Order Delivery Charge Management
-    await test('Admin individual order delivery fee adjustment (including ₹0) and customer total recalculation', async () => {
-      // Place an order
-      const orderRes = await fetch(`${baseUrl}/api/orders`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${testCustomerToken}`
-        },
-        body: JSON.stringify({
-          items: [{ product_id: createdProductId, quantity: 1 }],
-          delivery_address: 'Main Market, Karanja Lad',
-          customer_lat: 20.4839,
-          customer_lng: 77.4877
-        })
-      });
-      const orderData = await orderRes.json();
-      assert.strictEqual(orderRes.status, 201);
-      const testOrderId = orderData.order.id;
-
-      // Admin adjusts delivery charge for this individual order to ₹0
-      const feeRes0 = await fetch(`${baseUrl}/api/orders/${testOrderId}/delivery-fee`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ delivery_fee: 0 })
-      });
-      const feeData0 = await feeRes0.json();
-      assert.strictEqual(feeRes0.status, 200);
-      assert.strictEqual(Number(feeData0.order.delivery_fee), 0);
-      assert.strictEqual(
-        Number(feeData0.order.total_amount),
-        Number(feeData0.order.subtotal) + 0 + Number(feeData0.order.handling_fee),
-        'Total amount must recalculate accurately on backend'
-      );
-
-      // Admin sets custom delivery fee of ₹15
-      const feeRes15 = await fetch(`${baseUrl}/api/orders/${testOrderId}/delivery-fee`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ delivery_fee: 15 })
-      });
-      const feeData15 = await feeRes15.json();
-      assert.strictEqual(feeRes15.status, 200);
-      assert.strictEqual(Number(feeData15.order.delivery_fee), 15);
-      assert.strictEqual(
-        Number(feeData15.order.total_amount),
-        Number(feeData15.order.subtotal) + 15 + Number(feeData15.order.handling_fee)
-      );
-
-      // Customer fetches order to verify updated fee and notification
-      const custFetch = await fetch(`${baseUrl}/api/orders/${testOrderId}`, {
-        headers: { Authorization: `Bearer ${testCustomerToken}` }
-      });
-      const custOrder = await custFetch.json();
-      assert.strictEqual(Number(custOrder.delivery_fee), 15);
-    });
-
-    // 16. Inactive Delivery Partner Guard and Order Reassignment
-    await test('Inactive rider assignment prevention and order reassignment audit trail', async () => {
-      const phoneTemp = `9821${Math.floor(100000 + Math.random() * 900000)}`;
-      const createRider = await fetch(`${baseUrl}/api/admin/riders`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({
-          name: 'Inactive Rider Test',
-          phone: phoneTemp,
-          password: 'RiderPass@123'
-        })
-      });
-      const rData = await createRider.json();
-      const inactiveRiderId = rData.rider.id;
-
-      // Deactivate rider
-      await fetch(`${baseUrl}/api/admin/riders/${inactiveRiderId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ is_active: false })
-      });
-
-      // Place order to test assignment
-      const orderRes = await fetch(`${baseUrl}/api/orders`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${testCustomerToken}`
-        },
-        body: JSON.stringify({
-          items: [{ product_id: createdProductId, quantity: 1 }],
-          delivery_address: 'Subhash Chowk, Karanja Lad',
-          customer_lat: 20.4839,
-          customer_lng: 77.4877
-        })
-      });
-      const ord = await orderRes.json();
-      const orderId = ord.order.id;
-
-      // Attempt assigning order to inactive rider -> MUST BE REJECTED
-      const assignInactive = await fetch(`${baseUrl}/api/orders/${orderId}/assign-rider`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ rider_id: inactiveRiderId })
-      });
-      assert.strictEqual(assignInactive.status, 400);
-      const errData = await assignInactive.json();
-      assert.ok(errData.error.includes('inactive delivery partner'));
-
-      // Assign to active rider
-      const assignActive = await fetch(`${baseUrl}/api/orders/${orderId}/assign-rider`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ rider_id: riderId })
-      });
-      assert.strictEqual(assignActive.status, 200);
-
-      // Reassign to another active rider
-      await fetch(`${baseUrl}/api/admin/riders/${inactiveRiderId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ is_active: true })
-      });
-
-      const reassignRes = await fetch(`${baseUrl}/api/orders/${orderId}/assign-rider`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ rider_id: inactiveRiderId })
-      });
-      assert.strictEqual(reassignRes.status, 200);
-      const reassignData = await reassignRes.json();
-      assert.strictEqual(reassignData.rider_id, inactiveRiderId);
     });
 
     // 17. Role Isolation Security: Public registration restricted to customer only
@@ -814,7 +561,7 @@ async function main() {
     });
 
     // 18. TEST CASE 1, 2, 3: Single login returns authentic role from Firestore
-    await test('Test Cases 1, 2, 3: Automatic role detection via single login (Customer, Admin, Rider)', async () => {
+    await test('Test Cases 1, 2, 3: Automatic role detection via single login (Customer, Store Owner, Admin)', async () => {
       // 1. Customer login
       const cRes = await fetch(`${baseUrl}/api/auth/login`, {
         method: 'POST',
@@ -825,7 +572,17 @@ async function main() {
       assert.strictEqual(cRes.status, 200);
       assert.strictEqual(cData.user.role, 'customer');
 
-      // 2. Admin login
+      // 2. Store Owner login
+      const sRes = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: seedStorePhone, password: 'SeedStorePass@123' })
+      });
+      const sData = await sRes.json();
+      assert.strictEqual(sRes.status, 200);
+      assert.strictEqual(sData.user.role, 'store_owner');
+
+      // 3. Admin login
       const aRes = await fetch(`${baseUrl}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -834,29 +591,19 @@ async function main() {
       const aData = await aRes.json();
       assert.strictEqual(aRes.status, 200);
       assert.strictEqual(aData.user.role, 'admin');
-
-      // 3. Rider login
-      const rRes = await fetch(`${baseUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: '9898989898', password: 'RiderPassword@123' })
-      });
-      const rData = await rRes.json();
-      assert.strictEqual(rRes.status, 200);
-      assert.strictEqual(rData.user.role, 'rider');
     });
 
-    // 19. TEST CASE 4 & 5: Role protection (Customer & Rider blocked from Admin APIs with 403)
-    await test('Test Cases 4 & 5: Role protection (Customer cannot access Admin APIs, Rider cannot access Admin APIs)', async () => {
+    // 19. TEST CASE 4 & 5: Role protection (Customer & Store Owner blocked from Admin APIs with 403)
+    await test('Test Cases 4 & 5: Role protection (Customer and Store Owner receive 403 on Admin APIs)', async () => {
       const custAdminRes = await fetch(`${baseUrl}/api/admin/reports`, {
         headers: { Authorization: `Bearer ${testCustomerToken}` }
       });
       assert.strictEqual(custAdminRes.status, 403, 'Customer must receive 403 Forbidden on Admin APIs');
 
-      const riderAdminRes = await fetch(`${baseUrl}/api/admin/reports`, {
-        headers: { Authorization: `Bearer ${riderToken}` }
+      const ownerAdminRes = await fetch(`${baseUrl}/api/admin/reports`, {
+        headers: { Authorization: `Bearer ${seedStoreOwnerToken}` }
       });
-      assert.strictEqual(riderAdminRes.status, 403, 'Rider must receive 403 Forbidden on Admin APIs');
+      assert.strictEqual(ownerAdminRes.status, 403, 'Store owner must receive 403 Forbidden on Admin APIs');
     });
 
     // 20. TEST CASE 6: Customer cannot open another customer's order (403 Forbidden)
@@ -875,8 +622,6 @@ async function main() {
       const c2Data = await c2Reg.json();
       const cust2Token = c2Data.token;
 
-      const prods = await productsRepo.list();
-      const p = prods.find(item => !item.store_id && item.is_active !== false && item.stock >= 2) || (await productsRepo.findById(createdProductId))!;
       const c2OrderRes = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
         headers: {
@@ -884,12 +629,15 @@ async function main() {
           Authorization: `Bearer ${cust2Token}`
         },
         body: JSON.stringify({
-          items: [{ product_id: p.id, quantity: 1 }],
+          store_id: seedStoreId,
+          fulfillment_type: 'delivery',
+          items: [{ product_id: createdProductId, quantity: 1 }],
           delivery_address: 'Guru Mandir Marg, Karanja Lad',
           customer_lat: 20.4839,
           customer_lng: 77.4877
         })
       });
+      assert.strictEqual(c2OrderRes.status, 201);
       const c2OrderData = await c2OrderRes.json();
       const c2OrderId = c2OrderData.order.id;
 
@@ -946,52 +694,23 @@ async function main() {
       assert.ok(err.error.includes('No account found'), 'Proper error message for unknown phone');
     });
 
-    // 25. DELIVERY PARTNER TIP: Order with tip calculations & rider summary reflection
-    await test('Delivery Partner Tip: Calculation during checkout & reflection in Rider summary', async () => {
-      const prods = await productsRepo.list();
-      const prod = prods.find(p => !p.store_id && p.is_active !== false && p.stock > 5) || (await productsRepo.findById(createdProductId))!;
-      const tipAmount = 35;
-
-      const orderWithTipRes = await fetch(`${baseUrl}/api/orders`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${testCustomerToken}`
-        },
-        body: JSON.stringify({
-          items: [{ product_id: prod.id, quantity: 2 }],
-          delivery_address: 'Plot 45, Shastri Nagar, Karanja Lad',
-          tip_amount: tipAmount,
-          customer_lat: 20.4839,
-          customer_lng: 77.4877
-        })
-      });
-      const tipOrderData = await orderWithTipRes.json();
-      assert.strictEqual(orderWithTipRes.status, 201);
-      const tipOrder = tipOrderData.order;
-
-      assert.strictEqual(Number(tipOrder.tip_amount), tipAmount, 'Tip amount must be recorded on order');
-      const expectedTotal = Number(tipOrder.subtotal) + Number(tipOrder.delivery_fee) + Number(tipOrder.handling_fee) + tipAmount;
-      assert.strictEqual(Number(tipOrder.total_amount), expectedTotal, 'Total must securely include tip');
-
-      // Admin assigns this order to rider
-      await fetch(`${baseUrl}/api/orders/${tipOrder.id}/assign-rider`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ rider_id: riderId })
-      });
-
-      // Rider checks assigned orders: tip_amount is visible
-      const riderOrdersRes = await fetch(`${baseUrl}/api/rider/assigned-orders`, {
-        headers: { Authorization: `Bearer ${riderToken}` }
-      });
-      const riderOrders = await riderOrdersRes.json();
-      const matchedRiderOrder = riderOrders.find((o: any) => o.id === tipOrder.id);
-      assert.ok(matchedRiderOrder, 'Order must be assigned to rider');
-      assert.strictEqual(Number(matchedRiderOrder.tip_amount), tipAmount, 'Rider must see customer tip amount in their order');
+    // 25. FREE LAUNCH MONETIZATION LOCK ENFORCEMENT
+    await test('Free Launch Lock: Backend rejects enabling monetization/commission/ads toggles (400)', async () => {
+      for (const flag of [
+        'monetization_enabled',
+        'subscriptions_enabled',
+        'featured_stores_enabled',
+        'store_ads_enabled',
+        'admob_enabled',
+        'adsense_enabled'
+      ]) {
+        const res = await fetch(`${baseUrl}/api/admin/settings/platform`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ [flag]: true })
+        });
+        assert.strictEqual(res.status, 400, `Enabling ${flag} must be rejected with 400 in Free Launch Mode`);
+      }
     });
 
     // 26. ADMIN-ASSISTED FORGOT PASSWORD WORKFLOW
@@ -1014,6 +733,9 @@ async function main() {
       const myReq = reqList.find((r: any) => r.phone === uniquePhone);
       assert.ok(myReq, 'Admin must see submitted password reset request');
 
+      const preResetToken = testCustomerToken;
+      await new Promise(resolve => setTimeout(resolve, 1200));
+
       // Admin resets user password
       const resetRes = await fetch(`${baseUrl}/api/admin/reset-user-password`, {
         method: 'POST',
@@ -1029,6 +751,12 @@ async function main() {
       });
       assert.strictEqual(resetRes.status, 200);
 
+      // Existing pre-reset JWT must be immediately invalidated (401)
+      const staleSessionRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${preResetToken}` }
+      });
+      assert.strictEqual(staleSessionRes.status, 401, 'Pre-reset JWT must be rejected after password reset');
+
       // Customer logs in with new password
       const newLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
         method: 'POST',
@@ -1038,10 +766,11 @@ async function main() {
       assert.strictEqual(newLoginRes.status, 200);
       const newLoginData = await newLoginRes.json();
       assert.ok(newLoginData.token, 'Customer successfully logs in with new password');
+      testCustomerToken = newLoginData.token;
     });
 
     // 27. END-TO-END REGISTRATION -> LOGIN -> COD CHECKOUT FLOW
-    await test('End-to-End: Customer Registration -> Login -> COD Order Placement', async () => {
+    await test('End-to-End: Customer Registration -> Login -> Single-Store COD Order Placement', async () => {
       const e2ePhone = `983${Math.floor(1000000 + Math.random() * 9000000)}`;
       const e2ePassword = 'SecurePass@2026!';
 
@@ -1092,10 +821,7 @@ async function main() {
       const sessionData = await sessionRes.json();
       assert.strictEqual(sessionData.user.id, registeredUserId, 'Session user ID must match database ID');
 
-      // Step 4: Customer places COD order
-      const prods = await productsRepo.list();
-      const prod = prods.find(p => !p.store_id && p.is_active !== false && p.stock >= 2) || (await productsRepo.findById(createdProductId))!;
-
+      // Step 4: Customer places COD order from approved local store
       const checkoutRes = await fetch(`${baseUrl}/api/orders`, {
         method: 'POST',
         headers: {
@@ -1103,14 +829,15 @@ async function main() {
           Authorization: `Bearer ${loginData.token}`
         },
         body: JSON.stringify({
-          items: [{ product_id: prod.id, quantity: 2 }],
+          store_id: seedStoreId,
+          fulfillment_type: 'delivery',
+          items: [{ product_id: createdProductId, quantity: 2 }],
           customer_name: loginData.user.name,
           customer_phone: loginData.user.phone,
           delivery_address: loginData.user.address,
           landmark: 'Near Station Road, Karanja Lad',
           pincode: '444105',
           delivery_type: 'immediate',
-          tip_amount: 15,
           customer_lat: 20.4839,
           customer_lng: 77.4877
         })
@@ -1122,7 +849,8 @@ async function main() {
       assert.strictEqual(checkoutData.order.customer_id, registeredUserId, 'Order customer_id must match authenticated user ID');
       assert.strictEqual(checkoutData.order.payment_mode, 'COD', 'Payment mode must be COD');
       assert.strictEqual(checkoutData.order.status, 'placed', 'Order status must be placed');
-      assert.strictEqual(Number(checkoutData.order.tip_amount), 15, 'Tip amount must be recorded');
+      assert.strictEqual(Number(checkoutData.order.handling_fee), 0, 'Handling fee must be ₹0');
+      assert.strictEqual(Number(checkoutData.order.tip_amount), 0, 'Tip amount must be ₹0');
 
       // Step 5: Verify customer can fetch their placed order
       const customerOrdersRes = await fetch(`${baseUrl}/api/orders`, {
@@ -1321,7 +1049,9 @@ async function main() {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${storeAToken}`
           },
-          body: JSON.stringify({ status })
+          body: JSON.stringify(
+            status === 'delivered' ? { status, pickup_code: pickupOrder.pickup_code } : { status }
+          )
         });
         assert.strictEqual(stepRes.status, 200);
       }
@@ -2555,13 +2285,13 @@ async function main() {
         });
         assert.strictEqual(cancelDispatchedRes.status, 400, 'Customer cannot cancel ready/dispatched order');
 
-        // Rider CANNOT cancel a customer's order (403)
-        const riderCancelRes = await fetch(`${baseUrl}/api/orders/${dispOrdId}/cancel`, {
+        // Cross-store owner CANNOT cancel another store's order (403)
+        const crossCancelRes = await fetch(`${baseUrl}/api/orders/${dispOrdId}/cancel`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${riderToken}` },
-          body: JSON.stringify({ reason: 'Rider attempt' })
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+          body: JSON.stringify({ reason: 'Cross store attempt' })
         });
-        assert.strictEqual(riderCancelRes.status, 403, 'Rider must be blocked from cancelling order');
+        assert.strictEqual(crossCancelRes.status, 403, 'Store owner must be blocked from cancelling another store order');
       } finally {
         if (orderTestStoreId) {
           await storesRepo.update(orderTestStoreId, { is_active: false }).catch(() => {});
@@ -2581,7 +2311,7 @@ async function main() {
       const unauthRes = await fetch(`${baseUrl}/api/admin/stats`);
       assert.strictEqual(unauthRes.status, 401);
 
-      // Customer -> 403 on all sensitive admin routes
+      // Customer & Store Owner -> 403 on all sensitive admin routes
       for (const path of [
         '/api/admin/stats',
         '/api/admin/stores',
@@ -2594,10 +2324,10 @@ async function main() {
         });
         assert.strictEqual(custRes.status, 403, `Customer must receive 403 on ${path}`);
 
-        const riderRes = await fetch(`${baseUrl}${path}`, {
-          headers: { Authorization: `Bearer ${riderToken}` }
+        const ownerRes = await fetch(`${baseUrl}${path}`, {
+          headers: { Authorization: `Bearer ${seedStoreOwnerToken}` }
         });
-        assert.strictEqual(riderRes.status, 403, `Rider must receive 403 on ${path}`);
+        assert.strictEqual(ownerRes.status, 403, `Store owner must receive 403 on ${path}`);
       }
 
       // Registration role tampering -> 403
@@ -2850,9 +2580,9 @@ async function main() {
 
       // Soft-delete product referenced in historical order_items (admStoreProdId from Test 45)
       if (admStoreProdId) {
-        const delProdRes = await fetch(`${baseUrl}/api/products/${admStoreProdId}`, {
+        const delProdRes = await fetch(`${baseUrl}/api/store-owner/products/${admStoreProdId}`, {
           method: 'DELETE',
-          headers: { Authorization: `Bearer ${adminToken}` }
+          headers: { Authorization: `Bearer ${admStoreOwnerToken}` }
         });
         assert.strictEqual(delProdRes.status, 200);
         const delProdData = await delProdRes.json();
@@ -2898,8 +2628,18 @@ async function main() {
       }
     });
 
-    // 49. PLATFORM SETTINGS GOVERNANCE, FREE-MODE ISOLATION & AUDIT LOGS
-    await test('Admin Platform Settings, Monetization Isolation, Service Availability Enforcement & Audit Logs', async () => {
+    // 49. PLATFORM SETTINGS GOVERNANCE, ADMIN ORDER PII MASKING & AUDIT LOGS
+    await test('Admin Platform Settings, Order PII Masking, Service Availability Enforcement & Audit Logs', async () => {
+      // Admin /api/orders masks customer_phone and delivery_address
+      const admOrders = await (await fetch(`${baseUrl}/api/orders`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      })).json();
+      assert.ok(Array.isArray(admOrders) && admOrders.length > 0);
+      assert.ok(admOrders[0].customer_phone.includes('****'), 'Admin order list must mask customer_phone');
+      if (admOrders[0].delivery_address) {
+        assert.ok(admOrders[0].delivery_address.includes('*') || admOrders[0].delivery_address.includes('...'), 'Admin order list must mask delivery_address');
+      }
+
       // Public endpoint never exposes monetization flags
       const pubRes = await fetch(`${baseUrl}/api/settings/platform`);
       assert.strictEqual(pubRes.status, 200);
@@ -2932,13 +2672,14 @@ async function main() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
           body: JSON.stringify({
+            store_id: seedStoreId,
+            fulfillment_type: 'pickup',
             items: [{ product_id: createdProductId, quantity: 1 }],
             delivery_address: 'Tilak Chowk, Karanja Lad'
           })
         });
         assert.strictEqual(pausedOrder.status, 503, 'Orders must be blocked with 503 when service_available=false');
       } finally {
-        // Immediately restore clean default settings
         await fetch(`${baseUrl}/api/admin/settings/platform`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
@@ -2966,7 +2707,78 @@ async function main() {
       assert.ok(logs.some((l: any) => l.action === 'STORE_APPROVAL_UPDATED'), 'Audit log must record STORE_APPROVAL_UPDATED');
     });
 
+    // 50. SECURITY HARDENING: HEADERS, SSRF / UNSAFE IMAGE URL REJECTION, LEGACY JSON SCRUBBING & RATE LIMITING
+    await test('Security Hardening: Headers, Unsafe Image URL Blocking, Legacy JSON Scrubbing & Rate Limiting', async () => {
+      // 1. Security headers present
+      const hdrRes = await fetch(`${baseUrl}/api/health`);
+      assert.strictEqual(hdrRes.status, 200);
+      assert.strictEqual(hdrRes.headers.get('x-content-type-options'), 'nosniff');
+      assert.strictEqual(hdrRes.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
+      assert.strictEqual(hdrRes.headers.get('x-dns-prefetch-control'), 'off');
+      assert.ok(hdrRes.headers.get('permissions-policy')?.includes('geolocation=(self)'));
+
+      // 2. Reject SSRF / private metadata / non-HTTP image URLs on product creation
+      const unsafeUrls = [
+        'http://169.254.169.254/latest/meta-data/',
+        'http://127.0.0.1:3000/api/admin/stats',
+        'http://localhost:8080/secret.png',
+        'javascript:alert(1)'
+      ];
+      for (const badUrl of unsafeUrls) {
+        const res = await fetch(`${baseUrl}/api/store-owner/products`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${seedStoreOwnerToken}` },
+          body: JSON.stringify({
+            name: 'Unsafe Image Test Item',
+            category_id: 1,
+            unit: 'pack',
+            price: 20,
+            stock: 5,
+            image_url: badUrl
+          })
+        });
+        assert.strictEqual(res.status, 400, `Expected 400 rejecting unsafe image URL: ${badUrl}`);
+      }
+
+      // 3. Verify legacy data/fmp_db_state.json holds zero user/order PII or hashes
+      const fs = await import('fs');
+      const path = await import('path');
+      const legacyFile = path.resolve(process.cwd(), 'data', 'fmp_db_state.json');
+      if (fs.existsSync(legacyFile)) {
+        const parsed = JSON.parse(fs.readFileSync(legacyFile, 'utf-8'));
+        assert.strictEqual(Array.isArray(parsed.users) ? parsed.users.length : -1, 0, 'Legacy JSON users must be empty');
+        assert.strictEqual(Array.isArray(parsed.orders) ? parsed.orders.length : -1, 0, 'Legacy JSON orders must be empty');
+      }
+
+      // 4. Verify forgot-password rate limiter returns 429 with Retry-After after 6 hits in 15m
+      let got429 = false;
+      let retryAfterHeader: string | null = null;
+      for (let i = 0; i < 8; i++) {
+        const rlRes = await fetch(`${baseUrl}/api/auth/forgot-password-request`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: '9000000000' })
+        });
+        if (rlRes.status === 429) {
+          got429 = true;
+          retryAfterHeader = rlRes.headers.get('retry-after');
+          break;
+        }
+      }
+      assert.strictEqual(got429, true, 'Rate limiter must return 429 after repeated requests');
+      assert.ok(Number(retryAfterHeader) >= 1, '429 response must include positive Retry-After header');
+    });
+
   } finally {
+    if (seedStoreId) {
+      await storesRepo.update(seedStoreId, { is_active: false }).catch(() => {});
+    }
+    if (createdProductId) {
+      await fetch(`${baseUrl}/api/store-owner/products/${createdProductId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${seedStoreOwnerToken}` }
+      }).catch(() => {});
+    }
     server.close();
   }
 

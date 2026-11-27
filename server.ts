@@ -14,13 +14,9 @@ import {
   productsRepo,
   ordersRepo,
   settingsRepo,
-  deliverySlotsRepo,
   notificationsRepo,
   favoritesRepo,
   reviewsRepo,
-  suppliersRepo,
-  purchaseOrdersRepo,
-  codReconciliationsRepo,
   auditLogsRepo,
   passwordResetsRepo,
   storesRepo,
@@ -29,20 +25,18 @@ import {
   UserDoc,
   OrderDoc,
   StoreDoc,
-  sanitizeProductForCustomer,
-  computeWholesaleMetrics
+  sanitizeProductForCustomer
 } from './src/server/firestoreDb.ts';
 import {
   requireAuth,
   requireRole,
   generateToken,
   logAudit,
-  generateDeliveryOTP,
+  generatePickupCode,
   AuthenticatedRequest
 } from './src/server/auth.ts';
 import {
   calculateRoadDistanceKm,
-  calculateDeliveryFeeFromDistance,
   calculateHaversineKm,
   isValidCoordinate,
   normalizeDeliverySlabs,
@@ -66,18 +60,167 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.NODE_ENV === 'production' && process.env.PORT ? Number(process.env.PORT) : 3000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-app.use(cors({
-  origin: (origin, callback) => {
-    callback(null, origin || true);
-  },
-  credentials: true,
-}));
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+function getRequestExpectedOrigins(req: Request): string[] {
+  const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  if (!rawHost) return [];
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim().toLowerCase();
+  const origins = [`${proto}://${rawHost}`];
+  if (proto !== 'https') origins.push(`https://${rawHost}`);
+  if (proto !== 'http') origins.push(`http://${rawHost}`);
+  return origins;
+}
+
+function isHttpsRequest(req: Request): boolean {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return IS_PRODUCTION || req.secure || forwardedProto === 'https';
+}
+
+function getAuthCookieOptions(req: Request, includeMaxAge: boolean) {
+  const secureCtx = isHttpsRequest(req);
+  return {
+    httpOnly: true,
+    secure: secureCtx,
+    sameSite: (secureCtx ? 'none' : 'lax') as 'none' | 'lax',
+    ...(secureCtx ? { partitioned: true } : {}),
+    path: '/',
+    ...(includeMaxAge ? { maxAge: 30 * 24 * 60 * 60 * 1000 } : {})
+  };
+}
+
+function setAuthCookie(req: Request, res: Response, token: string): void {
+  res.cookie('token', token, getAuthCookieOptions(req, true));
+}
+
+function clearAuthCookie(req: Request, res: Response): void {
+  res.clearCookie('token', getAuthCookieOptions(req, false));
+}
+
+function getClientIp(req: Request): string {
+  return req.ip || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+}
+
+function createRateLimiter(scope: string, maxRequests: number, windowMs: number, message: string) {
+  const hits = new Map<string, number[]>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const key = `${scope}:${getClientIp(req)}`;
+    const recent = (hits.get(key) || []).filter(ts => now - ts < windowMs);
+    if (recent.length >= maxRequests) {
+      const retryAfterSec = Math.max(1, Math.ceil((windowMs - (now - recent[0])) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSec));
+      return res.status(429).json({ error: message });
+    }
+    recent.push(now);
+    hits.set(key, recent);
+    if (hits.size > 5000) {
+      for (const [k, list] of hits.entries()) {
+        if (list.every(ts => now - ts >= windowMs)) hits.delete(k);
+      }
+    }
+    next();
+  };
+}
+
+const authLoginLimiter = createRateLimiter(
+  'auth_login',
+  35,
+  15 * 60 * 1000,
+  'Too many login attempts from this IP. Please wait 15 minutes and try again.'
+);
+const authRegisterLimiter = createRateLimiter(
+  'auth_register',
+  25,
+  15 * 60 * 1000,
+  'Too many registration requests from this IP. Please try again later.'
+);
+const storeRegisterLimiter = createRateLimiter(
+  'store_register',
+  20,
+  15 * 60 * 1000,
+  'Too many store registration attempts. Please try again later.'
+);
+const forgotPasswordLimiter = createRateLimiter(
+  'forgot_password',
+  6,
+  15 * 60 * 1000,
+  'Too many password reset requests. Please wait before trying again.'
+);
+const orderCreateLimiter = createRateLimiter(
+  'order_create',
+  60,
+  15 * 60 * 1000,
+  'Too many order submissions in a short window. Please wait a moment.'
+);
+const locationLookupLimiter = createRateLimiter(
+  'location_lookup',
+  90,
+  15 * 60 * 1000,
+  'Too many location searches. Please wait a moment before searching again.'
+);
+
+function safeServerError(err: any, fallback = 'An unexpected server error occurred. Please try again.'): string {
+  if (IS_PRODUCTION) return fallback;
+  return err?.message || fallback;
+}
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  if (!origin) {
+    return next();
+  }
+  const expectedOrigins = allowedOrigins.length > 0 ? allowedOrigins : getRequestExpectedOrigins(req);
+  if (IS_PRODUCTION && !expectedOrigins.includes(origin)) {
+    return res.status(403).json({ error: 'Origin not allowed by CORS' });
+  }
+  return cors({
+    origin: true,
+    credentials: true
+  })(req, res, next);
+});
+
+// Baseline security headers & CSRF origin check for cookie-authenticated mutating requests
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
+  if (isHttpsRequest(req)) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+
+  if (IS_PRODUCTION && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const hasBearer = Boolean(req.headers.authorization?.startsWith('Bearer '));
+    const hasCookie = Boolean(req.headers.cookie);
+    if (!hasBearer && hasCookie) {
+      const originHeader = String(req.headers.origin || req.headers.referer || '').trim();
+      const expectedOrigins = allowedOrigins.length > 0 ? allowedOrigins : getRequestExpectedOrigins(req);
+      const originAllowed = expectedOrigins.some(o => originHeader === o || originHeader.startsWith(`${o}/`));
+      if (!originAllowed) {
+        return res.status(403).json({ error: 'Cross-origin state-changing request blocked.' });
+      }
+    }
+  }
+  next();
+});
+
 app.use(express.json({ limit: '2mb' }));
 
-// Serve public directory for PWA assets, manifest, and icons
-const publicDirPath = path.resolve(__dirname, 'public');
+// Serve public directory for PWA assets, manifest, and icons (works in dev tsx and bundled dist/server.js)
+const publicDirPath =
+  [
+    path.resolve(__dirname, 'public'),
+    path.resolve(process.cwd(), 'public'),
+    path.resolve(__dirname, '..', 'public')
+  ].find(p => fs.existsSync(p)) || path.resolve(__dirname, 'public');
 app.get(['/manifest.json', '/manifest.webmanifest'], (req, res) => {
   res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
   res.sendFile(path.resolve(publicDirPath, 'manifest.json'));
@@ -135,14 +278,14 @@ app.get('/api/health', async (req: Request, res: Response) => {
         warning: null
       },
       businessRules: {
-        deliveryFeeModel: 'Admin Controlled Distance-Based Delivery (OSRM Road Distance Slabs & Per-KM)',
-        handlingCharge: 5,
-        paymentMode: 'Cash on Delivery (COD) Only',
-        warehouseLocation: 'Karanja Lad Central Hub (444105)'
+        deliveryFeeModel: 'Store-Managed Delivery & Free Store Pickup',
+        handlingCharge: 0,
+        paymentMode: 'Cash on Delivery (COD) & Pay at Store',
+        marketplaceMode: 'Hyperlocal Multi-Store Grocery Marketplace'
       }
     });
   } catch (err: any) {
-    res.status(500).json({ status: 'unhealthy', error: err.message });
+    res.status(500).json({ status: 'unhealthy', error: safeServerError(err, 'Health check failed.') });
   }
 });
 
@@ -160,20 +303,68 @@ function normalizePhone(rawPhone: any): string {
   return cleaned;
 }
 
+function isDisallowedImageHost(rawHost: string): boolean {
+  const host = rawHost.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host === '::' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.localhost') ||
+    /^\d+$/.test(host)
+  ) {
+    return true;
+  }
+  if (/^fc[0-9a-f]{2}:|^fd[0-9a-f]{2}:|^fe80:/i.test(host)) {
+    return true;
+  }
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4Match) {
+    const [, a, b] = ipv4Match.map(Number);
+    if (
+      a === 127 ||
+      a === 10 ||
+      a === 0 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function sanitizeImageValue(val: unknown): string | null {
   if (typeof val !== 'string') return null;
   const trimmed = val.trim();
   if (!trimmed) return null;
-  if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed.slice(0, 1500);
-  }
   if (/^data:image\/(jpeg|jpg|png|webp);base64,[a-zA-Z0-9+/=]+$/i.test(trimmed)) {
     if (trimmed.length > 350000) {
       throw new Error('Uploaded image is too large. Please choose a smaller image.');
     }
     return trimmed;
   }
-  return null;
+  if (/^https?:\/\//i.test(trimmed)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      throw new Error('Invalid image URL format.');
+    }
+    if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || parsed.username || parsed.password) {
+      throw new Error('Image URL host or format is not allowed.');
+    }
+    if (isDisallowedImageHost(parsed.hostname)) {
+      throw new Error('Image URL host is not allowed.');
+    }
+    return parsed.toString().slice(0, 1500);
+  }
+  throw new Error('Image must be a valid HTTPS/HTTP URL or PNG/JPG/WebP upload.');
 }
 
 function sanitizeStorePhotos(rawPhotos: unknown): string[] {
@@ -247,7 +438,7 @@ function maskAddress(rawAddress?: string | null): string {
   return `${addr.slice(0, 6)}...${addr.slice(-6)}`;
 }
 
-app.post('/api/auth/register', async (req: Request, res: Response) => {
+app.post('/api/auth/register', authRegisterLimiter, async (req: Request, res: Response) => {
   try {
     const { phone, name, email, password, address, landmark, pincode, role } = req.body;
 
@@ -311,14 +502,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     const token = generateToken(userPayload as any);
     await logAudit(user.id, user.role, 'USER_REGISTERED', 'users', user.id, `User ${user.name} registered as ${user.role}`);
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 30 * 24 * 60 * 60 * 1000
-    });
+    setAuthCookie(req, res, token);
 
     res.status(201).json({
       message: 'Account created successfully',
@@ -327,11 +511,11 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     console.error('Registration error:', err);
-    res.status(500).json({ error: 'Registration failed: ' + err.message });
+    res.status(500).json({ error: safeServerError(err, 'Registration failed. Please try again.') });
   }
 });
 
-app.post('/api/auth/login', async (req: Request, res: Response) => {
+app.post('/api/auth/login', authLoginLimiter, async (req: Request, res: Response) => {
   try {
     const { phone, password } = req.body;
     const cleanPhone = normalizePhone(phone);
@@ -382,31 +566,25 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     const token = generateToken(userPayload as any);
     await logAudit(matchedUser.id, matchedUser.role, 'USER_LOGIN', 'users', matchedUser.id, `User ${matchedUser.name} logged in as ${matchedUser.role}`);
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 30 * 24 * 60 * 60 * 1000
-    });
+    setAuthCookie(req, res, token);
 
     res.json({
       token,
       user: userPayload
     });
   } catch (err: any) {
-    res.status(500).json({ error: 'Login failed: ' + err.message });
+    console.error('Login error:', err);
+    res.status(500).json({ error: safeServerError(err, 'Login failed. Please try again.') });
   }
 });
 
 app.post('/api/auth/logout', (req: Request, res: Response) => {
-  res.clearCookie('token', { path: '/' });
+  clearAuthCookie(req, res);
   res.json({ message: 'Logged out successfully.' });
 });
 
 // Secure Admin-Assisted Forgot Password Workflow
-app.post('/api/auth/forgot-password-request', async (req: Request, res: Response) => {
+app.post('/api/auth/forgot-password-request', forgotPasswordLimiter, async (req: Request, res: Response) => {
   try {
     const { phone, notes } = req.body;
     if (!phone) {
@@ -441,7 +619,8 @@ app.post('/api/auth/forgot-password-request', async (req: Request, res: Response
       support_address: 'Karanja Lad, Maharashtra (444105)'
     });
   } catch (err: any) {
-    res.status(500).json({ error: 'Failed to process request: ' + err.message });
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: safeServerError(err, 'Failed to process password reset request.') });
   }
 });
 
@@ -451,7 +630,7 @@ app.get('/api/admin/password-reset-requests', requireAuth, requireRole(['admin']
     const list = await passwordResetsRepo.listPending();
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -474,8 +653,9 @@ app.post('/api/admin/reset-user-password', requireAuth, requireRole(['admin']), 
       return res.status(404).json({ error: 'User not found.' });
     }
 
+    const nowIso = new Date().toISOString();
     for (const u of users) {
-      await usersRepo.update(u.id, { password_hash: newHash });
+      await usersRepo.update(u.id, { password_hash: newHash, password_changed_at: nowIso });
     }
 
     await passwordResetsRepo.resolve(cleanPhone, request_id ? parseInt(request_id, 10) : undefined);
@@ -491,7 +671,7 @@ app.post('/api/admin/reset-user-password', requireAuth, requireRole(['admin']), 
 
     res.json({ message: `Password reset successfully for ${users[0].name}.` });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -527,7 +707,7 @@ app.put('/api/auth/profile', requireAuth, async (req: AuthenticatedRequest, res:
     await logAudit(req.user!.id, req.user!.role, 'PROFILE_UPDATED', 'users', req.user!.id, `User updated profile information`);
     res.json({ message: 'Profile updated successfully', user: safeUser });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -539,7 +719,7 @@ app.get('/api/addresses', requireAuth, async (req: AuthenticatedRequest, res: Re
     const list = await addressesRepo.listByUser(req.user!.id);
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -586,7 +766,7 @@ app.delete('/api/addresses/:id', requireAuth, async (req: AuthenticatedRequest, 
     if (result === 'forbidden') return res.status(403).json({ error: 'Forbidden: You can only delete your own addresses.' });
     res.json({ message: 'Saved address deleted.' });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -598,7 +778,7 @@ app.get('/api/categories', async (req: Request, res: Response) => {
     const list = await categoriesRepo.list();
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -606,24 +786,10 @@ app.get('/api/categories', async (req: Request, res: Response) => {
 // Delivery Settings & Delivery Slots Endpoints
 // Admin has complete control over delivery fee & handling
 // ----------------------------------------------------
-app.get(['/api/settings/delivery', '/api/admin/settings/delivery'], async (req: Request, res: Response) => {
-  try {
-    const settings = await settingsRepo.getDeliverySettings();
-    res.json({
-      ...settings,
-      default_delivery_fee: Number(settings.default_delivery_fee),
-      handling_fee: Number(settings.handling_fee),
-      min_order_amount: Number(settings.min_order_amount || 0),
-      warehouse_lat: Number(settings.warehouse_lat),
-      warehouse_lng: Number(settings.warehouse_lng),
-      per_km_rate: Number(settings.per_km_rate),
-      free_delivery_up_to_km: Number(settings.free_delivery_up_to_km || 0),
-      max_delivery_distance_km: Number(settings.max_delivery_distance_km),
-      delivery_slabs: normalizeDeliverySlabs(settings.delivery_slabs)
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
+app.all(['/api/settings/delivery', '/api/admin/settings/delivery'], (req: Request, res: Response) => {
+  return res.status(410).json({
+    error: 'Central warehouse delivery settings have been retired. Delivery fees and radius are managed per store.'
+  });
 });
 
 // Public minimal platform status (NEVER exposes monetization flags)
@@ -639,7 +805,7 @@ app.get('/api/settings/platform', async (req: Request, res: Response) => {
       maintenance_message: settings.maintenance_message
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -649,7 +815,7 @@ app.get('/api/admin/settings/platform', requireAuth, requireRole(['admin']), asy
     const settings = await settingsRepo.getPlatformSettings();
     res.json(settings);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -679,6 +845,19 @@ app.put('/api/admin/settings/platform', requireAuth, requireRole(['admin']), asy
       return res.status(400).json({ error: 'Invalid store visibility rule.' });
     }
 
+    if (
+      monetization_enabled === true ||
+      subscriptions_enabled === true ||
+      featured_stores_enabled === true ||
+      store_ads_enabled === true ||
+      admob_enabled === true ||
+      adsense_enabled === true
+    ) {
+      return res.status(400).json({
+        error: 'Monetization, subscriptions, featured store fees, and ad networks are permanently disabled on this platform.'
+      });
+    }
+
     const updated = await settingsRepo.updatePlatformSettings({
       ...(platform_name !== undefined && String(platform_name).trim()
         ? { platform_name: String(platform_name).trim().slice(0, 80) }
@@ -692,12 +871,12 @@ app.put('/api/admin/settings/platform', requireAuth, requireRole(['admin']), asy
       ...(maintenance_message !== undefined
         ? { maintenance_message: String(maintenance_message).trim().slice(0, 300) }
         : {}),
-      ...(monetization_enabled !== undefined ? { monetization_enabled: Boolean(monetization_enabled) } : {}),
-      ...(subscriptions_enabled !== undefined ? { subscriptions_enabled: Boolean(subscriptions_enabled) } : {}),
-      ...(featured_stores_enabled !== undefined ? { featured_stores_enabled: Boolean(featured_stores_enabled) } : {}),
-      ...(store_ads_enabled !== undefined ? { store_ads_enabled: Boolean(store_ads_enabled) } : {}),
-      ...(admob_enabled !== undefined ? { admob_enabled: Boolean(admob_enabled) } : {}),
-      ...(adsense_enabled !== undefined ? { adsense_enabled: Boolean(adsense_enabled) } : {})
+      monetization_enabled: false,
+      subscriptions_enabled: false,
+      featured_stores_enabled: false,
+      store_ads_enabled: false,
+      admob_enabled: false,
+      adsense_enabled: false
     });
 
     await logAudit(
@@ -706,7 +885,7 @@ app.put('/api/admin/settings/platform', requireAuth, requireRole(['admin']), asy
       'PLATFORM_SETTINGS_UPDATED',
       'settings',
       'platform_config',
-      `Updated platform settings: service_available=${updated.service_available}, require_approval=${updated.require_store_approval}, visibility=${updated.store_visibility_rule}, monetization=${updated.monetization_enabled}`
+      `Updated platform settings: service_available=${updated.service_available}, require_approval=${updated.require_store_approval}, visibility=${updated.store_visibility_rule}`
     );
 
     res.json({ message: 'Platform settings updated successfully.', settings: updated });
@@ -802,44 +981,18 @@ app.put('/api/admin/settings/delivery', requireAuth, requireRole(['admin']), asy
     );
     res.json({ message: 'Delivery & distance settings updated successfully.', settings: updated });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
-// Backend road distance & delivery fee calculation endpoint (OSRM + Admin rules)
-app.post('/api/delivery/calculate-fee', async (req: Request, res: Response) => {
-  try {
-    const { customer_lat, customer_lng } = req.body;
-    const cLat = Number(customer_lat);
-    const cLng = Number(customer_lng);
-
-    if (!isValidCoordinate(cLat, cLng)) {
-      return res.status(400).json({ error: 'Valid delivery pin coordinates (latitude & longitude) are required.' });
-    }
-
-    const settings = await settingsRepo.getDeliverySettings();
-    const road = await calculateRoadDistanceKm(
-      settings.warehouse_lat,
-      settings.warehouse_lng,
-      cLat,
-      cLng
-    );
-
-    const quote = calculateDeliveryFeeFromDistance(
-      road.distance_km,
-      road.duration_mins,
-      road.source,
-      settings
-    );
-
-    res.json(quote);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Failed to calculate delivery distance.' });
-  }
+app.post('/api/delivery/calculate-fee', (req: Request, res: Response) => {
+  return res.status(410).json({
+    error: 'Central warehouse delivery fee calculation is retired. Use /api/stores/:id/delivery-quote instead.'
+  });
 });
 
 // OpenStreetMap Nominatim + Photon location search (supports local landmarks, chowks, roads & nearby areas)
-app.get('/api/locations/search', async (req: Request, res: Response) => {
+app.get('/api/locations/search', locationLookupLimiter, async (req: Request, res: Response) => {
   try {
     const q = String(req.query.q || '').trim();
     if (q.length < 2) {
@@ -860,7 +1013,7 @@ app.get('/api/locations/search', async (req: Request, res: Response) => {
 });
 
 // OpenStreetMap reverse-geocoding endpoint for map pins, GPS, and selected search coordinates
-app.get('/api/locations/reverse', async (req: Request, res: Response) => {
+app.get('/api/locations/reverse', locationLookupLimiter, async (req: Request, res: Response) => {
   try {
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
@@ -874,67 +1027,11 @@ app.get('/api/locations/reverse', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/delivery-slots', async (req: Request, res: Response) => {
-  try {
-    const slots = await deliverySlotsRepo.list();
-    res.json(slots);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/delivery-slots', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { name, time_window, max_orders_per_slot, display_order } = req.body;
-    if (!name || !time_window) {
-      return res.status(400).json({ error: 'Slot name and time window are required.' });
-    }
-
-    const slot = await deliverySlotsRepo.create({
-      name: name.trim(),
-      time_window: time_window.trim(),
-      max_orders_per_slot: Number(max_orders_per_slot) || 25,
-      is_active: true,
-      display_order: Number(display_order) || 1
-    });
-
-    await logAudit(req.user!.id, 'admin', 'DELIVERY_SLOT_CREATED', 'delivery_slots', slot.id, `Added slot ${name}`);
-    res.status(201).json(slot);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/admin/delivery-slots/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { name, time_window, max_orders_per_slot, is_active, display_order } = req.body;
-
-    const updated = await deliverySlotsRepo.update(id, {
-      ...(name ? { name: name.trim() } : {}),
-      ...(time_window ? { time_window: time_window.trim() } : {}),
-      ...(max_orders_per_slot !== undefined ? { max_orders_per_slot: Number(max_orders_per_slot) } : {}),
-      ...(is_active !== undefined ? { is_active: Boolean(is_active) } : {}),
-      ...(display_order !== undefined ? { display_order: Number(display_order) } : {})
-    });
-
-    if (!updated) return res.status(404).json({ error: 'Delivery slot not found.' });
-    await logAudit(req.user!.id, 'admin', 'DELIVERY_SLOT_UPDATED', 'delivery_slots', id, `Updated delivery slot`);
-    res.json(updated);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/admin/delivery-slots/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    await deliverySlotsRepo.deactivate(id);
-    await logAudit(req.user!.id, 'admin', 'DELIVERY_SLOT_DEACTIVATED', 'delivery_slots', id, `Deactivated slot`);
-    res.json({ message: 'Delivery slot removed.' });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
+// Retired central warehouse delivery slots (stores manage delivery & pickup directly)
+app.all(['/api/delivery-slots', '/api/admin/delivery-slots', '/api/admin/delivery-slots/:id'], (req: Request, res: Response) => {
+  return res.status(410).json({
+    error: 'Central delivery slots have been retired. Orders use store-managed delivery or store pickup.'
+  });
 });
 
 // Public Customer Catalog (ALWAYS strips wholesale purchase cost, margins, and supplier details)
@@ -949,7 +1046,7 @@ app.get('/api/products', async (req: Request, res: Response) => {
     });
     res.json(products);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -957,22 +1054,20 @@ app.get('/api/products/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
     const product = await productsRepo.findById(id);
-    if (!product || product.is_deleted || product.is_active === false) {
+    if (!product || product.is_deleted || product.is_active === false || !product.store_id || product.store_id <= 0) {
       return res.status(404).json({ error: 'Product not found.' });
     }
-    if (product.store_id) {
-      const store = await storesRepo.findById(product.store_id);
-      if (!store || store.approval_status !== 'approved' || store.is_active === false) {
-        return res.status(404).json({ error: 'Product not found.' });
-      }
+    const store = await storesRepo.findById(product.store_id);
+    if (!store || store.approval_status !== 'approved' || store.is_active === false) {
+      return res.status(404).json({ error: 'Product not found.' });
     }
     res.json(sanitizeProductForCustomer(product));
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
-// Admin-Only Product Catalog (includes purchase cost, auto-computed gross margin, and supplier details)
+// Admin Store Product Catalog Overview (Hyperlocal stores only, no central warehouse/wholesale)
 app.get('/api/admin/products', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { category, search, in_stock } = req.query;
@@ -980,11 +1075,12 @@ app.get('/api/admin/products', requireAuth, requireRole(['admin']), async (req: 
       category: category as string,
       search: search as string,
       in_stock: in_stock === 'true',
-      includeWholesale: true
+      includeInactive: true,
+      includeWholesale: false
     });
     res.json(products);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -1044,15 +1140,17 @@ app.post('/api/pricing/calculate-cart', async (req: Request, res: Response) => {
         continue;
       }
 
-      const itemStoreId = product.store_id ? Number(product.store_id) : null;
-      if (cartStoreId === undefined) {
-        cartStoreId = itemStoreId;
-      } else if (cartStoreId !== itemStoreId && !storeMixedErrorAdded) {
-        errors.push('Cart items cannot mix products from different stores.');
-        storeMixedErrorAdded = true;
-      }
+      const itemStoreId = product.store_id ? Number(product.store_id) : 0;
+      if (!itemStoreId || itemStoreId <= 0) {
+        errors.push(`"${product.name}" is not linked to an active local store.`);
+      } else {
+        if (cartStoreId === undefined) {
+          cartStoreId = itemStoreId;
+        } else if (cartStoreId !== itemStoreId && !storeMixedErrorAdded) {
+          errors.push('Cart items cannot mix products from different stores.');
+          storeMixedErrorAdded = true;
+        }
 
-      if (itemStoreId) {
         if (!checkedStores.has(itemStoreId)) {
           checkedStores.set(itemStoreId, await storesRepo.findById(itemStoreId));
         }
@@ -1083,296 +1181,21 @@ app.post('/api/pricing/calculate-cart', async (req: Request, res: Response) => {
       total_savings: totalSavings
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
-// Admin Product Management
-app.post('/api/products', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const {
-      category_id,
-      name,
-      unit,
-      price,
-      mrp,
-      stock,
-      image_url,
-      description,
-      product_type,
-      min_order_qty,
-      max_order_qty,
-      pricing_slabs,
-      purchase_cost,
-      supplier_id,
-      supplier_name,
-      supplier_phone,
-      supplier_address
-    } = req.body;
-    if (!name || !unit || price === undefined) {
-      return res.status(400).json({ error: 'Name, unit, and price are required.' });
-    }
-
-    const numPrice = Number(price);
-    const numMrp = mrp ? Number(mrp) : numPrice;
-    const discount = numMrp > numPrice ? Math.round(((numMrp - numPrice) / numMrp) * 100) : 0;
-    const numStock = Math.round((Number(stock) || 0) * 100) / 100;
-
-    if (numStock < 0) {
-      return res.status(400).json({ error: 'Stock cannot be negative.' });
-    }
-
-    if (purchase_cost !== undefined && purchase_cost !== null && purchase_cost !== '' && Number(purchase_cost) < 0) {
-      return res.status(400).json({ error: 'Purchase cost cannot be negative.' });
-    }
-
-    const resolvedType = normalizeProductType(product_type, unit.trim());
-    const minOrderQty =
-      min_order_qty !== undefined && min_order_qty !== null && min_order_qty !== ''
-        ? Number(min_order_qty)
-        : 1;
-    const maxOrderQty =
-      max_order_qty !== undefined && max_order_qty !== null && max_order_qty !== ''
-        ? Number(max_order_qty)
-        : null;
-
-    if (!Number.isFinite(minOrderQty) || minOrderQty <= 0) {
-      return res.status(400).json({ error: 'Minimum order quantity must be greater than 0.' });
-    }
-    if (maxOrderQty !== null && (!Number.isFinite(maxOrderQty) || maxOrderQty < minOrderQty)) {
-      return res.status(400).json({ error: 'Maximum order quantity must be ≥ minimum order quantity.' });
-    }
-
-    const slabCheck = validateAdminPriceSlabs(pricing_slabs, resolvedType);
-    if (!slabCheck.valid) {
-      return res.status(400).json({ error: slabCheck.error });
-    }
-
-    let resolvedSupplierId: number | null = supplier_id ? Number(supplier_id) : null;
-    let resolvedSupplierName: string | null = supplier_name ? String(supplier_name).trim() : null;
-    let resolvedSupplierPhone: string | null = supplier_phone ? String(supplier_phone).trim() : null;
-    let resolvedSupplierAddress: string | null = supplier_address ? String(supplier_address).trim() : null;
-
-    if (resolvedSupplierId) {
-      const sup = await suppliersRepo.findById(resolvedSupplierId);
-      if (sup) {
-        if (!resolvedSupplierName) resolvedSupplierName = sup.name;
-        if (!resolvedSupplierPhone) resolvedSupplierPhone = sup.phone;
-        if (!resolvedSupplierAddress) resolvedSupplierAddress = sup.address;
-      }
-    }
-
-    const wholesale = computeWholesaleMetrics(numPrice, purchase_cost);
-
-    const product = await productsRepo.create({
-      category_id: Number(category_id) || 1,
-      name: name.trim(),
-      unit: unit.trim(),
-      price: numPrice,
-      mrp: numMrp,
-      discount_percent: discount,
-      stock: numStock,
-      image_url: image_url || null,
-      description: description || null,
-      is_active: true,
-      product_type: resolvedType,
-      min_order_qty: minOrderQty,
-      max_order_qty: maxOrderQty,
-      pricing_slabs: slabCheck.slabs,
-      purchase_cost: wholesale.purchase_cost,
-      gross_margin: wholesale.gross_margin,
-      margin_percent: wholesale.margin_percent,
-      supplier_id: resolvedSupplierId,
-      supplier_name: resolvedSupplierName,
-      supplier_phone: resolvedSupplierPhone,
-      supplier_address: resolvedSupplierAddress,
-      created_at: new Date().toISOString()
-    });
-
-    await logAudit(req.user!.id, 'admin', 'PRODUCT_CREATED', 'products', product.id, `Created product ${product.name}`);
-    res.status(201).json(product);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/products/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const existing = await productsRepo.findById(id);
-    if (!existing) {
-      return res.status(404).json({ error: 'Product not found.' });
-    }
-
-    const {
-      category_id,
-      name,
-      unit,
-      price,
-      mrp,
-      stock,
-      image_url,
-      description,
-      is_active,
-      product_type,
-      min_order_qty,
-      max_order_qty,
-      pricing_slabs,
-      purchase_cost,
-      supplier_id,
-      supplier_name,
-      supplier_phone,
-      supplier_address
-    } = req.body;
-
-    const numPrice = price !== undefined ? Number(price) : Number(existing.price);
-    const numMrp = mrp !== undefined ? Number(mrp) : Number(existing.mrp || numPrice);
-    const discount = numMrp > numPrice ? Math.round(((numMrp - numPrice) / numMrp) * 100) : 0;
-
-    if (purchase_cost !== undefined && purchase_cost !== null && purchase_cost !== '' && Number(purchase_cost) < 0) {
-      return res.status(400).json({ error: 'Purchase cost cannot be negative.' });
-    }
-
-    const effectiveCost = purchase_cost !== undefined ? purchase_cost : existing.purchase_cost;
-    const wholesale = computeWholesaleMetrics(numPrice, effectiveCost);
-
-    const resolvedType = product_type !== undefined
-      ? normalizeProductType(product_type, unit ? unit.trim() : existing.unit)
-      : normalizeProductType(existing.product_type, existing.unit);
-
-    const minOrderQty =
-      min_order_qty !== undefined
-        ? (min_order_qty === null || min_order_qty === '' ? 1 : Number(min_order_qty))
-        : (existing.min_order_qty || 1);
-    const maxOrderQty =
-      max_order_qty !== undefined
-        ? (max_order_qty === null || max_order_qty === '' ? null : Number(max_order_qty))
-        : (existing.max_order_qty ?? null);
-
-    if (!Number.isFinite(minOrderQty) || minOrderQty <= 0) {
-      return res.status(400).json({ error: 'Minimum order quantity must be greater than 0.' });
-    }
-    if (maxOrderQty !== null && (!Number.isFinite(maxOrderQty) || maxOrderQty < minOrderQty)) {
-      return res.status(400).json({ error: 'Maximum order quantity must be ≥ minimum order quantity.' });
-    }
-
-    let slabsPatch: Record<string, any> = {};
-    if (pricing_slabs !== undefined) {
-      const slabCheck = validateAdminPriceSlabs(pricing_slabs, resolvedType);
-      if (!slabCheck.valid) {
-        return res.status(400).json({ error: slabCheck.error });
-      }
-      slabsPatch = { pricing_slabs: slabCheck.slabs };
-    }
-
-    let supPatch: Record<string, any> = {};
-    if (supplier_id !== undefined || supplier_name !== undefined || supplier_phone !== undefined || supplier_address !== undefined) {
-      let resolvedSupplierId: number | null = supplier_id ? Number(supplier_id) : null;
-      let resolvedSupplierName: string | null = supplier_name ? String(supplier_name).trim() : null;
-      let resolvedSupplierPhone: string | null = supplier_phone ? String(supplier_phone).trim() : null;
-      let resolvedSupplierAddress: string | null = supplier_address ? String(supplier_address).trim() : null;
-
-      if (resolvedSupplierId) {
-        const sup = await suppliersRepo.findById(resolvedSupplierId);
-        if (sup) {
-          if (!resolvedSupplierName) resolvedSupplierName = sup.name;
-          if (!resolvedSupplierPhone) resolvedSupplierPhone = sup.phone;
-          if (!resolvedSupplierAddress) resolvedSupplierAddress = sup.address;
-        }
-      }
-      supPatch = {
-        supplier_id: resolvedSupplierId,
-        supplier_name: resolvedSupplierName,
-        supplier_phone: resolvedSupplierPhone,
-        supplier_address: resolvedSupplierAddress
-      };
-    }
-
-    const updated = await productsRepo.update(id, {
-      ...(category_id !== undefined ? { category_id: Number(category_id) } : {}),
-      ...(name ? { name: name.trim() } : {}),
-      ...(unit ? { unit: unit.trim() } : {}),
-      ...(price !== undefined ? { price: numPrice } : {}),
-      ...(mrp !== undefined ? { mrp: numMrp } : {}),
-      discount_percent: discount,
-      ...(stock !== undefined ? { stock: Math.round(Number(stock) * 100) / 100 } : {}),
-      ...(image_url !== undefined ? { image_url } : {}),
-      ...(description !== undefined ? { description } : {}),
-      ...(is_active !== undefined ? { is_active: Boolean(is_active) } : {}),
-      product_type: resolvedType,
-      min_order_qty: minOrderQty,
-      max_order_qty: maxOrderQty,
-      ...slabsPatch,
-      purchase_cost: wholesale.purchase_cost,
-      gross_margin: wholesale.gross_margin,
-      margin_percent: wholesale.margin_percent,
-      ...supPatch
-    });
-
-    if (!updated) {
-      return res.status(404).json({ error: 'Product not found.' });
-    }
-
-    await logAudit(req.user!.id, 'admin', 'PRODUCT_UPDATED', 'products', id, `Updated product details & wholesale pricing`);
-    res.json(updated);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/products/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const referencedInOrders = await productsRepo.isProductReferencedInOrders(id);
-    const ok = await productsRepo.softDelete(id);
-    if (!ok) {
-      return res.status(404).json({ error: 'Product not found.' });
-    }
-
-    await logAudit(
-      req.user!.id,
-      'admin',
-      'PRODUCT_DELETED',
-      'products',
-      id,
-      referencedInOrders
-        ? `Soft-deactivated product #${id} (preserved historical order references)`
-        : `Deactivated product #${id}`
-    );
-    res.json({
-      message: referencedInOrders
-        ? 'Product is referenced in past orders and was safely deactivated without affecting historical orders.'
-        : 'Product removed successfully.',
-      referenced_in_orders: referencedInOrders
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Admin Stock Adjustment with Audit
-app.put('/api/products/:id/stock', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { stock, reason } = req.body;
-    const newStock = Math.round(Number(stock) * 100) / 100;
-
-    if (!Number.isFinite(newStock) || newStock < 0) {
-      return res.status(400).json({ error: 'Stock cannot be negative.' });
-    }
-
-    const updated = await productsRepo.adjustStock(id, newStock, reason, req.user!.id);
-    await logAudit(req.user!.id, 'admin', 'STOCK_ADJUSTED', 'products', id, `Adjusted stock to ${newStock} (${reason || 'Manual'})`);
-    res.json(updated);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
+// Retired central warehouse product mutations (store owners manage their own store catalogs)
+app.all(['/api/products', '/api/products/:id', '/api/products/:id/stock'], requireAuth, (req: Request, res: Response) => {
+  return res.status(410).json({
+    error: 'Central product management is retired. Store owners manage products directly under /api/store-owner/products.'
+  });
 });
 
 // ----------------------------------------------------
 // Order Management (Business Rules & Transactions)
 // ----------------------------------------------------
-app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/orders', orderCreateLimiter, requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const {
       items,
@@ -1412,37 +1235,36 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
 
     const cleanPhone = String(customer_phone || req.user!.phone || '').trim().replace(/\D/g, '');
     const recipientName = String(customer_name || req.user!.name || '').trim();
-    const storeId = store_id ? Number(store_id) : null;
+    const storeId = store_id ? Number(store_id) : 0;
     const fulfillment: 'delivery' | 'pickup' = fulfillment_type === 'pickup' ? 'pickup' : 'delivery';
     const resolvedPaymentMode: 'COD' | 'Pay at Store' =
-      fulfillment === 'pickup' && payment_mode === 'Pay at Store' ? 'Pay at Store' : 'COD';
+      fulfillment === 'pickup' ? 'Pay at Store' : 'COD';
 
-    let storeDoc: StoreDoc | null = null;
-    if (storeId) {
-      storeDoc = await storesRepo.findById(storeId);
-      if (!storeDoc) {
-        return res.status(404).json({ error: 'Selected grocery store was not found.' });
-      }
-      if (storeDoc.approval_status !== 'approved' || storeDoc.is_active === false) {
-        return res.status(400).json({ error: 'This store is not currently active on FMP Supermart.' });
-      }
-      if (storeDoc.is_open === false) {
-        return res.status(400).json({ error: `${storeDoc.name} is currently closed and not accepting orders.` });
-      }
-      const supportsDelivery = storeDoc.service_type === 'delivery' || storeDoc.service_type === 'both';
-      const supportsPickup = storeDoc.service_type === 'pickup' || storeDoc.service_type === 'both';
-      if (fulfillment === 'delivery' && !supportsDelivery) {
-        return res.status(400).json({ error: `${storeDoc.name} only offers Store Pickup.` });
-      }
-      if (fulfillment === 'pickup' && !supportsPickup) {
-        return res.status(400).json({ error: `${storeDoc.name} only offers Home Delivery.` });
-      }
-    } else if (fulfillment === 'pickup') {
-      return res.status(400).json({ error: 'Store pickup is available for local kirana store orders.' });
+    if (!storeId || storeId <= 0) {
+      return res.status(400).json({ error: 'Please select an approved local grocery store to place your order.' });
+    }
+
+    const storeDoc = await storesRepo.findById(storeId);
+    if (!storeDoc) {
+      return res.status(404).json({ error: 'Selected grocery store was not found.' });
+    }
+    if (storeDoc.approval_status !== 'approved' || storeDoc.is_active === false) {
+      return res.status(400).json({ error: 'This store is not currently active on FMP Supermart.' });
+    }
+    if (storeDoc.is_open === false) {
+      return res.status(400).json({ error: `${storeDoc.name} is currently closed and not accepting orders.` });
+    }
+    const supportsDelivery = storeDoc.service_type === 'delivery' || storeDoc.service_type === 'both';
+    const supportsPickup = storeDoc.service_type === 'pickup' || storeDoc.service_type === 'both';
+    if (fulfillment === 'delivery' && !supportsDelivery) {
+      return res.status(400).json({ error: `${storeDoc.name} only offers Store Pickup.` });
+    }
+    if (fulfillment === 'pickup' && !supportsPickup) {
+      return res.status(400).json({ error: `${storeDoc.name} only offers Home Delivery.` });
     }
 
     const address =
-      fulfillment === 'pickup' && storeDoc
+      fulfillment === 'pickup'
         ? `Store Pickup: ${storeDoc.name}, ${storeDoc.address}`
         : String(delivery_address || req.user!.address || '').trim();
 
@@ -1455,43 +1277,22 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
     let road: { distance_km: number; duration_mins: number | null; source: 'osrm' | 'haversine_fallback' };
     let pickupCode: string | null = null;
 
-    if (storeDoc && fulfillment === 'pickup') {
+    if (fulfillment === 'pickup') {
       if (!isValidCoordinate(cLat, cLng)) {
         cLat = storeDoc.lat;
         cLng = storeDoc.lng;
       }
       road = { distance_km: 0, duration_mins: null, source: 'osrm' };
-      pickupCode = generateDeliveryOTP();
+      pickupCode = generatePickupCode();
     } else {
-      // Require map pin coordinates & calculate road distance strictly on the backend (NEVER trust client delivery_fee)
       if (!isValidCoordinate(cLat, cLng)) {
         return res.status(400).json({ error: 'Please pin your delivery location on the map to calculate delivery distance and charges.' });
       }
-
-      if (storeDoc) {
-        road = await calculateRoadDistanceKm(storeDoc.lat, storeDoc.lng, cLat, cLng);
-        if (storeDoc.delivery_radius_km > 0 && road.distance_km > storeDoc.delivery_radius_km) {
-          return res.status(400).json({
-            error: `Delivery unavailable beyond ${storeDoc.delivery_radius_km} km for ${storeDoc.name}. Your location is ${road.distance_km} km away.`
-          });
-        }
-      } else {
-        const settings = await settingsRepo.getDeliverySettings();
-        road = await calculateRoadDistanceKm(
-          settings.warehouse_lat,
-          settings.warehouse_lng,
-          cLat,
-          cLng
-        );
-        const quoteCheck = calculateDeliveryFeeFromDistance(
-          road.distance_km,
-          road.duration_mins,
-          road.source,
-          settings
-        );
-        if (!quoteCheck.deliverable) {
-          return res.status(400).json({ error: quoteCheck.reason || 'Delivery unavailable at your selected location.' });
-        }
+      road = await calculateRoadDistanceKm(storeDoc.lat, storeDoc.lng, cLat, cLng);
+      if (storeDoc.delivery_radius_km > 0 && road.distance_km > storeDoc.delivery_radius_km) {
+        return res.status(400).json({
+          error: `Delivery unavailable beyond ${storeDoc.delivery_radius_km} km for ${storeDoc.name}. Your location is ${road.distance_km} km away.`
+        });
       }
     }
 
@@ -1506,7 +1307,7 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
     const isDuplicate = recentOrders.some(o => {
       const orderAgeMs = now - new Date(o.created_at).getTime();
       if (orderAgeMs < 0 || orderAgeMs >= 5000) return false;
-      if (o.delivery_address !== address || (o.store_id ?? null) !== (storeId ?? null) || (o.fulfillment_type || 'delivery') !== fulfillment) {
+      if (o.delivery_address !== address || (o.store_id ?? null) !== storeId || (o.fulfillment_type || 'delivery') !== fulfillment) {
         return false;
       }
       const existingSig = (itemsMapForDup.get(o.id) || [])
@@ -1526,18 +1327,18 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
         customerId: req.user!.id,
         customerName: recipientName,
         customerPhone: cleanPhone,
-        storeId: storeDoc ? storeDoc.id : null,
+        storeId: storeDoc.id,
         fulfillmentType: fulfillment,
         paymentMode: resolvedPaymentMode,
         idempotencyKey: idempotency_key ? String(idempotency_key) : null,
         pickupCode,
         address,
-        landmark: landmark || (storeDoc ? storeDoc.landmark || storeDoc.city : 'Karanja Lad'),
-        pincode: pincode || (storeDoc ? storeDoc.pincode : '444105'),
+        landmark: landmark || storeDoc.landmark || storeDoc.city,
+        pincode: pincode || storeDoc.pincode || '444105',
         deliveryType: delivery_type === 'scheduled' ? 'scheduled' : 'immediate',
         scheduledDate: scheduled_date || (delivery_type === 'scheduled' ? 'Today' : 'Immediate Express'),
         timeSlot: time_slot || (fulfillment === 'pickup' ? 'Store Pickup' : delivery_type === 'scheduled' ? '09:00 AM - 12:00 PM' : 'Within 45-60 mins'),
-        tipAmount: fulfillment === 'pickup' ? 0 : Number(tip_amount) || 0,
+        tipAmount: 0,
         customerLat: cLat,
         customerLng: cLng,
         distanceKm: road.distance_km,
@@ -1581,14 +1382,16 @@ app.post('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Resp
   }
 });
 
-// Get orders list (Role-filtered, enriched with items & store address/instructions)
+// Get orders list (Role-filtered, PII-masked for Admin, pickup_code hidden from Store Owner & Admin)
 app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    if (req.user!.role === 'rider') {
+      return res.status(410).json({ error: 'Platform delivery rider accounts have been retired.' });
+    }
+
     let orders: OrderDoc[] = [];
     if (req.user!.role === 'customer') {
       orders = await ordersRepo.list({ customer_id: req.user!.id });
-    } else if (req.user!.role === 'rider') {
-      orders = await ordersRepo.list({ rider_id: req.user!.id });
     } else if (req.user!.role === 'store_owner') {
       const myStore = await storesRepo.findByOwnerId(req.user!.id);
       orders = myStore ? await ordersRepo.list({ store_id: myStore.id }) : [];
@@ -1602,28 +1405,35 @@ app.get('/api/orders', requireAuth, async (req: AuthenticatedRequest, res: Respo
     ]);
     const storeMap = new Map(storesList.map(s => [s.id, s]));
 
-    // Filter OTP from general list for security
     const sanitized = orders.map(o => {
       const isCustomerOwner = req.user!.role === 'customer' && o.customer_id === req.user!.id;
+      const isAdmin = req.user!.role === 'admin';
       const st = o.store_id ? storeMap.get(o.store_id) : null;
       return {
         ...o,
+        customer_phone: isAdmin ? maskPhone(o.customer_phone) : o.customer_phone,
+        delivery_address: isAdmin ? maskAddress(o.delivery_address) : o.delivery_address,
         store_address: st?.address || null,
         store_delivery_info: st?.delivery_info || null,
-        delivery_otp: isCustomerOwner && ['dispatched', 'delivered'].includes(o.status) ? o.delivery_otp : undefined,
+        delivery_otp: undefined,
+        pickup_code: isCustomerOwner && o.fulfillment_type === 'pickup' ? o.pickup_code : undefined,
         items: itemsMap.get(o.id) || []
       };
     });
 
     res.json(sanitized);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
 // Single order details with items
 app.get('/api/orders/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    if (req.user!.role === 'rider') {
+      return res.status(410).json({ error: 'Platform delivery rider accounts have been retired.' });
+    }
+
     const id = parseInt(req.params.id, 10);
     const { order, items } = await ordersRepo.findById(id);
 
@@ -1631,11 +1441,7 @@ app.get('/api/orders/:id', requireAuth, async (req: AuthenticatedRequest, res: R
       return res.status(404).json({ error: 'Order not found.' });
     }
 
-    // Authorization check
     if (req.user!.role === 'customer' && order.customer_id !== req.user!.id) {
-      return res.status(403).json({ error: 'Access denied.' });
-    }
-    if (req.user!.role === 'rider' && order.rider_id !== req.user!.id) {
       return res.status(403).json({ error: 'Access denied.' });
     }
     if (req.user!.role === 'store_owner') {
@@ -1647,17 +1453,20 @@ app.get('/api/orders/:id', requireAuth, async (req: AuthenticatedRequest, res: R
 
     const st = order.store_id ? await storesRepo.findById(order.store_id) : null;
     const isCustomerOwner = req.user!.role === 'customer' && order.customer_id === req.user!.id;
-    const canSeeOtp = (isCustomerOwner || req.user!.role === 'admin') && ['dispatched', 'delivered'].includes(order.status);
+    const isAdmin = req.user!.role === 'admin';
 
     res.json({
       ...order,
+      customer_phone: isAdmin ? maskPhone(order.customer_phone) : order.customer_phone,
+      delivery_address: isAdmin ? maskAddress(order.delivery_address) : order.delivery_address,
       store_address: st?.address || null,
       store_delivery_info: st?.delivery_info || null,
-      delivery_otp: canSeeOtp ? order.delivery_otp : undefined,
+      delivery_otp: undefined,
+      pickup_code: isCustomerOwner && order.fulfillment_type === 'pickup' ? order.pickup_code : undefined,
       items
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -1699,263 +1508,31 @@ app.post('/api/orders/:id/cancel', requireAuth, async (req: AuthenticatedRequest
   }
 });
 
-// Update order status (confirmed, packed)
-app.put('/api/orders/:id/status', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { status } = req.body;
-
-    if (!['confirmed', 'packed'].includes(status)) {
-      return res.status(400).json({ error: 'Use specific endpoints for dispatch, deliver, or cancel.' });
-    }
-
-    const order = await ordersRepo.updateStatus(id, status);
-    if (!order) return res.status(404).json({ error: 'Order not found.' });
-
-    await logAudit(req.user!.id, 'admin', 'ORDER_STATUS_UPDATE', 'orders', id, `Status updated to ${status}`);
-    res.json(order);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// List riders for assignment and fleet management
-app.get('/api/admin/riders', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const riders = await usersRepo.listRiders();
-    const allOrders = await ordersRepo.list();
-
-    const formatted = riders.map(r => {
-      const riderOrders = allOrders.filter(o => o.rider_id === r.id);
-      const assigned = riderOrders.filter(o => ['placed', 'confirmed', 'packed', 'dispatched'].includes(o.status)).length;
-      const active = riderOrders.filter(o => o.status === 'dispatched').length;
-      const delivered = riderOrders.filter(o => o.status === 'delivered').length;
-      const failed = riderOrders.filter(o => Boolean(o.failure_reason)).length;
-      const unreconciledOrders = riderOrders.filter(o => o.status === 'delivered' && !o.cod_reconciled);
-      const cashInHand = unreconciledOrders.reduce((sum, o) => sum + Number(o.total_amount), 0);
-
-      return {
-        id: r.id,
-        name: r.name,
-        phone: r.phone,
-        email: r.email,
-        address: r.address,
-        landmark: r.landmark,
-        is_active: r.is_active,
-        assigned_deliveries: assigned,
-        active_deliveries: active,
-        total_delivered: delivered,
-        failed_deliveries: failed,
-        unreconciled_orders: unreconciledOrders.length,
-        cash_in_hand: cashInHand
-      };
+// Retired central warehouse order lifecycle & platform rider fleet management routes
+app.all(
+  [
+    '/api/orders/:id/status',
+    '/api/orders/:id/assign-rider',
+    '/api/orders/:id/delivery-fee',
+    '/api/orders/:id/dispatch',
+    '/api/admin/riders',
+    '/api/admin/riders/:id',
+    '/api/admin/riders/:id/reset-password'
+  ],
+  requireAuth,
+  (req: Request, res: Response) => {
+    return res.status(410).json({
+      error: 'Platform rider fleet and central order fulfillment have been retired. Store owners manage order fulfillment directly.'
     });
-
-    res.json(formatted);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
   }
-});
-
-// Admin Create Rider Account
-app.post('/api/admin/riders', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { name, phone, password, email, address, landmark } = req.body;
-    if (!name || !phone || !password) {
-      return res.status(400).json({ error: 'Rider name, mobile number, and initial password are required.' });
-    }
-
-    const cleanPhone = phone.trim().replace(/\D/g, '');
-    if (cleanPhone.length < 10) {
-      return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
-    }
-
-    const existing = await usersRepo.findByPhoneAndRole(cleanPhone, 'rider');
-    if (existing) {
-      return res.status(400).json({ error: 'A delivery rider with this mobile number already exists.' });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    const rider = await usersRepo.create({
-      phone: cleanPhone,
-      name: name.trim(),
-      email: email?.trim() || null,
-      role: 'rider',
-      password_hash: passwordHash,
-      address: address?.trim() || 'Karanja Lad',
-      landmark: landmark?.trim() || null,
-      city: 'Karanja Lad',
-      pincode: '444105',
-      is_active: true,
-      created_at: new Date().toISOString()
-    });
-
-    await logAudit(req.user!.id, 'admin', 'RIDER_CREATED', 'users', rider.id, `Created delivery partner account for ${rider.name} (${cleanPhone})`);
-
-    // Welcome notification for rider
-    await notificationsRepo.create({
-      user_id: rider.id,
-      title: 'Welcome to FMP Supermart Fleet! 🛵',
-      message: `Welcome ${rider.name}! Your delivery partner account is active. Admin will assign delivery orders to you.`,
-      type: 'account'
-    });
-
-    res.status(201).json({ message: 'Delivery partner account created successfully.', rider });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Admin Update Rider Details / Toggle Active
-app.put('/api/admin/riders/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { name, phone, email, address, landmark, is_active } = req.body;
-
-    const rider = await usersRepo.findById(id);
-    if (!rider || rider.role !== 'rider') {
-      return res.status(404).json({ error: 'Delivery rider not found.' });
-    }
-
-    const updated = await usersRepo.update(id, {
-      ...(name ? { name: name.trim() } : {}),
-      ...(phone ? { phone: phone.trim().replace(/\D/g, '') } : {}),
-      ...(email !== undefined ? { email: email?.trim() || null } : {}),
-      ...(address !== undefined ? { address: address?.trim() || null } : {}),
-      ...(landmark !== undefined ? { landmark: landmark?.trim() || null } : {}),
-      ...(is_active !== undefined ? { is_active: Boolean(is_active) } : {})
-    });
-
-    await logAudit(req.user!.id, 'admin', 'RIDER_UPDATED', 'users', id, `Updated delivery partner profile for ${updated?.name}`);
-    res.json({ message: 'Rider details updated.', rider: updated });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Admin Reset Rider Password
-app.put('/api/admin/riders/:id/reset-password', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { password } = req.body;
-    if (!password || password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
-    }
-
-    const rider = await usersRepo.findById(id);
-    if (!rider || rider.role !== 'rider') {
-      return res.status(404).json({ error: 'Delivery rider not found.' });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    await usersRepo.update(id, { password_hash: passwordHash });
-
-    await logAudit(req.user!.id, 'admin', 'RIDER_PASSWORD_RESET', 'users', id, `Reset password for rider ${rider.name}`);
-    res.json({ message: `Password successfully reset for ${rider.name}.` });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Assign or Reassign rider to order
-app.post('/api/orders/:id/assign-rider', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { rider_id } = req.body;
-
-    const rider = await usersRepo.findById(Number(rider_id));
-    if (!rider || rider.role !== 'rider') {
-      return res.status(404).json({ error: 'Delivery rider not found.' });
-    }
-    if (rider.is_active === false) {
-      return res.status(400).json({ error: 'Cannot assign order to an inactive delivery partner. Please activate their account first.' });
-    }
-
-    const { order } = await ordersRepo.findById(id);
-    if (!order) return res.status(404).json({ error: 'Order not found.' });
-
-    if (order.rider_id === rider.id) {
-      return res.json({ message: `Order #${order.order_number} is already assigned to ${rider.name}.`, order });
-    }
-
-    const isReassignment = Boolean(order.rider_id);
-    const oldRiderName = order.rider_name || 'Unassigned';
-
-    const updated = await ordersRepo.assignRider(id, rider);
-
-    const auditAction = isReassignment ? 'RIDER_REASSIGNED' : 'RIDER_ASSIGNED';
-    const auditText = isReassignment
-      ? `Reassigned order #${order.order_number} from ${oldRiderName} to ${rider.name}`
-      : `Assigned rider ${rider.name} to order #${order.order_number}`;
-
-    await logAudit(req.user!.id, 'admin', auditAction, 'orders', id, auditText);
-    res.json(updated);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Admin: Set/Update delivery fee for an individual order
-app.put('/api/orders/:id/delivery-fee', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { delivery_fee } = req.body;
-
-    if (delivery_fee === undefined || isNaN(Number(delivery_fee)) || Number(delivery_fee) < 0) {
-      return res.status(400).json({ error: 'Please specify a valid delivery fee (₹0 or greater).' });
-    }
-
-    const newFee = Number(delivery_fee);
-    const updated = await ordersRepo.updateDeliveryFee(id, newFee);
-
-    await logAudit(
-      req.user!.id,
-      'admin',
-      'ORDER_DELIVERY_FEE_UPDATED',
-      'orders',
-      id,
-      `Adjusted delivery fee to ₹${newFee}. Total COD payable updated to ₹${updated?.total_amount}.`
-    );
-
-    res.json({ message: `Delivery fee updated to ₹${newFee}. Total payable: ₹${updated?.total_amount}.`, order: updated });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Dispatch order: Generates secure customer-only Delivery OTP
-app.post('/api/orders/:id/dispatch', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { order } = await ordersRepo.findById(id);
-    if (!order) return res.status(404).json({ error: 'Order not found.' });
-
-    if (!order.rider_id) {
-      return res.status(400).json({ error: 'Please assign a delivery rider before dispatching the order.' });
-    }
-
-    const deliveryOtp = generateDeliveryOTP();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-    const dispatchedOrder = await ordersRepo.dispatch(id, deliveryOtp, expiresAt);
-
-    await logAudit(req.user!.id, 'admin', 'ORDER_DISPATCHED', 'orders', id, `Order dispatched with secure OTP generated`);
-
-    res.json({
-      message: 'Order dispatched successfully. Secure delivery OTP generated for customer.',
-      order: dispatchedOrder
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
+);
 
 // Admin Dashboard Analytics & Statistics
 app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const [orders, allProducts, stores, customers, complaints] = await Promise.all([
       ordersRepo.list(),
-      productsRepo.list({ includeInactive: true, includeWholesale: true }),
+      productsRepo.list({ includeInactive: true, includeWholesale: false }),
       storesRepo.listAll(),
       usersRepo.listCustomers(),
       complaintsRepo.listAll()
@@ -1970,9 +1547,6 @@ app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: Aut
 
     const deliveredOrders = orders.filter(o => o.status === 'delivered');
     const totalRevenue = deliveredOrders.reduce((sum, o) => sum + Number(o.total_amount), 0);
-    const unreconciledCash = orders
-      .filter(o => o.cod_collected === true && !o.cod_reconciled)
-      .reduce((sum, o) => sum + Number(o.total_amount), 0);
 
     const activeProducts = allProducts.filter(p => p.is_active !== false && !p.is_deleted);
     const outOfStock = activeProducts.filter(p => p.stock === 0).length;
@@ -1984,7 +1558,13 @@ app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: Aut
       .sort((a, b) => a.stock - b.stock)
       .slice(0, 10);
 
-    const recentOrders = orders.slice(0, 8);
+    const recentOrders = orders.slice(0, 8).map(o => ({
+      ...o,
+      customer_phone: maskPhone(o.customer_phone),
+      delivery_address: maskAddress(o.delivery_address),
+      delivery_otp: undefined,
+      pickup_code: undefined
+    }));
 
     const approvedStores = stores.filter(s => s.approval_status === 'approved').length;
     const pendingStores = stores.filter(s => s.approval_status === 'pending').length;
@@ -2004,7 +1584,7 @@ app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: Aut
         cancelled_count: cancelledCount,
         total_revenue: totalRevenue,
         today_revenue: totalRevenue,
-        unreconciled_cash: unreconciledCash
+        unreconciled_cash: 0
       },
       inventory: {
         total_products: activeProducts.length,
@@ -2033,7 +1613,7 @@ app.get('/api/admin/stats', requireAuth, requireRole(['admin']), async (req: Aut
       recentOrders
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2049,7 +1629,7 @@ app.get('/api/admin/reports', requireAuth, requireRole(['admin']), async (req: A
     const deliveredOrderIds = new Set(deliveredOrders.map(o => o.id));
     const deliveredItems = allItems.filter(i => deliveredOrderIds.has(i.order_id));
 
-    const products = await productsRepo.list();
+    const products = await productsRepo.list({ includeInactive: true, includeWholesale: false });
     const prodMap = new Map(products.map(p => [p.id, p]));
 
     const catSalesMap: Record<string, { units: number; revenue: number }> = {};
@@ -2068,6 +1648,7 @@ app.get('/api/admin/reports', requireAuth, requireRole(['admin']), async (req: A
     const invSnap = await getDocs(collection(firestoreDb, 'inventory'));
     const inventoryLogs = invSnap.docs
       .map(d => d.data())
+      .filter((log: any) => prodMap.has(Number(log.product_id)))
       .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 25);
 
@@ -2076,7 +1657,7 @@ app.get('/api/admin/reports', requireAuth, requireRole(['admin']), async (req: A
       inventoryLogs
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2088,216 +1669,30 @@ app.get('/api/admin/audit-logs', requireAuth, requireRole(['admin']), async (req
     const logs = await auditLogsRepo.list(safeLimit);
     res.json(logs);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
-// ----------------------------------------------------
-// Suppliers & Purchase Orders
-// ----------------------------------------------------
-app.get('/api/suppliers', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const list = await suppliersRepo.list();
-    res.json(list);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/suppliers', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { name, contact_person, phone, email, address, gst_number } = req.body;
-    if (!name || !phone) return res.status(400).json({ error: 'Supplier name and phone are required.' });
-
-    const sup = await suppliersRepo.create({
-      name: name.trim(),
-      contact_person: contact_person ? contact_person.trim() : '',
-      phone: phone.trim(),
-      email: email?.trim() || null,
-      address: address ? address.trim() : 'Karanja Lad',
-      city: 'Karanja Lad',
-      gst_number: gst_number || ''
+// Retired central suppliers, purchase orders, rider fleet, and COD reconciliation routes
+app.all(
+  [
+    '/api/suppliers',
+    '/api/purchase-orders',
+    '/api/purchase-orders/:id/receive',
+    '/api/rider/assigned-orders',
+    '/api/rider/orders/:id/verify-otp-deliver',
+    '/api/rider/orders/:id/report-failed',
+    '/api/rider/cod-summary',
+    '/api/admin/cod-pending',
+    '/api/admin/cod-reconcile'
+  ],
+  requireAuth,
+  (req: Request, res: Response) => {
+    return res.status(410).json({
+      error: 'Legacy central warehouse procurement and rider COD reconciliation routes have been retired.'
     });
-
-    await logAudit(req.user!.id, 'admin', 'SUPPLIER_CREATED', 'suppliers', sup.id, `Added supplier ${name}`);
-    res.status(201).json(sup);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
   }
-});
-
-app.get('/api/purchase-orders', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const list = await purchaseOrdersRepo.list();
-    res.json(list);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/purchase-orders', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { supplier_id, items, notes } = req.body;
-    if (!supplier_id || !items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: 'Supplier and items are required.' });
-    }
-
-    const po = await purchaseOrdersRepo.create(Number(supplier_id), items, notes);
-    await logAudit(req.user!.id, 'admin', 'PURCHASE_ORDER_CREATED', 'purchase_orders', po.id, `Created PO ${po.po_number}`);
-    res.status(201).json(po);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/purchase-orders/:id/receive', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const receivedPO = await purchaseOrdersRepo.receive(id);
-    await logAudit(req.user!.id, 'admin', 'PURCHASE_ORDER_RECEIVED', 'purchase_orders', id, `Received PO ${receivedPO.po_number}`);
-    res.json({ message: 'Purchase order received and inventory updated.', po: receivedPO });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// ----------------------------------------------------
-// Delivery Boy / Rider Operations
-// ----------------------------------------------------
-app.get('/api/rider/assigned-orders', requireAuth, requireRole(['rider', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const orders = await ordersRepo.list({ rider_id: req.user!.id });
-
-    // Riders do NOT receive delivery_otp in their payload!
-    const sanitized = orders
-      .map(o => ({
-        ...o,
-        delivery_otp: undefined
-      }))
-      .sort((a, b) => {
-        const priority: Record<string, number> = { dispatched: 1, confirmed: 2, packed: 3, placed: 4, delivered: 5, cancelled: 6 };
-        return (priority[a.status] || 99) - (priority[b.status] || 99);
-      });
-
-    res.json(sanitized);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Rider OTP Verification & Delivery Completion
-app.post('/api/rider/orders/:id/verify-otp-deliver', requireAuth, requireRole(['rider', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { otp } = req.body;
-
-    if (!otp || !otp.toString().trim()) {
-      return res.status(400).json({ error: 'Please enter the 4-digit Delivery OTP provided by the customer.' });
-    }
-
-    const inputOtp = otp.toString().trim();
-    const adminUsers = await usersRepo.listAdmins();
-
-    const delivered = await ordersRepo.verifyOtpAndDeliverTransactional(
-      id,
-      inputOtp,
-      req.user as any,
-      adminUsers
-    );
-
-    await logAudit(
-      req.user!.id,
-      req.user!.role,
-      'ORDER_DELIVERED_OTP_VERIFIED',
-      'orders',
-      id,
-      `Order #${delivered.order_number} marked DELIVERED after valid OTP verification. Collected ₹${delivered.total_amount} COD.`
-    );
-
-    res.json({
-      message: 'Delivery OTP verified successfully! Order marked as DELIVERED.',
-      order: delivered
-    });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-app.post('/api/rider/orders/:id/report-failed', requireAuth, requireRole(['rider', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    const { reason } = req.body;
-
-    if (!reason || !reason.trim()) {
-      return res.status(400).json({ error: 'Failure reason is required (e.g. Customer door locked, Customer unreachable).' });
-    }
-
-    const updated = await ordersRepo.reportDeliveryFailure(id, reason.trim());
-    if (!updated) return res.status(404).json({ error: 'Order not found.' });
-
-    await logAudit(req.user!.id, 'rider', 'DELIVERY_FAILED_REPORT', 'orders', id, `Reported failure: ${reason}`);
-    res.json({ message: 'Delivery attempt issue recorded.', order: updated });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/rider/cod-summary', requireAuth, requireRole(['rider', 'admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const riderId = req.user!.id;
-    const orders = await ordersRepo.list({ rider_id: riderId });
-
-    const collectedOrders = orders.filter(o => o.cod_collected === true);
-    const totalCash = collectedOrders.reduce((sum, o) => sum + Number(o.total_amount), 0);
-    const totalTips = collectedOrders.reduce((sum, o) => sum + Number(o.tip_amount || 0), 0);
-
-    const pendingReconcile = collectedOrders.filter(o => !o.cod_reconciled);
-    const cashInHand = pendingReconcile.reduce((sum, o) => sum + Number(o.total_amount), 0);
-
-    const reconciledOrders = collectedOrders.filter(o => o.cod_reconciled === true);
-    const reconciledAmount = reconciledOrders.reduce((sum, o) => sum + Number(o.total_amount), 0);
-
-    res.json({
-      summary: {
-        total_collected_orders: collectedOrders.length,
-        total_cash_collected: totalCash,
-        total_tips_collected: totalTips,
-        pending_reconcile_orders: pendingReconcile.length,
-        cash_in_hand: cashInHand,
-        reconciled_orders: reconciledOrders.length,
-        reconciled_amount: reconciledAmount
-      },
-      pendingOrders: pendingReconcile
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ----------------------------------------------------
-// COD Reconciliation (Admin)
-// ----------------------------------------------------
-app.get('/api/admin/cod-pending', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const list = await codReconciliationsRepo.getPendingPerRider();
-    res.json(list);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/cod-reconcile', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { rider_id, notes } = req.body;
-    if (!rider_id) return res.status(400).json({ error: 'Rider ID is required.' });
-
-    const result = await codReconciliationsRepo.reconcileRider(Number(rider_id), req.user!.id, notes);
-    await logAudit(req.user!.id, 'admin', 'COD_RECONCILED', 'cod_reconciliations', result.id, `Reconciled ₹${result.total_amount} from rider ${result.rider_name}`);
-    res.json({ message: 'COD cash successfully reconciled.', reconciliation: result });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+);
 
 // Notifications
 app.get('/api/notifications', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -2305,7 +1700,7 @@ app.get('/api/notifications', requireAuth, async (req: AuthenticatedRequest, res
     const list = await notificationsRepo.listForUser(req.user!.id);
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2315,7 +1710,7 @@ app.put('/api/notifications/:id/read', requireAuth, async (req: AuthenticatedReq
     const ok = await notificationsRepo.markRead(id, req.user!.id);
     res.json({ success: ok });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2324,7 +1719,7 @@ app.put('/api/notifications/mark-all-read', requireAuth, async (req: Authenticat
     await notificationsRepo.markAllRead(req.user!.id);
     res.json({ success: true });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2336,7 +1731,7 @@ app.get('/api/favorites', requireAuth, async (req: AuthenticatedRequest, res: Re
     const favs = await favoritesRepo.listForCustomer(req.user!.id);
     res.json(favs);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2349,7 +1744,7 @@ app.post('/api/favorites/:productId', requireAuth, async (req: AuthenticatedRequ
       message: isAdded ? 'Added to favorites' : 'Removed from favorites'
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2362,7 +1757,7 @@ app.get('/api/products/:productId/reviews', async (req: Request, res: Response) 
     const result = await reviewsRepo.listForProduct(productId);
     res.json(result);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2422,7 +1817,7 @@ app.post('/api/products/:productId/reviews', requireAuth, async (req: Authentica
       review
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2431,7 +1826,7 @@ app.get('/api/admin/reviews', requireAuth, requireRole(['admin']), async (req: A
     const list = await reviewsRepo.listAll();
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2449,7 +1844,7 @@ app.put('/api/admin/reviews/:id/status', requireAuth, requireRole(['admin']), as
     await logAudit(req.user!.id, 'admin', 'REVIEW_MODERATED', 'reviews', id, `Review status changed to ${status}`);
     res.json(updated);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2460,14 +1855,14 @@ app.delete('/api/admin/reviews/:id', requireAuth, requireRole(['admin']), async 
     await logAudit(req.user!.id, 'admin', 'REVIEW_DELETED', 'reviews', id, 'Deleted review');
     res.json({ success: true, message: 'Review deleted successfully.' });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
 // ----------------------------------------------------
 // Hyperlocal Grocery Marketplace: Store Self-Registration & Public Discovery
 // ----------------------------------------------------
-app.post('/api/stores/register', async (req: Request, res: Response) => {
+app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res: Response) => {
   try {
     const {
       owner_name,
@@ -2602,14 +1997,7 @@ app.post('/api/stores/register', async (req: Request, res: Response) => {
     const token = generateToken(userPayload as any);
     await logAudit(ownerUser.id, 'store_owner', 'STORE_REGISTERED', 'stores', store.id, `Registered store ${store.name} (pending admin approval)`);
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: 30 * 24 * 60 * 60 * 1000
-    });
+    setAuthCookie(req, res, token);
 
     res.status(201).json({
       message: 'Store registered successfully! Your store is pending Admin approval before appearing to customers.',
@@ -2680,7 +2068,7 @@ app.get('/api/stores/nearby', async (req: Request, res: Response) => {
     enriched.sort((a, b) => (a.distance_km ?? 0) - (b.distance_km ?? 0));
     res.json(enriched);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2711,7 +2099,7 @@ app.get('/api/stores/:id', async (req: Request, res: Response) => {
       })
     );
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2738,7 +2126,7 @@ app.get('/api/stores/:id/products', async (req: Request, res: Response) => {
     });
     res.json(products);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2839,7 +2227,7 @@ app.get('/api/store-owner/my-store', requireAuth, requireRole(['store_owner']), 
       }
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -2991,7 +2379,7 @@ app.get('/api/store-owner/products', requireAuth, requireRole(['store_owner']), 
     });
     res.json(products);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3258,11 +2646,28 @@ app.delete('/api/store-owner/products/:id', requireAuth, requireRole(['store_own
       return res.status(403).json({ error: 'Forbidden: You can only delete products belonging to your own store.' });
     }
 
+    const referencedInOrders = await productsRepo.isProductReferencedInOrders(id);
     await productsRepo.softDelete(id);
     await logAudit(req.user!.id, 'store_owner', 'STORE_PRODUCT_DELETED', 'products', id, `Store ${store.name} removed product #${id}`);
-    res.json({ message: 'Product deleted successfully.' });
+    res.json({
+      message: referencedInOrders
+        ? 'Product is linked to existing orders and has been safely deactivated while preserving order history.'
+        : 'Product deleted successfully.',
+      referenced_in_orders: referencedInOrders
+    });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
+  }
+});
+
+app.get('/api/store-owner/inventory-logs', requireAuth, requireRole(['store_owner']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const store = await getStoreForOwnerOr404(req.user!.id);
+    if (!store) return res.status(404).json({ error: 'Store not found.' });
+    const logs = await productsRepo.listInventoryLogsForStore(store.id, 60);
+    res.json(logs);
+  } catch (err: any) {
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3287,6 +2692,7 @@ app.get('/api/store-owner/orders', requireAuth, requireRole(['store_owner']), as
         return {
           ...o,
           delivery_otp: undefined,
+          pickup_code: undefined,
           delivery_address:
             o.fulfillment_type === 'pickup'
               ? o.delivery_address
@@ -3303,7 +2709,7 @@ app.get('/api/store-owner/orders', requireAuth, requireRole(['store_owner']), as
       })
     );
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3332,7 +2738,7 @@ app.put('/api/store-owner/orders/:id/status', requireAuth, requireRole(['store_o
       return res.status(403).json({ error: 'Forbidden: This order belongs to another store.' });
     }
 
-    const { status, rejection_reason } = req.body;
+    const { status, rejection_reason, pickup_code } = req.body;
     if (!['confirmed', 'packed', 'dispatched', 'delivered', 'cancelled'].includes(status)) {
       return res.status(400).json({ error: 'Invalid order status.' });
     }
@@ -3354,7 +2760,17 @@ app.put('/api/store-owner/orders/:id/status', requireAuth, requireRole(['store_o
         adminUsers
       );
       await logAudit(req.user!.id, 'store_owner', 'STORE_ORDER_REJECTED', 'orders', id, `Store ${store.name} rejected order #${order.order_number}`);
-      return res.json(cancelled);
+      return res.json({ ...cancelled, pickup_code: undefined, delivery_otp: undefined });
+    }
+
+    if (status === 'delivered' && order.fulfillment_type === 'pickup') {
+      const code = String(pickup_code || '').trim();
+      if (!code) {
+        return res.status(400).json({ error: 'Please enter the customer 6-digit pickup code to complete this pickup order.' });
+      }
+      const completed = await ordersRepo.verifyPickupAndComplete(id, store.id, code, store.name);
+      await logAudit(req.user!.id, 'store_owner', 'STORE_PICKUP_VERIFIED', 'orders', id, `Store ${store.name} verified pickup code and completed order #${order.order_number}`);
+      return res.json({ ...completed, pickup_code: undefined, delivery_otp: undefined });
     }
 
     const extra =
@@ -3364,7 +2780,7 @@ app.put('/api/store-owner/orders/:id/status', requireAuth, requireRole(['store_o
 
     const updated = await ordersRepo.updateStatus(id, status, extra);
     await logAudit(req.user!.id, 'store_owner', 'STORE_ORDER_STATUS', 'orders', id, `Store ${store.name} marked order #${order.order_number} as ${status}`);
-    res.json(updated);
+    res.json(updated ? { ...updated, pickup_code: undefined, delivery_otp: undefined } : updated);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -3383,19 +2799,37 @@ app.post('/api/complaints', requireAuth, async (req: AuthenticatedRequest, res: 
     let storeName: string | null = null;
     if (store_id) {
       const st = await storesRepo.findById(Number(store_id));
-      storeName = st?.name || null;
+      if (!st) {
+        return res.status(404).json({ error: 'Referenced store not found.' });
+      }
+      storeName = st.name;
     }
 
     let orderNumber: string | null = null;
     if (order_id) {
       const { order } = await ordersRepo.findById(Number(order_id));
-      orderNumber = order?.order_number || null;
+      if (!order) {
+        return res.status(404).json({ error: 'Referenced order not found.' });
+      }
+      if (req.user!.role === 'customer' && order.customer_id !== req.user!.id) {
+        return res.status(403).json({ error: 'Forbidden: You can only report issues on your own orders.' });
+      }
+      if (req.user!.role === 'store_owner') {
+        const myStore = await storesRepo.findByOwnerId(req.user!.id);
+        if (!myStore || order.store_id !== myStore.id) {
+          return res.status(403).json({ error: 'Forbidden: You can only report issues on orders belonging to your store.' });
+        }
+      }
+      orderNumber = order.order_number;
     }
 
     let productName: string | null = null;
     if (product_id) {
       const prod = await productsRepo.findById(Number(product_id));
-      productName = prod?.name || null;
+      if (!prod) {
+        return res.status(404).json({ error: 'Referenced product not found.' });
+      }
+      productName = prod.name;
     }
 
     const complaint = await complaintsRepo.create({
@@ -3438,7 +2872,7 @@ app.get('/api/complaints/my', requireAuth, async (req: AuthenticatedRequest, res
     const list = await complaintsRepo.listByReporter(req.user!.id);
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3448,7 +2882,7 @@ app.get('/api/complaints/my', requireAuth, async (req: AuthenticatedRequest, res
 app.get('/api/admin/stores', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const stores = await storesRepo.listAll();
-    const products = await productsRepo.list({ includeInactive: true, includeWholesale: true });
+    const products = await productsRepo.list({ includeInactive: true, includeWholesale: false });
     const orders = await ordersRepo.list();
 
     const prodCounts: Record<number, number> = {};
@@ -3468,7 +2902,7 @@ app.get('/api/admin/stores', requireAuth, requireRole(['admin']), async (req: Au
       }))
     );
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3487,6 +2921,10 @@ app.get('/api/admin/stores/:id', requireAuth, requireRole(['admin']), async (req
 
     const enrichedOrders = orders.map(o => ({
       ...o,
+      customer_phone: maskPhone(o.customer_phone),
+      delivery_address: maskAddress(o.delivery_address),
+      delivery_otp: undefined,
+      pickup_code: undefined,
       items: itemsMap.get(o.id) || []
     }));
     const storeComplaints = allComplaints.filter(c => c.store_id === id);
@@ -3502,7 +2940,7 @@ app.get('/api/admin/stores/:id', requireAuth, requireRole(['admin']), async (req
       complaints: storeComplaints
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3601,7 +3039,7 @@ app.get('/api/admin/customers', requireAuth, requireRole(['admin']), async (req:
       }))
     );
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3642,13 +3080,15 @@ app.get('/api/admin/customers/:id/orders', requireAuth, requireRole(['admin']), 
       orders: orders.map(o => ({
         ...o,
         customer_phone: maskPhone(o.customer_phone),
+        delivery_address: maskAddress(o.delivery_address),
         delivery_otp: undefined,
+        pickup_code: undefined,
         items: itemsMap.get(o.id) || []
       })),
       complaints: allComplaints
     });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3685,7 +3125,7 @@ app.get('/api/admin/categories', requireAuth, requireRole(['admin']), async (req
     const list = await categoriesRepo.list(true);
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3756,7 +3196,7 @@ app.delete('/api/admin/categories/:id', requireAuth, requireRole(['admin']), asy
     await logAudit(req.user!.id, 'admin', 'CATEGORY_DELETED', 'categories', id, `Deleted category #${id}`);
     res.json({ message: 'Category deleted.' });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3765,7 +3205,7 @@ app.get('/api/admin/complaints', requireAuth, requireRole(['admin']), async (req
     const list = await complaintsRepo.listAll();
     res.json(list);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeServerError(err) });
   }
 });
 
@@ -3841,12 +3281,24 @@ async function startServer() {
       }
     });
   } else {
-    const distPath = path.resolve(__dirname, 'dist');
+    const distPath =
+      [
+        __dirname,
+        path.resolve(__dirname, 'dist'),
+        path.resolve(process.cwd(), 'dist')
+      ].find(p => fs.existsSync(path.resolve(p, 'index.html'))) || path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
+
+  // Global Express JSON error handler for malformed payloads or unexpected middleware errors
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+    const status = typeof err?.status === 'number' ? err.status : 500;
+    const message = status >= 500 ? safeServerError(err) : (err?.message || 'Bad request');
+    res.status(status).json({ error: message });
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 FMP Supermart server running on port ${PORT} (${isProduction ? 'Production' : 'Development'})`);

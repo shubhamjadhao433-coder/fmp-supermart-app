@@ -25,13 +25,4 @@ const updateSW = registerSW({
   }
 });
 
-// Always ensure SW registration in browsers for Android install prompt
-if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' })
-      .then(reg => console.log('Active PWA SW registered with scope:', reg.scope))
-      .catch(err => console.debug('Direct SW registration note:', err));
-  });
-}
-
 createRoot(document.getElementById('root')!).render(<App />);

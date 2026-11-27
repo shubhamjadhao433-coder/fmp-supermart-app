@@ -31,6 +31,7 @@ import {
 import { api } from '../services/api.ts';
 import {
   Category,
+  InventoryLogEntry,
   NotificationItem,
   Order,
   Product,
@@ -71,10 +72,12 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const [toast, setToast] = useState<{ msg: string; type: 'ok' | 'err' } | null>(null);
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
 
-  // Order filters & rejection modal
+  // Order filters, pickup verification & rejection modal
   const [orderFilter, setOrderFilter] = useState<'all' | 'pending' | 'active' | 'history'>('all');
   const [rejectingOrderId, setRejectingOrderId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [verifyingPickupOrderId, setVerifyingPickupOrderId] = useState<number | null>(null);
+  const [pickupCodeInput, setPickupCodeInput] = useState('');
   const [updatingOrderId, setUpdatingOrderId] = useState<number | null>(null);
 
   // Product Search, Filters & Add/Edit Modal
@@ -101,11 +104,12 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const [pFormError, setPFormError] = useState<string | null>(null);
   const [pSaving, setPSaving] = useState(false);
 
-  // Inventory quick-edit state
+  // Inventory quick-edit & movement logs state
   const [inventorySearch, setInventorySearch] = useState('');
-  const [inventoryFilter, setInventoryFilter] = useState<'all' | 'available' | 'out_of_stock'>('all');
+  const [inventoryFilter, setInventoryFilter] = useState<'all' | 'available' | 'low_stock' | 'out_of_stock'>('all');
   const [stockDrafts, setStockDrafts] = useState<Record<number, string>>({});
   const [savingStockId, setSavingStockId] = useState<number | null>(null);
+  const [inventoryLogs, setInventoryLogs] = useState<InventoryLogEntry[]>([]);
 
   // Sales History filter
   const [salesHistoryFilter, setSalesHistoryFilter] = useState<'all' | 'delivered' | 'cancelled'>('all');
@@ -175,12 +179,13 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [myRes, prodsRes, ordsRes, catsRes, notifsRes] = await Promise.all([
+      const [myRes, prodsRes, ordsRes, catsRes, notifsRes, logsRes] = await Promise.all([
         api.getMyStore(),
         api.getStoreOwnerProducts(),
         api.getStoreOwnerOrders(),
         api.getCategories(),
-        api.getNotifications().catch(() => [] as NotificationItem[])
+        api.getNotifications().catch(() => [] as NotificationItem[]),
+        api.getStoreOwnerInventoryLogs().catch(() => [] as InventoryLogEntry[])
       ]);
       setStore(myRes.store);
       setStats(myRes.stats);
@@ -196,6 +201,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
       setOrders(ordsRes);
       setCategories(catsRes);
       setNotifications(Array.isArray(notifsRes) ? notifsRes : []);
+      setInventoryLogs(Array.isArray(logsRes) ? logsRes : []);
     } catch (err: any) {
       showToast(err?.message || 'Failed to load store data.', 'err');
     } finally {
@@ -240,11 +246,12 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const handleOrderStatus = async (
     orderId: number,
     status: 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled',
-    reason?: string
+    reason?: string,
+    pickupCode?: string
   ) => {
     setUpdatingOrderId(orderId);
     try {
-      await api.updateStoreOwnerOrderStatus(orderId, status, reason);
+      await api.updateStoreOwnerOrderStatus(orderId, status, reason, pickupCode);
       const label =
         status === 'confirmed'
           ? 'Order Accepted'
@@ -258,6 +265,8 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
       showToast(label);
       setRejectingOrderId(null);
       setRejectReason('');
+      setVerifyingPickupOrderId(null);
+      setPickupCodeInput('');
       await loadAll();
     } catch (err: any) {
       showToast(err?.message || 'Failed to update order status.', 'err');
@@ -595,9 +604,13 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
     return true;
   });
 
+  const lowStockProducts = products.filter(p => Number(p.stock) > 0 && Number(p.stock) <= 10 && p.is_active !== false);
+
   const filteredInventory = products.filter(p => {
     const isAvail = p.is_active !== false && Number(p.stock) > 0;
+    const isLowStock = isAvail && Number(p.stock) <= 10;
     if (inventoryFilter === 'available' && !isAvail) return false;
+    if (inventoryFilter === 'low_stock' && !isLowStock) return false;
     if (inventoryFilter === 'out_of_stock' && Number(p.stock) > 0) return false;
     if (inventorySearch.trim()) {
       const q = inventorySearch.toLowerCase();
@@ -1063,7 +1076,15 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                             ₹{Number(order.total_amount).toFixed(2)}
                           </div>
                           <div className="text-[10px] font-bold text-gray-500">
-                            {order.status === 'cancelled' ? 'Cancelled (₹0 sales)' : 'COD Payable'}
+                            {order.status === 'cancelled'
+                              ? 'Cancelled (₹0 sales)'
+                              : order.payment_mode === 'Pay at Store'
+                                ? order.payment_status === 'paid'
+                                  ? 'Paid at Store'
+                                  : 'Pay at Store'
+                                : order.payment_status === 'paid'
+                                  ? 'COD Collected'
+                                  : 'COD Payable'}
                           </div>
                         </div>
                       </div>
@@ -1086,7 +1107,9 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                           <MapPin className="w-3.5 h-3.5 shrink-0 mt-0.5 text-gray-400" />
                           <span className="break-words">
                             {isPickup
-                              ? `Store Pickup order${order.pickup_code ? ` • Pickup Code: ${order.pickup_code}` : ''}`
+                              ? order.status === 'delivered'
+                                ? 'Store Pickup • Verified & Handed Over'
+                                : 'Store Pickup • Ask customer for 6-digit Pickup Code at counter'
                               : showDeliveryAddress
                                 ? `${order.delivery_address}${order.landmark ? ` (${order.landmark})` : ''}${order.distance_km ? ` • ${order.distance_km} km` : ''}`
                                 : order.delivery_address}
@@ -1155,6 +1178,44 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                         </div>
                       )}
 
+                      {/* Pickup Code Verification Box */}
+                      {verifyingPickupOrderId === order.id && (
+                        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 space-y-2 text-xs">
+                          <label className="block font-bold text-emerald-950">
+                            Enter customer&apos;s 6-digit Pickup Code to complete &amp; collect Pay at Store:
+                          </label>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={6}
+                              value={pickupCodeInput}
+                              onChange={e => setPickupCodeInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                              placeholder="6-digit code"
+                              className="w-36 px-3 py-2 bg-white border border-emerald-300 rounded-lg text-sm font-black tracking-widest text-center tabular-nums outline-hidden focus:ring-2 focus:ring-emerald-500"
+                            />
+                            <button
+                              type="button"
+                              disabled={isBusy || pickupCodeInput.trim().length !== 6}
+                              onClick={() => handleOrderStatus(order.id, 'delivered', undefined, pickupCodeInput.trim())}
+                              className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-extrabold cursor-pointer disabled:opacity-50"
+                            >
+                              {isBusy ? 'Verifying...' : 'Verify & Complete'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setVerifyingPickupOrderId(null);
+                                setPickupCodeInput('');
+                              }}
+                              className="px-3 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg font-bold cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Fulfillment Action Buttons */}
                       {!['delivered', 'cancelled'].includes(order.status) && (
                         <div className="flex flex-wrap gap-2 pt-1">
@@ -1192,10 +1253,17 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                             <button
                               type="button"
                               disabled={isBusy || !isApproved}
-                              onClick={() => handleOrderStatus(order.id, 'delivered')}
+                              onClick={() => {
+                                if (isPickup) {
+                                  setVerifyingPickupOrderId(order.id);
+                                  setPickupCodeInput('');
+                                } else {
+                                  handleOrderStatus(order.id, 'delivered');
+                                }
+                              }}
                               className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50"
                             >
-                              Mark as Completed
+                              {isPickup ? 'Verify Pickup Code & Complete' : 'Mark as Completed'}
                             </button>
                           )}
                           {['placed', 'confirmed', 'packed'].includes(order.status) && (
@@ -1399,6 +1467,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                     [
                       { id: 'all', label: `All (${products.length})` },
                       { id: 'available', label: `In Stock (${products.filter(p => Number(p.stock) > 0 && p.is_active !== false).length})` },
+                      { id: 'low_stock', label: `Low Stock (${lowStockProducts.length})` },
                       { id: 'out_of_stock', label: `Zero Stock (${products.filter(p => Number(p.stock) <= 0).length})` }
                     ] as const
                   ).map(f => (
@@ -1407,7 +1476,11 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                       type="button"
                       onClick={() => setInventoryFilter(f.id)}
                       className={`px-3 py-1.5 rounded-xl cursor-pointer ${
-                        inventoryFilter === f.id ? 'bg-amber-700 text-white' : 'bg-gray-100 text-gray-700'
+                        inventoryFilter === f.id
+                          ? 'bg-amber-700 text-white'
+                          : f.id === 'low_stock' && lowStockProducts.length > 0
+                          ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                          : 'bg-gray-100 text-gray-700'
                       }`}
                     >
                       {f.label}
@@ -1415,6 +1488,26 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                   ))}
                 </div>
               </div>
+
+              {lowStockProducts.length > 0 && (
+                <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-2 text-[11px] text-amber-900">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
+                    <span>
+                      <strong>{lowStockProducts.length}</strong> product{lowStockProducts.length === 1 ? '' : 's'} running low on stock (10 units or less). Restock soon to avoid missed orders.
+                    </span>
+                  </div>
+                  {inventoryFilter !== 'low_stock' && (
+                    <button
+                      type="button"
+                      onClick={() => setInventoryFilter('low_stock')}
+                      className="px-2.5 py-1 bg-amber-700 text-white rounded-lg font-bold text-[10px] shrink-0 cursor-pointer"
+                    >
+                      View Low Stock
+                    </button>
+                  )}
+                </div>
+              )}
 
               <div className="relative max-w-md">
                 <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -1437,6 +1530,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                 {filteredInventory.map(prod => {
                   const isOut = Number(prod.stock) <= 0;
                   const isAvail = prod.is_active !== false && !isOut;
+                  const isLowStock = isAvail && Number(prod.stock) <= 10;
                   const draftVal = stockDrafts[prod.id] ?? String(prod.stock);
                   const isBusy = savingStockId === prod.id;
                   const imgKey = `inv-${prod.id}`;
@@ -1465,10 +1559,14 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                             <h3 className="font-extrabold text-xs sm:text-sm text-gray-900 truncate">{prod.name}</h3>
                             <span
                               className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                                isAvail ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                                isLowStock
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : isAvail
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-red-100 text-red-700'
                               }`}
                             >
-                              {isAvail ? 'Available' : isOut ? 'Unavailable (0 Stock)' : 'Unavailable'}
+                              {isLowStock ? 'Low Stock' : isAvail ? 'Available' : isOut ? 'Unavailable (0 Stock)' : 'Unavailable'}
                             </span>
                           </div>
                           <div className="text-[11px] text-gray-500 flex flex-wrap items-center gap-2 tabular-nums">
@@ -1476,7 +1574,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                             <span>•</span>
                             <span className="font-bold text-gray-900">₹{prod.price} / {prod.unit}</span>
                             <span>•</span>
-                            <span className={isOut ? 'text-red-600 font-bold' : 'text-emerald-700 font-bold'}>
+                            <span className={isOut ? 'text-red-600 font-bold' : isLowStock ? 'text-amber-700 font-bold' : 'text-emerald-700 font-bold'}>
                               Current Stock: {prod.stock} {prod.unit}
                             </span>
                           </div>
@@ -1531,6 +1629,42 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                 })}
               </div>
             )}
+
+            {/* Store Inventory Movement Logs */}
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-xs">
+              <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                <div>
+                  <h3 className="font-extrabold text-xs sm:text-sm text-gray-900">Recent Stock &amp; Order Movement Logs</h3>
+                  <p className="text-[11px] text-gray-500">Automatic deductions, cancellation restorations, and manual stock updates for your store</p>
+                </div>
+                <span className="text-[11px] font-bold text-gray-500 tabular-nums">{inventoryLogs.length} entries</span>
+              </div>
+              {inventoryLogs.length === 0 ? (
+                <div className="p-6 text-center text-xs text-gray-400">No inventory movements recorded yet.</div>
+              ) : (
+                <div className="divide-y divide-gray-100 max-h-80 overflow-y-auto">
+                  {inventoryLogs.map(log => (
+                    <div key={log.id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-xs">
+                      <div className="min-w-0">
+                        <div className="font-bold text-gray-900 truncate">{log.product_name}</div>
+                        <div className="text-[11px] text-gray-500">
+                          <span className="uppercase font-semibold">{log.change_type.replace(/_/g, ' ')}</span>
+                          {log.notes ? ` • ${log.notes}` : ''}
+                          {' • '}
+                          {new Date(log.created_at).toLocaleString()}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0 tabular-nums">
+                        <div className={`font-black ${log.quantity_change >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                          {log.quantity_change > 0 ? `+${log.quantity_change}` : log.quantity_change}
+                        </div>
+                        <div className="text-[10px] text-gray-500">After: {log.stock_after}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

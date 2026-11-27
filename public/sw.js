@@ -1,5 +1,5 @@
 // Service Worker for FMP Supermart PWA
-const CACHE_NAME = 'fmp-supermart-v1';
+const CACHE_NAME = 'fmp-supermart-v2';
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',
@@ -45,8 +45,8 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(event.request.url);
 
-  // Bypass API calls that mutate or need fresh user authentication state
-  if (url.pathname.startsWith('/api/auth') || url.pathname.startsWith('/api/orders') || url.pathname.startsWith('/api/admin')) {
+  // Bypass all API calls so live inventory, orders, and auth never serve stale cache
+  if (url.pathname.startsWith('/api/')) {
     return;
   }
 

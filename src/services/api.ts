@@ -5,11 +5,7 @@ import {
   Order,
   ProductReview,
   AdminStats,
-  RiderSummary,
-  Supplier,
-  PurchaseOrder,
   NotificationItem,
-  DeliverySettings,
   DeliveryQuote,
   CartQuoteResponse,
   OsmLocationSuggestion,
@@ -22,49 +18,53 @@ import {
   ComplaintStatus,
   SavedAddress,
   PlatformSettings,
-  AuditLogEntry
+  AuditLogEntry,
+  InventoryLogEntry
 } from '../types.ts';
 
-const TOKEN_KEY = 'fmp_supermart_token';
+const LEGACY_TOKEN_KEY = 'fmp_supermart_token';
 const USER_KEY = 'fmp_supermart_user';
 
-// In-memory token cache fallback for environments where Web Storage is restricted
+// Auth token is held strictly in JS memory (never written to localStorage/sessionStorage);
+// persistent reloads authenticate automatically via the server-set HttpOnly cookie.
 let inMemoryToken: string | null = null;
 let inMemoryUser: User | null = null;
 
+function purgeLegacyStoredTokens(): void {
+  try {
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    sessionStorage.removeItem(LEGACY_TOKEN_KEY);
+  } catch {
+    // Storage access blocked or restricted
+  }
+}
+
+purgeLegacyStoredTokens();
+
+function sanitizeCachedUser(user: User): User {
+  return {
+    id: user.id,
+    phone: user.phone,
+    name: user.name,
+    role: user.role,
+    store_id: user.store_id ?? null,
+    is_active: user.is_active
+  };
+}
+
 export const authStorage = {
   getToken: (): string | null => {
-    if (inMemoryToken) return inMemoryToken;
-    try {
-      const token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
-      if (token) {
-        inMemoryToken = token;
-        return token;
-      }
-    } catch {
-      // Storage access blocked or restricted
-    }
     return inMemoryToken;
   },
 
   setToken: (token: string): void => {
     inMemoryToken = token;
-    try {
-      localStorage.setItem(TOKEN_KEY, token);
-      sessionStorage.setItem(TOKEN_KEY, token);
-    } catch {
-      // Ignore storage write issues
-    }
+    purgeLegacyStoredTokens();
   },
 
   clearToken: (): void => {
     inMemoryToken = null;
-    try {
-      localStorage.removeItem(TOKEN_KEY);
-      sessionStorage.removeItem(TOKEN_KEY);
-    } catch {
-      // Ignore storage cleanup issues
-    }
+    purgeLegacyStoredTokens();
   },
 
   getUser: (): User | null => {
@@ -85,7 +85,7 @@ export const authStorage = {
   setUser: (user: User): void => {
     inMemoryUser = user;
     try {
-      const raw = JSON.stringify(user);
+      const raw = JSON.stringify(sanitizeCachedUser(user));
       localStorage.setItem(USER_KEY, raw);
       sessionStorage.setItem(USER_KEY, raw);
     } catch {
@@ -137,7 +137,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
 
   if (!response.ok) {
     // If the server explicitly rejected the token as expired or invalid (401), clean up local session
-    if (response.status === 401 && (url.startsWith('/api/auth/me') || url.startsWith('/api/admin') || url.startsWith('/api/rider') || url.startsWith('/api/store-owner'))) {
+    if (response.status === 401 && (url.startsWith('/api/auth/me') || url.startsWith('/api/admin') || url.startsWith('/api/store-owner'))) {
       authStorage.clearAll();
     }
     throw new Error(data?.error || `Request failed with status ${response.status}`);
@@ -226,11 +226,6 @@ export const api = {
     return fetchWithAuth(`/api/admin/products?${q.toString()}`);
   },
 
-  calculateDeliveryFee: (customer_lat: number, customer_lng: number): Promise<DeliveryQuote> =>
-    fetchWithAuth('/api/delivery/calculate-fee', {
-      method: 'POST',
-      body: JSON.stringify({ customer_lat, customer_lng })
-    }),
 
   searchLocations: (query: string, lat?: number, lng?: number): Promise<{ query: string; results: OsmLocationSuggestion[] }> => {
     const q = new URLSearchParams({ q: query });
@@ -337,17 +332,6 @@ export const api = {
   getAdminAuditLogs: (limit = 100): Promise<AuditLogEntry[]> =>
     fetchWithAuth(`/api/admin/audit-logs?limit=${encodeURIComponent(String(limit))}`),
 
-  getAdminRiders: (): Promise<any[]> =>
-    fetchWithAuth('/api/admin/riders'),
-
-  createRider: (payload: { name: string; phone: string; password: string; email?: string; address?: string; landmark?: string }): Promise<{ message: string; rider: any }> =>
-    fetchWithAuth('/api/admin/riders', { method: 'POST', body: JSON.stringify(payload) }),
-
-  updateRider: (id: number, payload: Partial<any>): Promise<{ message: string; rider: any }> =>
-    fetchWithAuth(`/api/admin/riders/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
-
-  resetRiderPassword: (id: number, password: string): Promise<{ message: string }> =>
-    fetchWithAuth(`/api/admin/riders/${id}/reset-password`, { method: 'PUT', body: JSON.stringify({ password }) }),
 
   getPasswordResetRequests: (): Promise<any[]> =>
     fetchWithAuth('/api/admin/password-reset-requests'),
@@ -358,63 +342,6 @@ export const api = {
       body: JSON.stringify({ phone, new_password, request_id })
     }),
 
-  // Delivery Settings & Slots
-  getDeliverySettings: (): Promise<DeliverySettings> =>
-    fetchWithAuth('/api/settings/delivery'),
-
-  updateDeliverySettings: (payload: Partial<DeliverySettings>): Promise<{ message: string; settings: DeliverySettings }> =>
-    fetchWithAuth('/api/admin/settings/delivery', { method: 'PUT', body: JSON.stringify(payload) }),
-
-  getDeliverySlots: (): Promise<any[]> =>
-    fetchWithAuth('/api/delivery-slots'),
-
-  createDeliverySlot: (payload: any): Promise<any> =>
-    fetchWithAuth('/api/admin/delivery-slots', { method: 'POST', body: JSON.stringify(payload) }),
-
-  updateDeliverySlot: (id: number, payload: any): Promise<any> =>
-    fetchWithAuth(`/api/admin/delivery-slots/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
-
-  deleteDeliverySlot: (id: number): Promise<{ message: string }> =>
-    fetchWithAuth(`/api/admin/delivery-slots/${id}`, { method: 'DELETE' }),
-
-  assignRider: (orderId: number, riderId: number): Promise<Order> =>
-    fetchWithAuth(`/api/orders/${orderId}/assign-rider`, { method: 'POST', body: JSON.stringify({ rider_id: riderId }) }),
-
-  updateOrderDeliveryFee: (orderId: number, deliveryFee: number): Promise<{ message: string; order: Order }> =>
-    fetchWithAuth(`/api/orders/${orderId}/delivery-fee`, { method: 'PUT', body: JSON.stringify({ delivery_fee: deliveryFee }) }),
-
-  updateOrderStatus: (orderId: number, status: 'confirmed' | 'packed'): Promise<Order> =>
-    fetchWithAuth(`/api/orders/${orderId}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
-
-  dispatchOrder: (orderId: number): Promise<{ message: string; order: Order }> =>
-    fetchWithAuth(`/api/orders/${orderId}/dispatch`, { method: 'POST' }),
-
-  createProduct: (product: Partial<Product>): Promise<Product> =>
-    fetchWithAuth('/api/products', { method: 'POST', body: JSON.stringify(product) }),
-
-  updateProduct: (id: number, product: Partial<Product>): Promise<Product> =>
-    fetchWithAuth(`/api/products/${id}`, { method: 'PUT', body: JSON.stringify(product) }),
-
-  deleteProduct: (id: number): Promise<{ message: string }> =>
-    fetchWithAuth(`/api/products/${id}`, { method: 'DELETE' }),
-
-  adjustStock: (id: number, stock: number, reason: string): Promise<Product> =>
-    fetchWithAuth(`/api/products/${id}/stock`, { method: 'PUT', body: JSON.stringify({ stock, reason }) }),
-
-  getSuppliers: (): Promise<Supplier[]> =>
-    fetchWithAuth('/api/suppliers'),
-
-  createSupplier: (supplier: Partial<Supplier>): Promise<Supplier> =>
-    fetchWithAuth('/api/suppliers', { method: 'POST', body: JSON.stringify(supplier) }),
-
-  getPurchaseOrders: (): Promise<PurchaseOrder[]> =>
-    fetchWithAuth('/api/purchase-orders'),
-
-  createPurchaseOrder: (po: any): Promise<PurchaseOrder> =>
-    fetchWithAuth('/api/purchase-orders', { method: 'POST', body: JSON.stringify(po) }),
-
-  receivePurchaseOrder: (id: number): Promise<{ message: string; po: PurchaseOrder }> =>
-    fetchWithAuth(`/api/purchase-orders/${id}/receive`, { method: 'POST' }),
 
   getAdminReviews: (): Promise<ProductReview[]> =>
     fetchWithAuth('/api/admin/reviews'),
@@ -425,24 +352,6 @@ export const api = {
   deleteReview: (id: number): Promise<{ success: boolean }> =>
     fetchWithAuth(`/api/admin/reviews/${id}`, { method: 'DELETE' }),
 
-  getAdminCodPending: (): Promise<any[]> =>
-    fetchWithAuth('/api/admin/cod-pending'),
-
-  reconcileCod: (riderId: number, notes?: string): Promise<{ message: string; reconciliation: any }> =>
-    fetchWithAuth('/api/admin/cod-reconcile', { method: 'POST', body: JSON.stringify({ rider_id: riderId, notes }) }),
-
-  // Rider
-  getRiderOrders: (): Promise<Order[]> =>
-    fetchWithAuth('/api/rider/assigned-orders'),
-
-  verifyOtpAndDeliver: (orderId: number, otp: string): Promise<{ message: string; order: Order }> =>
-    fetchWithAuth(`/api/rider/orders/${orderId}/verify-otp-deliver`, { method: 'POST', body: JSON.stringify({ otp }) }),
-
-  reportDeliveryFailure: (orderId: number, reason: string): Promise<{ message: string; order: Order }> =>
-    fetchWithAuth(`/api/rider/orders/${orderId}/report-failed`, { method: 'POST', body: JSON.stringify({ reason }) }),
-
-  getRiderCodSummary: (): Promise<RiderSummary> =>
-    fetchWithAuth('/api/rider/cod-summary'),
 
   // Marketplace: Public Store Discovery & Self-Registration
   registerStore: async (payload: {
@@ -529,17 +438,21 @@ export const api = {
   deleteStoreOwnerProduct: (id: number): Promise<{ message: string }> =>
     fetchWithAuth(`/api/store-owner/products/${id}`, { method: 'DELETE' }),
 
+  getStoreOwnerInventoryLogs: (): Promise<InventoryLogEntry[]> =>
+    fetchWithAuth('/api/store-owner/inventory-logs'),
+
   getStoreOwnerOrders: (): Promise<Order[]> =>
     fetchWithAuth('/api/store-owner/orders'),
 
   updateStoreOwnerOrderStatus: (
     orderId: number,
     status: 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled',
-    rejection_reason?: string
+    rejection_reason?: string,
+    pickup_code?: string
   ): Promise<Order> =>
     fetchWithAuth(`/api/store-owner/orders/${orderId}/status`, {
       method: 'PUT',
-      body: JSON.stringify({ status, rejection_reason })
+      body: JSON.stringify({ status, rejection_reason, pickup_code })
     }),
 
   // Complaints / Reported Problems
