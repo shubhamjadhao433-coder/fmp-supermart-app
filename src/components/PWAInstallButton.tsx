@@ -42,7 +42,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
             </div>
             <div className="min-w-0">
               <h4 className="text-xs font-bold leading-tight truncate">Install FMP Supermart App</h4>
-              <p className="text-[10px] text-emerald-100 leading-tight truncate">Fast ordering & offline access in Karanja Lad</p>
+              <p className="text-[10px] text-emerald-100 leading-tight truncate">Fast local grocery ordering &amp; offline access across India</p>
             </div>
           </div>
 

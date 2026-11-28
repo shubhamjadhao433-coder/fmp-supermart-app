@@ -1,7 +1,7 @@
 # FMP Supermart — Production Deployment Guide
 
 **Architecture:** React 19 SPA (Vite + Workbox PWA) + Express API (`server.ts` / `dist/server.js`) + Google Cloud Firestore  
-**Service Area:** Karanja Lad, Maharashtra (`444105`)
+**Service Area:** Pan-India Hyperlocal Multi-Store Marketplace (All cities, towns, districts, states, and optional 6-digit PIN codes across India)
 
 ---
 
@@ -30,7 +30,7 @@ Configure environment secrets in your hosting provider (never commit `.env` file
    npm run lint
    npm run build
    ```
-   - `vite build` generates static frontend & PWA Service Worker artifacts in `dist/`.
+   - `vite build` generates static frontend, SEO static fallbacks (`robots.txt`, `sitemap.xml`), and PWA Service Worker artifacts in `dist/`.
    - `esbuild` bundles the Express API server to `dist/server.js`.
 3. Verify tests before deploying:
    ```bash
@@ -45,12 +45,12 @@ Configure environment secrets in your hosting provider (never commit `.env` file
 
 ## 3. Vercel Deployment Notes
 
-`vercel.json` rewrites `/api/(.*)` requests to `api/index.ts` (which exports the Express `app` from `server.ts`), while Vite static assets in `dist/` serve the frontend and PWA files:
+`vercel.json` rewrites `/api/(.*)` requests to `api/index.ts` (which exports the Express `app` from `server.ts`), while Vite static assets in `dist/` serve the frontend, SEO static files, and PWA files:
 
 - Set **Build Command**: `npm run build`
 - Set **Output Directory**: `dist`
 - Add `NODE_ENV=production`, `JWT_SECRET`, `ALLOWED_ORIGINS`, and `ALLOW_INSECURE_SEED_DEFAULTS=false` in Vercel Environment Variables.
-- Because `server.ts` sets `app.set('trust proxy', 1)`, `X-Forwarded-Proto` and `X-Forwarded-For` from Vercel/reverse proxies are respected for rate limiting and HTTPS cookie attributes.
+- Because `server.ts` sets `app.set('trust proxy', 1)`, `X-Forwarded-Proto` and `X-Forwarded-For` from Vercel/reverse proxies are respected for rate limiting, dynamic `sitemap.xml`/`robots.txt` base URLs, and HTTPS cookie attributes.
 
 ---
 
@@ -77,5 +77,7 @@ Configure environment secrets in your hosting provider (never commit `.env` file
 - [ ] `ALLOW_INSECURE_SEED_DEFAULTS=false` confirmed and any test store/demo users removed or disabled in Firestore.
 - [ ] Real Super Admin account password updated cleanly via secure admin credentials.
 - [ ] `ALLOWED_ORIGINS` set to exact production HTTPS domain(s).
+- [ ] Google Search Console verification tag confirmed on `/` (`TTeS6U9H97oD7DGABZWd95FyJbDPmHX-808pr4lIspQ`), `/robots.txt` and `/sitemap.xml` reachable (`HTTP 200`).
 - [ ] `src/server/firestoreDb.ts` switched to `firebase-admin` before deploying `firestore.rules`.
 - [ ] Run `npm run lint && npm run build && npm test` cleanly on target commit.
+

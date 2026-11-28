@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "FMP Supermart - Karanja Lad Grocery Delivery",
+  "name": "FMP Supermart - India Hyperlocal Grocery Marketplace",
   "short_name": "FMP Mart",
-  "description": "Complete grocery e-commerce and fast doorstep delivery platform for Karanja Lad, Maharashtra 444105.",
+  "description": "India's hyperlocal multi-store grocery and kirana marketplace connecting customers with independent local stores across cities, towns, and villages.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

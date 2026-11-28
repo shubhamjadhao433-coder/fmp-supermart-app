@@ -223,7 +223,7 @@ export default function App() {
             <div>
               <h2 className="text-lg sm:text-xl font-black text-gray-900">Admin Authentication Required</h2>
               <p className="text-xs text-gray-500 mt-1">
-                Please sign in with your authorized administrator credentials for Karanja Lad central store.
+                Please sign in with your authorized administrator credentials to manage FMP Supermart.
               </p>
             </div>
             <button
@@ -244,7 +244,7 @@ export default function App() {
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Return to Storefront</span>
               </button>
-              <span className="text-[11px] text-gray-400 font-medium">Karanja Lad (444105)</span>
+              <span className="text-[11px] text-gray-400 font-medium">Pan-India Marketplace</span>
             </div>
           </div>
 
@@ -453,7 +453,7 @@ export default function App() {
           <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-gray-100 space-y-3">
             <h3 className="font-extrabold text-gray-900 text-base">Clear current cart?</h3>
             <p className="text-xs text-gray-600 leading-relaxed">
-              Your cart contains products from another store. Would you like to clear your current cart and continue with this store?
+              Your cart contains products from another store. Would you like to clear your existing cart and continue with this store?
             </p>
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-900 space-y-0.5">
               <div>Current cart: <strong>{cart[0]?.product.store_name || 'Previous Store'}</strong></div>

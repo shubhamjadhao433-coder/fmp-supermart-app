@@ -39,9 +39,7 @@ import {
   calculateRoadDistanceKm,
   calculateHaversineKm,
   isValidCoordinate,
-  normalizeDeliverySlabs,
-  DEFAULT_WAREHOUSE_LAT,
-  DEFAULT_WAREHOUSE_LNG
+  normalizeDeliverySlabs
 } from './src/server/deliveryDistance.ts';
 import {
   searchOsmLocations,
@@ -230,6 +228,84 @@ app.get('/sw.js', (req, res) => {
   res.setHeader('Service-Worker-Allowed', '/');
   res.sendFile(path.resolve(publicDirPath, 'sw.js'));
 });
+
+function escapeXml(str: string): string {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function getBaseSiteUrl(req: Request): string {
+  const configured = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  if (configured) return configured;
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000').split(',')[0].trim();
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+app.get('/robots.txt', (req: Request, res: Response) => {
+  const baseUrl = getBaseSiteUrl(req);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.send(
+    [
+      'User-agent: *',
+      'Allow: /',
+      'Disallow: /api/',
+      'Disallow: /admin',
+      `Sitemap: ${baseUrl}/sitemap.xml`,
+      ''
+    ].join('\n')
+  );
+});
+
+app.get('/sitemap.xml', async (req: Request, res: Response) => {
+  try {
+    const baseUrl = getBaseSiteUrl(req);
+    const [stores, categories] = await Promise.all([
+      storesRepo.listApprovedActive().catch(() => []),
+      categoriesRepo.list().catch(() => [])
+    ]);
+    const nowIso = new Date().toISOString();
+    const urls: Array<{ loc: string; lastmod: string; changefreq: string; priority: string }> = [
+      { loc: `${baseUrl}/`, lastmod: nowIso, changefreq: 'daily', priority: '1.0' }
+    ];
+    for (const cat of categories) {
+      if (cat.slug) {
+        urls.push({
+          loc: `${baseUrl}/?category=${encodeURIComponent(cat.slug)}`,
+          lastmod: nowIso,
+          changefreq: 'weekly',
+          priority: '0.7'
+        });
+      }
+    }
+    for (const st of stores) {
+      urls.push({
+        loc: `${baseUrl}/?store=${encodeURIComponent(String(st.id))}`,
+        lastmod: st.updated_at || st.created_at || nowIso,
+        changefreq: 'daily',
+        priority: '0.8'
+      });
+    }
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+      ...urls.map(
+        u =>
+          `  <url>\n    <loc>${escapeXml(u.loc)}</loc>\n    <lastmod>${escapeXml(u.lastmod)}</lastmod>\n    <changefreq>${u.changefreq}</changefreq>\n    <priority>${u.priority}</priority>\n  </url>`
+      ),
+      '</urlset>'
+    ].join('\n');
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.send(xml);
+  } catch {
+    res.status(500).setHeader('Content-Type', 'text/plain; charset=utf-8').send('Unable to generate sitemap');
+  }
+});
+
 app.use(express.static(publicDirPath));
 
 // Initialize Firestore collections & default seeds
@@ -260,13 +336,9 @@ app.get('/api/health', async (req: Request, res: Response) => {
 
     res.json({
       status: 'healthy',
-      app: 'FMP Supermart Karanja Lad',
+      app: 'FMP Supermart',
+      coverage: 'India-Wide Hyperlocal Marketplace',
       timestamp: new Date().toISOString(),
-      warehouse: {
-        name: 'FMP Supermart Central Hub',
-        location: 'Shivaji Chowk, Karanja Lad, Maharashtra 444105',
-        type: 'Single Centralized Warehouse'
-      },
       database: {
         healthy: true,
         type: 'Firebase Firestore (Single Source of Truth)',
@@ -281,7 +353,7 @@ app.get('/api/health', async (req: Request, res: Response) => {
         deliveryFeeModel: 'Store-Managed Delivery & Free Store Pickup',
         handlingCharge: 0,
         paymentMode: 'Cash on Delivery (COD) & Pay at Store',
-        marketplaceMode: 'Hyperlocal Multi-Store Grocery Marketplace'
+        marketplaceMode: 'India-Wide Hyperlocal Multi-Store Grocery Marketplace'
       }
     });
   } catch (err: any) {
@@ -379,16 +451,19 @@ function sanitizeStorePhotos(rawPhotos: unknown): string[] {
 
 function sanitizePublicStore(
   store: StoreDoc,
-  extra?: { distance_km?: number; product_count?: number; available_product_names?: string[] }
+  extra?: { distance_km?: number | null; product_count?: number; available_product_names?: string[] }
 ) {
   return {
     id: store.id,
     name: store.name,
     description: store.description || null,
+    email: store.email || null,
     address: store.address,
     landmark: store.landmark || null,
-    city: store.city,
-    pincode: store.pincode,
+    city: store.city || '',
+    district: store.district || null,
+    state: store.state || null,
+    pincode: store.pincode || '',
     lat: store.lat,
     lng: store.lng,
     logo_url: store.logo_url || null,
@@ -440,7 +515,7 @@ function maskAddress(rawAddress?: string | null): string {
 
 app.post('/api/auth/register', authRegisterLimiter, async (req: Request, res: Response) => {
   try {
-    const { phone, name, email, password, address, landmark, pincode, role } = req.body;
+    const { phone, name, email, password, address, landmark, city, pincode, role } = req.body;
 
     if (role !== undefined && ['admin', 'super_admin', 'superadmin'].includes(String(role).trim().toLowerCase())) {
       return res.status(403).json({
@@ -450,6 +525,9 @@ app.post('/api/auth/register', authRegisterLimiter, async (req: Request, res: Re
 
     const cleanPhone = normalizePhone(phone);
     const cleanPassword = typeof password === 'string' ? password.trim() : '';
+    const cleanEmail = email ? String(email).trim() : '';
+    const cleanPincode = pincode ? String(pincode).trim() : '';
+    const cleanCity = city ? String(city).trim() : '';
 
     if (!cleanPhone || !name || !cleanPassword) {
       return res.status(400).json({ error: 'Phone number, name, and password are required.' });
@@ -461,6 +539,14 @@ app.post('/api/auth/register', authRegisterLimiter, async (req: Request, res: Re
 
     if (cleanPassword.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    }
+
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+
+    if (cleanPincode && !/^\d{6}$/.test(cleanPincode)) {
+      return res.status(400).json({ error: 'Please enter a valid 6-digit Indian PIN code.' });
     }
 
     // Public registration is strictly for customers only
@@ -475,13 +561,13 @@ app.post('/api/auth/register', authRegisterLimiter, async (req: Request, res: Re
     const user = await usersRepo.create({
       phone: cleanPhone,
       name: name.trim(),
-      email: email?.trim() || null,
+      email: cleanEmail || null,
       role: userRole,
       password_hash: passwordHash,
       address: address ? address.trim() : null,
       landmark: landmark ? landmark.trim() : null,
-      city: 'Karanja Lad',
-      pincode: pincode || '444105',
+      city: cleanCity,
+      pincode: cleanPincode,
       is_active: true,
       created_at: new Date().toISOString()
     });
@@ -496,6 +582,7 @@ app.post('/api/auth/register', authRegisterLimiter, async (req: Request, res: Re
       is_active: true,
       address: user.address,
       landmark: user.landmark,
+      city: user.city,
       pincode: user.pincode
     };
 
@@ -546,7 +633,7 @@ app.post('/api/auth/login', authLoginLimiter, async (req: Request, res: Response
     }
 
     if (matchedUser.is_active === false) {
-      return res.status(403).json({ error: 'Your account is deactivated. Please contact store admin at Karanja Lad (9699925206).' });
+      return res.status(403).json({ error: 'Your account is deactivated. Please contact FMP Supermart platform support (9699925206).' });
     }
 
     const userPayload = {
@@ -560,7 +647,8 @@ app.post('/api/auth/login', authLoginLimiter, async (req: Request, res: Response
       is_active: true,
       address: matchedUser.address,
       landmark: matchedUser.landmark,
-      pincode: matchedUser.pincode
+      city: matchedUser.city || '',
+      pincode: matchedUser.pincode || ''
     };
 
     const token = generateToken(userPayload as any);
@@ -614,9 +702,9 @@ app.post('/api/auth/forgot-password-request', forgotPasswordLimiter, async (req:
     );
 
     res.json({
-      message: 'Password reset request registered successfully! The FMP Supermart central store admin has received your ticket.',
+      message: 'Password reset request registered successfully! FMP Supermart platform support has received your ticket.',
       support_phone: '9699925206',
-      support_address: 'Karanja Lad, Maharashtra (444105)'
+      support_address: 'FMP Supermart India Support Desk'
     });
   } catch (err: any) {
     console.error('Forgot password error:', err);
@@ -691,12 +779,23 @@ app.put('/api/auth/profile', requireAuth, async (req: AuthenticatedRequest, res:
       });
     }
 
-    const { name, address, landmark, email } = req.body;
+    const { name, address, landmark, email, city, pincode } = req.body;
+    const cleanEmail = email !== undefined ? String(email).trim() : undefined;
+    const cleanPincode = pincode !== undefined ? String(pincode).trim() : undefined;
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+    if (cleanPincode && !/^\d{6}$/.test(cleanPincode)) {
+      return res.status(400).json({ error: 'Please enter a valid 6-digit Indian PIN code.' });
+    }
+
     const updatedUser = await usersRepo.update(req.user!.id, {
       ...(name ? { name: name.trim() } : {}),
       ...(address ? { address: address.trim() } : {}),
-      ...(landmark ? { landmark: landmark.trim() } : {}),
-      ...(email ? { email: email.trim() } : {})
+      ...(landmark !== undefined ? { landmark: landmark ? landmark.trim() : null } : {}),
+      ...(cleanEmail !== undefined ? { email: cleanEmail || null } : {}),
+      ...(city !== undefined ? { city: String(city).trim() } : {}),
+      ...(cleanPincode !== undefined ? { pincode: cleanPincode } : {})
     });
 
     if (!updatedUser) {
@@ -734,6 +833,10 @@ app.post('/api/addresses', requireAuth, async (req: AuthenticatedRequest, res: R
     if (cleanPhone.length < 10) {
       return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
     }
+    const cleanPincode = pincode ? String(pincode).trim() : '';
+    if (cleanPincode && !/^\d{6}$/.test(cleanPincode)) {
+      return res.status(400).json({ error: 'Please enter a valid 6-digit Indian PIN code.' });
+    }
     const numLat = lat !== undefined && lat !== null ? Number(lat) : null;
     const numLng = lng !== undefined && lng !== null ? Number(lng) : null;
     const hasCoords = numLat !== null && numLng !== null && isValidCoordinate(numLat, numLng);
@@ -744,7 +847,7 @@ app.post('/api/addresses', requireAuth, async (req: AuthenticatedRequest, res: R
       phone: cleanPhone,
       address: cleanAddress,
       landmark: landmark ? String(landmark).trim() : '',
-      pincode: pincode ? String(pincode).trim() : '444105',
+      pincode: cleanPincode,
       lat: hasCoords ? numLat : null,
       lng: hasCoords ? numLng : null,
       is_default: Boolean(is_default)
@@ -999,11 +1102,10 @@ app.get('/api/locations/search', locationLookupLimiter, async (req: Request, res
       return res.json({ query: q, results: [] });
     }
 
-    const settings = await settingsRepo.getDeliverySettings();
     const qLat = Number(req.query.lat);
     const qLng = Number(req.query.lng);
-    const refLat = isValidCoordinate(qLat, qLng) ? qLat : settings.warehouse_lat;
-    const refLng = isValidCoordinate(qLat, qLng) ? qLng : settings.warehouse_lng;
+    const refLat = isValidCoordinate(qLat, qLng) ? qLat : undefined;
+    const refLng = isValidCoordinate(qLat, qLng) ? qLng : undefined;
 
     const results = await searchOsmLocations(q, refLat, refLng);
     res.json({ query: q, results });
@@ -1079,6 +1181,102 @@ app.get('/api/admin/products', requireAuth, requireRole(['admin']), async (req: 
       includeWholesale: false
     });
     res.json(products);
+  } catch (err: any) {
+    res.status(500).json({ error: safeServerError(err) });
+  }
+});
+
+// Admin Product Moderation: Enable / Disable or Delete Store Products
+app.put('/api/admin/products/:id/status', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid product ID.' });
+    }
+    const { is_active, reason } = req.body || {};
+    if (typeof is_active !== 'boolean') {
+      return res.status(400).json({ error: 'is_active boolean is required.' });
+    }
+
+    const existing = await productsRepo.findById(id);
+    if (!existing || existing.is_deleted) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+
+    if (is_active === true && Number(existing.stock) <= 0) {
+      return res.status(400).json({ error: 'Cannot enable a product with 0 stock. Ask the store owner to restock first.' });
+    }
+
+    const updated = await productsRepo.update(id, { is_active });
+    if (existing.store_id) {
+      const store = await storesRepo.findById(existing.store_id);
+      if (store?.owner_id) {
+        await notificationsRepo.create({
+          user_id: store.owner_id,
+          title: is_active ? 'Product Enabled by Admin' : 'Product Disabled by Admin',
+          message: `Admin ${is_active ? 'enabled' : 'disabled'} "${existing.name}" in ${store.name}.${reason ? ` Note: ${String(reason).trim()}` : ''}`,
+          type: 'store'
+        });
+      }
+    }
+
+    await logAudit(
+      req.user!.id,
+      'admin',
+      'ADMIN_PRODUCT_STATUS_UPDATED',
+      'products',
+      id,
+      `Admin set product "${existing.name}" (#${id}) is_active=${is_active}${reason ? ` (${String(reason).trim()})` : ''}`
+    );
+
+    res.json(sanitizeProductForCustomer(updated!));
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to update product status.' });
+  }
+});
+
+app.delete('/api/admin/products/:id', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: 'Invalid product ID.' });
+    }
+
+    const existing = await productsRepo.findById(id);
+    if (!existing || existing.is_deleted) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+
+    const referencedInOrders = await productsRepo.isProductReferencedInOrders(id);
+    await productsRepo.softDelete(id);
+
+    if (existing.store_id) {
+      const store = await storesRepo.findById(existing.store_id);
+      if (store?.owner_id) {
+        await notificationsRepo.create({
+          user_id: store.owner_id,
+          title: 'Product Removed by Admin',
+          message: `Admin removed "${existing.name}" from ${store.name} catalog.`,
+          type: 'store'
+        });
+      }
+    }
+
+    await logAudit(
+      req.user!.id,
+      'admin',
+      'ADMIN_PRODUCT_DELETED',
+      'products',
+      id,
+      `Admin removed product "${existing.name}" (#${id})`
+    );
+
+    res.json({
+      message: referencedInOrders
+        ? 'Product is linked to existing orders and has been safely deactivated while preserving order history.'
+        : 'Product deleted successfully by Admin.',
+      referenced_in_orders: referencedInOrders
+    });
   } catch (err: any) {
     res.status(500).json({ error: safeServerError(err) });
   }
@@ -1333,8 +1531,8 @@ app.post('/api/orders', orderCreateLimiter, requireAuth, async (req: Authenticat
         idempotencyKey: idempotency_key ? String(idempotency_key) : null,
         pickupCode,
         address,
-        landmark: landmark || storeDoc.landmark || storeDoc.city,
-        pincode: pincode || storeDoc.pincode || '444105',
+        landmark: landmark || storeDoc.landmark || storeDoc.city || '',
+        pincode: pincode || storeDoc.pincode || '',
         deliveryType: delivery_type === 'scheduled' ? 'scheduled' : 'immediate',
         scheduledDate: scheduled_date || (delivery_type === 'scheduled' ? 'Today' : 'Immediate Express'),
         timeSlot: time_slot || (fulfillment === 'pickup' ? 'Store Pickup' : delivery_type === 'scheduled' ? '09:00 AM - 12:00 PM' : 'Within 45-60 mins'),
@@ -1867,11 +2065,15 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
     const {
       owner_name,
       phone,
+      email,
       password,
       store_name,
       description,
       address,
       landmark,
+      city,
+      district,
+      state,
       pincode,
       lat,
       lng,
@@ -1885,6 +2087,11 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
 
     const cleanPhone = normalizePhone(phone);
     const cleanPassword = typeof password === 'string' ? password.trim() : '';
+    const cleanEmail = email ? String(email).trim() : '';
+    const cleanCity = city ? String(city).trim() : '';
+    const cleanDistrict = district ? String(district).trim() : '';
+    const cleanState = state ? String(state).trim() : '';
+    const cleanPincode = pincode ? String(pincode).trim() : '';
 
     if (!owner_name?.trim() || !cleanPhone || !cleanPassword || !store_name?.trim() || !address?.trim()) {
       return res.status(400).json({
@@ -1896,6 +2103,12 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
     }
     if (cleanPassword.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    }
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid store email address.' });
+    }
+    if (cleanPincode && !/^\d{6}$/.test(cleanPincode)) {
+      return res.status(400).json({ error: 'Please enter a valid 6-digit Indian PIN code.' });
     }
 
     const sLat = Number(lat);
@@ -1923,14 +2136,14 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
     const ownerUser = await usersRepo.create({
       phone: cleanPhone,
       name: owner_name.trim(),
-      email: null,
+      email: cleanEmail || null,
       role: 'store_owner',
       store_id: null,
       password_hash: passwordHash,
       address: address.trim(),
       landmark: landmark?.trim() || null,
-      city: 'Karanja Lad',
-      pincode: pincode?.trim() || '444105',
+      city: cleanCity,
+      pincode: cleanPincode,
       is_active: true,
       created_at: nowIso
     });
@@ -1939,12 +2152,15 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
       owner_id: ownerUser.id,
       owner_name: owner_name.trim(),
       owner_phone: cleanPhone,
+      email: cleanEmail || null,
       name: store_name.trim(),
       description: description?.trim() || null,
       address: address.trim(),
       landmark: landmark?.trim() || null,
-      city: 'Karanja Lad',
-      pincode: pincode?.trim() || '444105',
+      city: cleanCity,
+      district: cleanDistrict || null,
+      state: cleanState || null,
+      pincode: cleanPincode,
       lat: sLat,
       lng: sLng,
       logo_url: null,
@@ -1976,7 +2192,7 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
       await notificationsRepo.create({
         user_id: adm.id,
         title: 'New Store Registration Pending Approval 🏪',
-        message: `${store.name} (${owner_name.trim()}, ${cleanPhone}) has registered and awaits your approval.`,
+        message: `${store.name}${cleanCity ? ` (${cleanCity})` : ''} (${owner_name.trim()}, ${cleanPhone}) has registered and awaits your approval.`,
         type: 'store'
       });
     }
@@ -1991,6 +2207,7 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
       is_active: true,
       address: ownerUser.address,
       landmark: ownerUser.landmark,
+      city: ownerUser.city,
       pincode: ownerUser.pincode
     };
 
@@ -2010,20 +2227,34 @@ app.post('/api/stores/register', storeRegisterLimiter, async (req: Request, res:
   }
 });
 
-// Customer Store Discovery: ONLY returns real Admin-approved active stores with valid location sorted by distance
+// Customer Store Discovery: Returns real Admin-approved active stores across India, sorted by distance when coordinates are supplied
 app.get('/api/stores/nearby', async (req: Request, res: Response) => {
   try {
     const qLat = Number(req.query.lat);
     const qLng = Number(req.query.lng);
+    const hasCoords = isValidCoordinate(qLat, qLng);
     const search = String(req.query.search || '').trim().toLowerCase();
-
-    const refLat = isValidCoordinate(qLat, qLng) ? qLat : DEFAULT_WAREHOUSE_LAT;
-    const refLng = isValidCoordinate(qLat, qLng) ? qLng : DEFAULT_WAREHOUSE_LNG;
+    const cityFilter = String(req.query.city || '').trim().toLowerCase();
+    const stateFilter = String(req.query.state || '').trim().toLowerCase();
+    const districtFilter = String(req.query.district || '').trim().toLowerCase();
+    const pincodeFilter = String(req.query.pincode || '').trim();
 
     const platformSettings = await settingsRepo.getPlatformSettings();
     const approvedStores = (await storesRepo.listApprovedActive()).filter(st => {
       if (!isValidCoordinate(st.lat, st.lng) || !st.address?.trim()) return false;
       if (platformSettings.store_visibility_rule === 'approved_active_open_only' && st.is_open === false) {
+        return false;
+      }
+      if (cityFilter && !(st.city || '').toLowerCase().includes(cityFilter) && !(st.address || '').toLowerCase().includes(cityFilter)) {
+        return false;
+      }
+      if (stateFilter && !(st.state || '').toLowerCase().includes(stateFilter) && !(st.address || '').toLowerCase().includes(stateFilter)) {
+        return false;
+      }
+      if (districtFilter && !(st.district || '').toLowerCase().includes(districtFilter) && !(st.address || '').toLowerCase().includes(districtFilter)) {
+        return false;
+      }
+      if (pincodeFilter && (st.pincode || '') !== pincodeFilter) {
         return false;
       }
       return true;
@@ -2032,20 +2263,28 @@ app.get('/api/stores/nearby', async (req: Request, res: Response) => {
 
     const productCountMap: Record<number, number> = {};
     const availableProductNamesMap: Record<number, string[]> = {};
+    const availableProductSearchTermsMap: Record<number, string[]> = {};
     for (const p of allProducts) {
       if (p.store_id) {
         productCountMap[p.store_id] = (productCountMap[p.store_id] || 0) + 1;
         if (p.is_active !== false && !p.is_deleted && Number(p.stock) > 0 && p.name) {
           if (!availableProductNamesMap[p.store_id]) {
             availableProductNamesMap[p.store_id] = [];
+            availableProductSearchTermsMap[p.store_id] = [];
           }
           availableProductNamesMap[p.store_id].push(p.name);
+          availableProductSearchTermsMap[p.store_id].push(p.name.toLowerCase());
+          if (p.brand) {
+            availableProductSearchTermsMap[p.store_id].push(String(p.brand).toLowerCase());
+          }
         }
       }
     }
 
     let enriched = approvedStores.map(st => {
-      const distKm = Math.round(calculateHaversineKm(refLat, refLng, st.lat, st.lng) * 100) / 100;
+      const distKm = hasCoords
+        ? Math.round(calculateHaversineKm(qLat, qLng, st.lat, st.lng) * 100) / 100
+        : null;
       return sanitizePublicStore(st, {
         distance_km: distKm,
         product_count: productCountMap[st.id] || 0,
@@ -2059,13 +2298,21 @@ app.get('/api/stores/nearby', async (req: Request, res: Response) => {
           st.name.toLowerCase().includes(search) ||
           st.address.toLowerCase().includes(search) ||
           (st.landmark && st.landmark.toLowerCase().includes(search)) ||
+          (st.city && st.city.toLowerCase().includes(search)) ||
+          (st.district && st.district.toLowerCase().includes(search)) ||
+          (st.state && st.state.toLowerCase().includes(search)) ||
+          (st.pincode && st.pincode.includes(search)) ||
           (st.description && st.description.toLowerCase().includes(search)) ||
-          (Array.isArray(st.available_product_names) &&
-            st.available_product_names.some(prodName => prodName.toLowerCase().includes(search)))
+          (Array.isArray(availableProductSearchTermsMap[st.id]) &&
+            availableProductSearchTermsMap[st.id].some(term => term.includes(search)))
       );
     }
 
-    enriched.sort((a, b) => (a.distance_km ?? 0) - (b.distance_km ?? 0));
+    if (hasCoords) {
+      enriched.sort((a, b) => (a.distance_km ?? Number.POSITIVE_INFINITY) - (b.distance_km ?? Number.POSITIVE_INFINITY));
+    } else {
+      enriched.sort((a, b) => (b.product_count ?? 0) - (a.product_count ?? 0) || b.id - a.id);
+    }
     res.json(enriched);
   } catch (err: any) {
     res.status(500).json({ error: safeServerError(err) });
@@ -2087,9 +2334,9 @@ app.get('/api/stores/:id', async (req: Request, res: Response) => {
     }
     const qLat = Number(req.query.lat);
     const qLng = Number(req.query.lng);
-    const refLat = isValidCoordinate(qLat, qLng) ? qLat : DEFAULT_WAREHOUSE_LAT;
-    const refLng = isValidCoordinate(qLat, qLng) ? qLng : DEFAULT_WAREHOUSE_LNG;
-    const distKm = Math.round(calculateHaversineKm(refLat, refLng, store.lat, store.lng) * 100) / 100;
+    const distKm = isValidCoordinate(qLat, qLng)
+      ? Math.round(calculateHaversineKm(qLat, qLng, store.lat, store.lng) * 100) / 100
+      : null;
     const storeProds = await productsRepo.list({ store_id: id, includeWholesale: false });
 
     res.json(
@@ -2257,9 +2504,13 @@ app.put('/api/store-owner/my-store', requireAuth, requireRole(['store_owner']), 
     const {
       name,
       description,
+      email,
       owner_phone,
       address,
       landmark,
+      city,
+      district,
+      state,
       pincode,
       lat,
       lng,
@@ -2277,6 +2528,15 @@ app.put('/api/store-owner/my-store', requireAuth, requireRole(['store_owner']), 
       delivery_info,
       is_open
     } = req.body;
+
+    const cleanEmail = email !== undefined ? String(email).trim() : undefined;
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid store email address.' });
+    }
+    const cleanPincode = pincode !== undefined ? String(pincode).trim() : undefined;
+    if (cleanPincode && !/^\d{6}$/.test(cleanPincode)) {
+      return res.status(400).json({ error: 'Please enter a valid 6-digit Indian PIN code.' });
+    }
 
     let nextLat = store.lat;
     let nextLng = store.lng;
@@ -2338,10 +2598,14 @@ app.put('/api/store-owner/my-store', requireAuth, requireRole(['store_owner']), 
     const patch: Partial<StoreDoc> = {
       ...(name !== undefined && String(name).trim() ? { name: String(name).trim() } : {}),
       ...(description !== undefined ? { description: description ? String(description).trim() : null } : {}),
+      ...(cleanEmail !== undefined ? { email: cleanEmail || null } : {}),
       owner_phone: cleanOwnerPhone,
       ...(address !== undefined && String(address).trim() ? { address: String(address).trim() } : {}),
       ...(landmark !== undefined ? { landmark: landmark ? String(landmark).trim() : null } : {}),
-      ...(pincode !== undefined && String(pincode).trim() ? { pincode: String(pincode).trim() } : {}),
+      ...(city !== undefined ? { city: String(city).trim() } : {}),
+      ...(district !== undefined ? { district: district ? String(district).trim() : null } : {}),
+      ...(state !== undefined ? { state: state ? String(state).trim() : null } : {}),
+      ...(cleanPincode !== undefined ? { pincode: cleanPincode } : {}),
       lat: nextLat,
       lng: nextLng,
       logo_url: nextLogo,
@@ -2394,6 +2658,7 @@ app.post('/api/store-owner/products', requireAuth, requireRole(['store_owner']),
     const {
       category_id,
       name,
+      brand,
       unit,
       price,
       mrp,
@@ -2454,6 +2719,7 @@ app.post('/api/store-owner/products', requireAuth, requireRole(['store_owner']),
       store_id: store.id,
       store_name: store.name,
       name: String(name).trim(),
+      brand: brand ? String(brand).trim().slice(0, 80) : null,
       unit: String(unit).trim(),
       price: numPrice,
       mrp: numMrp,
@@ -2497,6 +2763,7 @@ app.put('/api/store-owner/products/:id', requireAuth, requireRole(['store_owner'
     const {
       category_id,
       name,
+      brand,
       unit,
       price,
       mrp,
@@ -2560,6 +2827,7 @@ app.put('/api/store-owner/products/:id', requireAuth, requireRole(['store_owner'
     const updated = await productsRepo.update(id, {
       ...(category_id !== undefined ? { category_id: Number(category_id) } : {}),
       ...(name ? { name: String(name).trim() } : {}),
+      ...(brand !== undefined ? { brand: brand ? String(brand).trim().slice(0, 80) : null } : {}),
       ...(unit ? { unit: String(unit).trim() } : {}),
       ...(price !== undefined ? { price: numPrice } : {}),
       ...(mrp !== undefined ? { mrp: numMrp } : {}),
@@ -3302,7 +3570,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 FMP Supermart server running on port ${PORT} (${isProduction ? 'Production' : 'Development'})`);
-    console.log(`📍 Serving Karanja Lad, Maharashtra 444105 with Cloud Firestore`);
+    console.log(`📍 Serving India-Wide Hyperlocal Grocery Marketplace with Cloud Firestore`);
   });
 }
 

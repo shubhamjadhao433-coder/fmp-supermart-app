@@ -9,6 +9,7 @@ export interface User {
   store_id?: number | null;
   address?: string;
   landmark?: string;
+  city?: string;
   pincode?: string;
   is_active?: boolean;
   created_at?: string;
@@ -22,11 +23,14 @@ export interface Store {
   owner_id?: number;
   owner_name?: string;
   owner_phone?: string;
+  email?: string | null;
   name: string;
   description?: string | null;
   address: string;
   landmark?: string | null;
   city: string;
+  district?: string | null;
+  state?: string | null;
   pincode: string;
   lat: number;
   lng: number;
@@ -49,7 +53,7 @@ export interface Store {
   // Future monetization flags (strictly disabled during free launch)
   featured?: boolean;
   subscription_tier?: 'free';
-  distance_km?: number;
+  distance_km?: number | null;
   product_count?: number;
   available_product_names?: string[];
   created_at: string;
@@ -122,6 +126,7 @@ export interface Product {
   store_id?: number | null;
   store_name?: string | null;
   name: string;
+  brand?: string | null;
   unit: string;
   price: number | string;
   mrp: number | string;
@@ -501,8 +506,11 @@ export interface OsmLocationSuggestion {
   lng: number;
   category: string;
   landmark?: string;
+  city?: string;
+  district?: string;
+  state?: string;
   postcode?: string;
-  distance_km: number;
+  distance_km: number | null;
   source: 'nominatim' | 'photon';
   is_nearby_fallback?: boolean;
 }
@@ -513,6 +521,9 @@ export interface ReverseGeocodeResponse {
   display_name: string;
   formatted_address: string;
   landmark: string;
+  city?: string;
+  district?: string;
+  state?: string;
   postcode?: string;
   source: 'nominatim' | 'photon' | 'coordinates';
 }

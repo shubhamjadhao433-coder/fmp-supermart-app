@@ -17,10 +17,10 @@
 | Area | File | How It's Protected |
 |---|---|---|
 | Signing Key & Session Invalidation | `src/server/auth.ts` | Requires a strong `JWT_SECRET` (32+ chars) in production and rejects tokens issued prior to any administrative password reset (`password_changed_at`). |
-| Role & Store Ownership Isolation | `server.ts` | Verifies authenticated user identity from Firestore on every protected route, enforces role checks (`admin`, `store_owner`), and scopes store-owner queries and updates to their own `store_id`. |
-| Server-Side Pricing & Order Invariants | `server.ts`, `src/server/firestoreDb.ts` | Computes item prices, savings, store delivery fees, free pickup charges (`0`), and 6-digit pickup verification codes inside atomic Firestore transactions. |
+| Role & Store Ownership Isolation | `server.ts` | Verifies authenticated user identity from Firestore on every protected route, enforces role checks (`admin`, `store_owner`), scopes store-owner updates to their own `store_id`, and restricts Admin product moderation routes (`PUT /api/admin/products/:id/status`, `DELETE /api/admin/products/:id`) strictly to `admin`. |
+| Server-Side Pricing & Order Invariants | `server.ts`, `src/server/firestoreDb.ts` | Computes item prices, savings, store delivery fees, free pickup charges (`0`), stock/availability checks (`is_active !== false && stock > 0`), and 6-digit pickup verification codes inside atomic Firestore transactions. |
 | Retired Central Warehouse & Rider Routes | `server.ts` | Permanently blocks legacy warehouse stock, rider, supplier, and fee calculation endpoints with `410 Gone`. |
-| Production Static Asset Paths | `server.ts` | Dynamically resolves built frontend assets (`dist/index.html`) and PWA assets (`public/`) when running bundled `dist/server.js`. |
+| Production Static Asset & SEO Routes | `server.ts` | Dynamically resolves built frontend assets (`dist/index.html`) and PWA assets (`public/`) when running bundled `dist/server.js`, and serves crawler-safe `/robots.txt` (disallowing `/api/` and `/admin`) and `/sitemap.xml`. |
 | Direct Database Rules Model | `firestore.rules` | Denies direct browser writes to all collections (`allow write: if false`). *(Follow-up: migrate `src/server/firestoreDb.ts` from Firebase Web SDK to `firebase-admin/firestore` before deploying these rules in production.)* |
 
 ---

@@ -7,6 +7,10 @@ import { OsmLocationSuggestion } from '../types.ts';
 
 interface OsmMapPickerChangeMeta {
   landmark?: string;
+  city?: string;
+  district?: string;
+  state?: string;
+  postcode?: string;
   source?: 'search' | 'pin' | 'gps';
 }
 
@@ -73,7 +77,7 @@ function createPinIcon(color: 'emerald' | 'purple' | 'warehouse', label?: string
 
 function isGenericTownAddress(text: string): boolean {
   const clean = text.trim().toLowerCase();
-  return !clean || clean === 'karanja lad, maharashtra' || clean === 'karanja (laad), washim, maharashtra, 444105';
+  return !clean || clean === 'india';
 }
 
 function buildGpsErrorState(err?: GeolocationPositionError | null): GpsErrorState {
@@ -162,7 +166,8 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
     targetLng: number,
     source: 'search' | 'pin' | 'gps',
     fallbackAddress?: string,
-    fallbackLandmark?: string
+    fallbackLandmark?: string,
+    fallbackPlaceMeta?: { city?: string; district?: string; state?: string; postcode?: string }
   ) => {
     const cleanLat = Number(targetLat.toFixed(6));
     const cleanLng = Number(targetLng.toFixed(6));
@@ -179,6 +184,10 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
     // Notify parent immediately so coordinates update & OSRM road distance + fee sync right away
     onChangeRef.current(cleanLat, cleanLng, fallbackAddress, {
       landmark: fallbackLandmark,
+      city: fallbackPlaceMeta?.city,
+      district: fallbackPlaceMeta?.district,
+      state: fallbackPlaceMeta?.state,
+      postcode: fallbackPlaceMeta?.postcode,
       source
     });
 
@@ -200,12 +209,16 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
       const finalAddress =
         fallbackAddress && (!revAddress || isGenericTownAddress(revAddress) || fallbackAddress.length > revAddress.length)
           ? fallbackAddress
-          : revAddress || fallbackAddress || `${cleanLat.toFixed(5)}, ${cleanLng.toFixed(5)}, Karanja (Laad), Maharashtra`;
+          : revAddress || fallbackAddress || `${cleanLat.toFixed(5)}, ${cleanLng.toFixed(5)}, India`;
 
       const finalLandmark = (fallbackLandmark || revLandmark || '').trim() || undefined;
 
       onChangeRef.current(cleanLat, cleanLng, finalAddress, {
         landmark: finalLandmark,
+        city: (rev?.city || fallbackPlaceMeta?.city || '').trim() || undefined,
+        district: (rev?.district || fallbackPlaceMeta?.district || '').trim() || undefined,
+        state: (rev?.state || fallbackPlaceMeta?.state || '').trim() || undefined,
+        postcode: (rev?.postcode || fallbackPlaceMeta?.postcode || '').trim() || undefined,
         source
       });
 
@@ -232,12 +245,18 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
-    const initialLat = Number.isFinite(lat) ? lat : 20.4839;
-    const initialLng = Number.isFinite(lng) ? lng : 77.4877;
+    const hasValidPin = Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
+    const initialLat = hasValidPin ? lat : 20.5937;
+    const initialLng = hasValidPin ? lng : 78.9629;
+    const initialZoom = isLocationConfirmed === false && (!hasValidPin || (Math.abs(initialLat - 20.5937) < 0.01 && Math.abs(initialLng - 78.9629) < 0.01))
+      ? 5
+      : hasValidPin
+      ? 14
+      : 5;
 
     const map = L.map(mapContainerRef.current, {
       center: [initialLat, initialLng],
-      zoom: 14,
+      zoom: initialZoom,
       zoomControl: true
     });
 
@@ -283,7 +302,7 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
     const pinMarker = pinMarkerRef.current;
     if (!map || !pinMarker) return;
 
-    const validPin = Number.isFinite(lat) && Number.isFinite(lng);
+    const validPin = Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
     if (validPin) {
       const current = pinMarker.getLatLng();
       if (Math.abs(current.lat - lat) > 0.00001 || Math.abs(current.lng - lng) > 0.00001) {
@@ -343,16 +362,25 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
     setShowDropdown(true);
 
     try {
-      const refLat =
+      const rawRefLat =
         typeof warehouseLatRef.current === 'number' && Number.isFinite(warehouseLatRef.current)
           ? warehouseLatRef.current
           : lat;
-      const refLng =
+      const rawRefLng =
         typeof warehouseLngRef.current === 'number' && Number.isFinite(warehouseLngRef.current)
           ? warehouseLngRef.current
           : lng;
+      const hasSearchBias =
+        Number.isFinite(rawRefLat) &&
+        Number.isFinite(rawRefLng) &&
+        !(rawRefLat === 0 && rawRefLng === 0) &&
+        !(Math.abs(rawRefLat - 20.5937) < 0.01 && Math.abs(rawRefLng - 78.9629) < 0.01);
 
-      const data = await api.searchLocations(q, refLat, refLng);
+      const data = await api.searchLocations(
+        q,
+        hasSearchBias ? rawRefLat : undefined,
+        hasSearchBias ? rawRefLng : undefined
+      );
       if (seq !== searchSeqRef.current) return;
 
       const list = Array.isArray(data?.results) ? data.results : [];
@@ -468,7 +496,7 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
     if (e) e.preventDefault();
     const q = searchText.trim();
     if (q.length < 2) {
-      setSearchError('Enter at least 2 characters (e.g. Shivaji Chowk, Guru Mandir, Station Road).');
+      setSearchError('Enter at least 2 characters (city, village, area, landmark, or 6-digit PIN).');
       return;
     }
     executeSearch(q);
@@ -485,7 +513,13 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
       item.lng,
       'search',
       item.display_name,
-      item.landmark || item.title
+      item.landmark || item.title,
+      {
+        city: item.city,
+        district: item.district,
+        state: item.state,
+        postcode: item.postcode
+      }
     );
   };
 
@@ -524,7 +558,7 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
                     setShowDropdown(false);
                   }
                 }}
-                placeholder="Search area, chowk, temple, road in Karanja Lad..."
+                placeholder="Search any Indian city, village, area, landmark, or PIN code..."
                 className="w-full pl-8 pr-7 py-2 bg-white border border-gray-200 rounded-xl text-xs focus:border-emerald-500 outline-hidden"
               />
               {searchText && (
@@ -565,7 +599,7 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
               {searching && (
                 <div className="px-3 py-2.5 flex items-center gap-2 text-gray-500 font-medium">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-600 shrink-0" />
-                  <span>Searching OpenStreetMap areas & landmarks in Karanja (Laad)...</span>
+                  <span>Searching OpenStreetMap locations across India...</span>
                 </div>
               )}
 
@@ -593,9 +627,11 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
                       <div className="text-[10px] text-gray-500 line-clamp-1 mt-0.5">{item.subtitle}</div>
                     </div>
                   </div>
-                  <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded shrink-0">
-                    {item.distance_km} km
-                  </span>
+                  {typeof item.distance_km === 'number' && Number.isFinite(item.distance_km) && (
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded shrink-0">
+                      {item.distance_km} km
+                    </span>
+                  )}
                 </button>
               ))}
 
@@ -603,7 +639,7 @@ export const OsmMapPicker: React.FC<OsmMapPickerProps> = ({
                 <div className="px-3 py-2.5 text-[11px] text-amber-900 bg-amber-50/70 space-y-1">
                   <div className="font-bold">No exact landmark matched "{searchText.trim()}" on OpenStreetMap.</div>
                   <div className="text-[10px] text-amber-800">
-                    Try a shorter name (e.g. "Guru Mandir", "Mangrulpir", "Station"), tap <strong>Use My Current Location</strong>, or click/drag the pin directly on the map below.
+                    Try searching your city, town, village, or 6-digit PIN code, tap <strong>Use My Current Location</strong>, or click/drag the pin directly on the map below.
                   </div>
                 </div>
               )}

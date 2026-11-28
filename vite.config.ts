@@ -15,9 +15,9 @@ export default defineConfig(() => {
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
           id: '/',
-          name: 'FMP Supermart - Karanja Lad Grocery Delivery',
+          name: 'FMP Supermart - India Hyperlocal Grocery Marketplace',
           short_name: 'FMP Mart',
-          description: 'Complete grocery e-commerce and fast doorstep delivery platform for Karanja Lad, Maharashtra 444105.',
+          description: "India's hyperlocal multi-store grocery and kirana marketplace connecting customers with independent local stores across cities, towns, and villages.",
           theme_color: '#059669',
           background_color: '#ffffff',
           display: 'standalone',

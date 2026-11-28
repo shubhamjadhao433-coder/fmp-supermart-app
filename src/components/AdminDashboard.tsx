@@ -58,6 +58,7 @@ type AdminTab =
   | 'overview'
   | 'orders'
   | 'stores'
+  | 'products'
   | 'customers'
   | 'categories'
   | 'complaints'
@@ -121,7 +122,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     platform_name: 'FMP Supermart',
     support_phone: '9699925206',
     support_email: 'support@fmpsupermart.in',
-    city: 'Karanja Lad',
+    city: 'All India',
     require_store_approval: true,
     store_visibility_rule: 'approved_active_valid_location',
     service_available: true,
@@ -161,6 +162,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Tab: Inventory movement logs
   const [inventoryLogs, setInventoryLogs] = useState<any[]>([]);
+
+  // Tab: Products Moderation state
+  const [productSearch, setProductSearch] = useState<string>('');
+  const [productStoreFilter, setProductStoreFilter] = useState<string>('all');
+  const [productAvailabilityFilter, setProductAvailabilityFilter] = useState<'all' | 'available' | 'unavailable'>('all');
+  const [moderatingProductId, setModeratingProductId] = useState<number | null>(null);
 
   // Load all admin data
   const loadAdminData = async () => {
@@ -549,11 +556,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     FMP <span className="text-purple-300">Admin Console</span>
                   </h1>
                   <span className="bg-purple-800 text-purple-200 text-[10px] font-bold px-2 py-0.5 rounded-full border border-purple-700">
-                    Karanja Lad
+                    All India
                   </span>
                 </div>
                 <p className="text-[11px] text-purple-200 truncate">
-                  Hyperlocal Marketplace Platform (444105) • Admin: {currentUser?.phone || '9699925206'}
+                  India-Wide Hyperlocal Marketplace • Admin: {currentUser?.phone || '9699925206'}
                 </p>
               </div>
             </div>
@@ -714,6 +721,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </button>
 
+              {/* Tab: Products Moderation */}
+              <button
+                onClick={() => setActiveTab('products')}
+                className={`px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  activeTab === 'products'
+                    ? 'bg-purple-600 text-white font-black shadow-xs'
+                    : 'text-purple-200 hover:bg-purple-900/60'
+                }`}
+              >
+                <ShoppingBag className="w-4 h-4" />
+                <span>Products</span>
+                <span className="text-[10px] bg-purple-800 text-purple-200 px-1.5 py-0.2 rounded-full font-bold">
+                  {products.length}
+                </span>
+              </button>
+
               {/* Tab 3: Customers */}
               <button
                 onClick={() => setActiveTab('customers')}
@@ -841,7 +864,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="space-y-5 min-w-0">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <h2 className="text-base sm:text-lg font-extrabold text-gray-900">Marketplace Overview — Karanja Lad</h2>
+                <h2 className="text-base sm:text-lg font-extrabold text-gray-900">Marketplace Overview — India-Wide</h2>
                 <p className="text-xs text-gray-500">
                   Real-time operational health across registered kirana stores, customers, products, and orders (Free Launch Mode)
                 </p>
@@ -881,8 +904,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 { label: 'Pending Stores', value: p.pending_stores, sub: 'Awaiting approval', color: 'text-amber-700', tab: 'stores' as AdminTab },
                 { label: 'Rejected Stores', value: p.rejected_stores, sub: 'Declined registrations', color: 'text-red-600', tab: 'stores' as AdminTab },
                 { label: 'Suspended Stores', value: p.suspended_stores, sub: 'Temporarily paused', color: 'text-orange-700', tab: 'stores' as AdminTab },
-                { label: 'Total Products', value: p.total_products, sub: 'All catalog SKUs', color: 'text-indigo-900', tab: 'inventory' as AdminTab },
-                { label: 'Active Products', value: p.active_products, sub: 'Visible & listed', color: 'text-emerald-700', tab: 'inventory' as AdminTab },
+                { label: 'Total Products', value: p.total_products, sub: 'All catalog SKUs', color: 'text-indigo-900', tab: 'products' as AdminTab },
+                { label: 'Active Products', value: p.active_products, sub: 'Visible & listed', color: 'text-emerald-700', tab: 'products' as AdminTab },
                 { label: 'Total Orders', value: p.total_orders, sub: 'All marketplace orders', color: 'text-purple-900', tab: 'orders' as AdminTab },
                 { label: 'Pending Orders', value: p.pending_orders, sub: 'Placed / Confirmed / Packed', color: 'text-amber-700', tab: 'orders' as AdminTab },
                 { label: 'Completed Orders', value: p.completed_orders, sub: 'Delivered successfully', color: 'text-emerald-700', tab: 'orders' as AdminTab },
@@ -1645,6 +1668,200 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB: PRODUCTS MODERATION */}
+        {/* ======================================================== */}
+        {activeTab === 'products' && (
+          <div className="space-y-4 min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-gray-900">Marketplace Products Moderation ({products.length})</h2>
+                <p className="text-xs text-gray-500">
+                  Review store product listings, toggle availability, or soft-delete policy-violating SKUs across all partner stores
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {(['all', 'available', 'unavailable'] as const).map(f => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setProductAvailabilityFilter(f)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize cursor-pointer ${
+                      productAvailabilityFilter === f
+                        ? 'bg-purple-700 text-white'
+                        : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  value={productSearch}
+                  onChange={e => setProductSearch(e.target.value)}
+                  placeholder="Search product name, brand, store, or category..."
+                  className="w-full pl-9 pr-3 py-2 bg-white border border-gray-200 rounded-xl text-xs outline-hidden focus:border-purple-600"
+                />
+              </div>
+              <select
+                value={productStoreFilter}
+                onChange={e => setProductStoreFilter(e.target.value)}
+                className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold"
+              >
+                <option value="all">All Partner Stores</option>
+                {adminStores.map(st => (
+                  <option key={st.id} value={String(st.id)}>
+                    {st.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {(() => {
+              const filteredAdminProducts = products.filter(prod => {
+                const isAvail = prod.is_active !== false && Number(prod.stock) > 0;
+                if (productAvailabilityFilter === 'available' && !isAvail) return false;
+                if (productAvailabilityFilter === 'unavailable' && isAvail) return false;
+                if (productStoreFilter !== 'all' && String(prod.store_id ?? '') !== productStoreFilter) return false;
+                if (productSearch.trim()) {
+                  const q = productSearch.toLowerCase();
+                  return (
+                    prod.name.toLowerCase().includes(q) ||
+                    (prod.brand || '').toLowerCase().includes(q) ||
+                    (prod.store_name || '').toLowerCase().includes(q) ||
+                    (prod.category_name || '').toLowerCase().includes(q)
+                  );
+                }
+                return true;
+              });
+
+              if (filteredAdminProducts.length === 0) {
+                return (
+                  <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-400 text-xs">
+                    No matching products found.
+                  </div>
+                );
+              }
+
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {filteredAdminProducts.map(prod => {
+                    const isAvail = prod.is_active !== false && Number(prod.stock) > 0;
+                    const busy = moderatingProductId === prod.id;
+                    return (
+                      <div key={prod.id} className="bg-white rounded-2xl border border-gray-200 p-3.5 flex gap-3 shadow-xs min-w-0">
+                        <div className="w-16 h-16 rounded-xl bg-gray-100 border border-gray-200 overflow-hidden shrink-0 flex items-center justify-center">
+                          {prod.image_url ? (
+                            <img
+                              src={prod.image_url}
+                              alt={prod.name}
+                              className="w-full h-full object-cover"
+                              onError={e => {
+                                (e.currentTarget as HTMLImageElement).style.display = 'none';
+                              }}
+                            />
+                          ) : (
+                            <Package className="w-6 h-6 text-gray-400" />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0 space-y-1.5">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-extrabold text-xs sm:text-sm text-gray-900 truncate">{prod.name}</div>
+                              <div className="text-[11px] text-gray-500 truncate">
+                                {prod.brand ? `${prod.brand} • ` : ''}{prod.category_name || 'Grocery'} • {prod.unit}
+                              </div>
+                              <div className="text-[11px] font-semibold text-purple-800 truncate">
+                                Store: {prod.store_name || (prod.store_id ? `Store #${prod.store_id}` : 'Marketplace')}
+                              </div>
+                            </div>
+                            <span
+                              className={`px-2 py-0.5 rounded-lg text-[10px] font-bold shrink-0 ${
+                                isAvail ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'
+                              }`}
+                            >
+                              {isAvail ? 'Available' : prod.is_active === false ? 'Disabled' : 'Out of Stock'}
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-black text-gray-900">₹{prod.price}</span>
+                            {Number(prod.mrp) > Number(prod.price) && (
+                              <span className="text-[11px] text-gray-400 line-through">₹{prod.mrp}</span>
+                            )}
+                            <span className="text-[11px] font-semibold text-gray-600">
+                              Stock: {prod.stock} {prod.unit}
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={async () => {
+                                const nextStatus = prod.is_active === false;
+                                setModeratingProductId(prod.id);
+                                try {
+                                  await api.adminUpdateProductStatus(prod.id, nextStatus);
+                                  showToast(nextStatus ? `${prod.name} enabled.` : `${prod.name} disabled.`);
+                                  await loadAdminData();
+                                } catch (err: any) {
+                                  showToast(err?.message || 'Failed to update product status.', 'error');
+                                } finally {
+                                  setModeratingProductId(null);
+                                }
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer disabled:opacity-50 ${
+                                prod.is_active === false
+                                  ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                  : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200'
+                              }`}
+                            >
+                              {prod.is_active === false ? 'Enable Product' : 'Disable Product'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() =>
+                                setConfirmDialog({
+                                  title: 'Delete Product?',
+                                  message: `Remove "${prod.name}" from marketplace visibility? Historical order snapshots remain intact.`,
+                                  onConfirm: async () => {
+                                    setModeratingProductId(prod.id);
+                                    try {
+                                      await api.adminDeleteProduct(prod.id);
+                                      showToast(`${prod.name} removed from marketplace.`);
+                                      await loadAdminData();
+                                    } catch (err: any) {
+                                      showToast(err?.message || 'Failed to delete product.', 'error');
+                                    } finally {
+                                      setModeratingProductId(null);
+                                    }
+                                  }
+                                })
+                              }
+                              className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Delete</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -2457,7 +2674,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div key={p.id} className="p-2.5 bg-white border border-gray-200 rounded-xl flex items-center justify-between gap-2">
                       <div className="min-w-0">
                         <div className="font-bold text-gray-900 truncate">{p.name}</div>
-                        <div className="text-[10px] text-gray-500">{p.unit} • Stock: {p.stock}</div>
+                        <div className="text-[10px] text-gray-500">
+                          {p.brand ? `${p.brand} • ` : ''}{p.unit} • Stock: {p.stock}
+                        </div>
                       </div>
                       <span className="font-black text-emerald-700 shrink-0">₹{p.price}</span>
                     </div>

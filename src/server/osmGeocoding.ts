@@ -9,8 +9,11 @@ export interface OsmSuggestion {
   lng: number;
   category: string;
   landmark?: string;
+  city?: string;
+  district?: string;
+  state?: string;
   postcode?: string;
-  distance_km: number;
+  distance_km: number | null;
   source: 'nominatim' | 'photon';
   is_nearby_fallback?: boolean;
 }
@@ -21,11 +24,14 @@ export interface ReverseGeocodeResult {
   display_name: string;
   formatted_address: string;
   landmark: string;
+  city?: string;
+  district?: string;
+  state?: string;
   postcode?: string;
   source: 'nominatim' | 'photon' | 'coordinates';
 }
 
-const USER_AGENT = 'FMP-Supermart-Karanja-Lad/1.0 (https://fmpsupermart.in)';
+const USER_AGENT = 'FMP-Supermart-India/1.0 (https://fmpsupermart.in)';
 
 interface CacheEntry<T> {
   expiresAt: number;
@@ -43,6 +49,9 @@ function formatDistanceLabel(km: number): number {
 function buildCompactAddress(addr: Record<string, any> | undefined, fallbackName: string): {
   formatted: string;
   landmark: string;
+  city?: string;
+  district?: string;
+  state?: string;
   postcode?: string;
 } {
   if (!addr || typeof addr !== 'object') {
@@ -66,10 +75,10 @@ function buildCompactAddress(addr: Record<string, any> | undefined, fallbackName
     addr.hamlet ||
     addr.village ||
     '';
-  const town = addr.town || addr.city || addr.municipality || addr.county || 'Karanja (Laad)';
-  const district = addr.state_district || '';
-  const state = addr.state || 'Maharashtra';
-  const postcode = addr.postcode ? String(addr.postcode) : undefined;
+  const town = String(addr.city || addr.town || addr.municipality || addr.village || addr.county || '').trim();
+  const district = String(addr.state_district || addr.county || '').trim();
+  const state = String(addr.state || '').trim();
+  const postcode = addr.postcode ? String(addr.postcode).trim() : undefined;
 
   const parts: string[] = [];
   for (const part of [poi, road, area, town, district && district !== town ? district : '', state, postcode]) {
@@ -81,7 +90,14 @@ function buildCompactAddress(addr: Record<string, any> | undefined, fallbackName
 
   const formatted = parts.length > 0 ? parts.join(', ') : fallbackName;
   const landmark = String(poi || road || area || town || '').trim();
-  return { formatted, landmark, postcode };
+  return {
+    formatted,
+    landmark,
+    city: town || undefined,
+    district: district || undefined,
+    state: state || undefined,
+    postcode
+  };
 }
 
 function categorizeType(rawClass?: string, rawType?: string): string {
@@ -93,7 +109,7 @@ function categorizeType(rawClass?: string, rawType?: string): string {
   if (c === 'amenity' || c === 'shop' || c === 'tourism' || c === 'historic' || t === 'place_of_worship') {
     return 'Landmark';
   }
-  if (c === 'place' || c === 'boundary' || ['town', 'village', 'hamlet', 'suburb', 'neighbourhood', 'locality'].includes(t)) {
+  if (c === 'place' || c === 'boundary' || ['city', 'town', 'village', 'hamlet', 'suburb', 'neighbourhood', 'locality'].includes(t)) {
     return 'Area / Locality';
   }
   if (c === 'railway' || t.includes('station') || t.includes('bus')) {
@@ -124,16 +140,24 @@ async function fetchJsonWithTimeout(url: string, timeoutMs = 4500): Promise<any 
   }
 }
 
-function mapNominatimItem(item: any, refLat: number, refLng: number, isNearbyFallback = false): OsmSuggestion | null {
+function mapNominatimItem(
+  item: any,
+  refLat?: number,
+  refLng?: number,
+  isNearbyFallback = false
+): OsmSuggestion | null {
   const lat = Number(parseFloat(item?.lat).toFixed(6));
   const lng = Number(parseFloat(item?.lon).toFixed(6));
   if (!isValidCoordinate(lat, lng)) return null;
 
-  const dist = formatDistanceLabel(calculateHaversineKm(refLat, refLng, lat, lng));
+  const hasRef = isValidCoordinate(refLat, refLng);
+  const dist = hasRef
+    ? formatDistanceLabel(calculateHaversineKm(Number(refLat), Number(refLng), lat, lng))
+    : null;
   const displayName = String(item?.display_name || '').trim();
   if (!displayName) return null;
 
-  const { formatted, landmark, postcode } = buildCompactAddress(item?.address, displayName);
+  const { formatted, landmark, city, district, state, postcode } = buildCompactAddress(item?.address, displayName);
   const parts = displayName.split(',').map((s: string) => s.trim()).filter(Boolean);
   const title = String(item?.name || parts[0] || formatted).trim();
   const subtitleParts = parts.filter(p => p.toLowerCase() !== title.toLowerCase()).slice(0, 4);
@@ -147,6 +171,9 @@ function mapNominatimItem(item: any, refLat: number, refLng: number, isNearbyFal
     lng,
     category: categorizeType(item?.class || item?.category, item?.type),
     landmark: landmark || title,
+    city,
+    district,
+    state,
     postcode,
     distance_km: dist,
     source: 'nominatim',
@@ -154,7 +181,12 @@ function mapNominatimItem(item: any, refLat: number, refLng: number, isNearbyFal
   };
 }
 
-function mapPhotonFeature(feature: any, refLat: number, refLng: number, isNearbyFallback = false): OsmSuggestion | null {
+function mapPhotonFeature(
+  feature: any,
+  refLat?: number,
+  refLng?: number,
+  isNearbyFallback = false
+): OsmSuggestion | null {
   const coords = feature?.geometry?.coordinates;
   if (!Array.isArray(coords) || coords.length < 2) return null;
   const lng = Number(parseFloat(coords[0]).toFixed(6));
@@ -167,21 +199,28 @@ function mapPhotonFeature(feature: any, refLat: number, refLng: number, isNearby
   if (countryCode && countryCode !== 'in') return null;
   if (!countryCode && country && country !== 'india') return null;
 
-  const dist = formatDistanceLabel(calculateHaversineKm(refLat, refLng, lat, lng));
-  // Ignore unrelated distant matches across India (> 120 km away)
-  if (dist > 120) return null;
+  const hasRef = isValidCoordinate(refLat, refLng);
+  const dist = hasRef
+    ? formatDistanceLabel(calculateHaversineKm(Number(refLat), Number(refLng), lat, lng))
+    : null;
 
-  const name = String(props.name || props.street || props.locality || props.city || '').trim();
+  const name = String(props.name || props.street || props.locality || props.city || props.district || '').trim();
   if (!name) return null;
+
+  const city = String(props.city || props.town || props.village || '').trim() || undefined;
+  const district = String(props.district || props.county || '').trim() || undefined;
+  const state = String(props.state || '').trim() || undefined;
+  const postcode = props.postcode ? String(props.postcode).trim() : undefined;
 
   const addressParts: string[] = [];
   for (const field of [
     props.name,
     props.street,
-    props.locality || props.district,
-    props.city || props.county || 'Karanja (Laad)',
-    props.state || 'Maharashtra',
-    props.postcode
+    props.locality || props.suburb,
+    city,
+    district && district !== city ? district : '',
+    state,
+    postcode
   ]) {
     const clean = typeof field === 'string' ? field.trim() : '';
     if (clean && !addressParts.some(p => p.toLowerCase() === clean.toLowerCase())) {
@@ -189,7 +228,7 @@ function mapPhotonFeature(feature: any, refLat: number, refLng: number, isNearby
     }
   }
 
-  const formatted = addressParts.join(', ');
+  const formatted = addressParts.join(', ') || name;
   const subtitle = addressParts
     .filter(p => p.toLowerCase() !== name.toLowerCase())
     .slice(0, 4)
@@ -204,7 +243,10 @@ function mapPhotonFeature(feature: any, refLat: number, refLng: number, isNearby
     lng,
     category: categorizeType(props.osm_key, props.osm_value),
     landmark: String(props.street || props.locality || name).trim(),
-    postcode: props.postcode ? String(props.postcode) : undefined,
+    city,
+    district,
+    state,
+    postcode,
     distance_km: dist,
     source: 'photon',
     is_nearby_fallback: isNearbyFallback
@@ -228,7 +270,6 @@ function deduplicateAndRank(items: OsmSuggestion[], query: string): OsmSuggestio
     if (!duplicate) {
       unique.push(item);
     } else if (item.source === 'nominatim' && duplicate.source !== 'nominatim') {
-      // Prefer Nominatim metadata when both describe same coordinate
       const idx = unique.indexOf(duplicate);
       unique[idx] = item;
     }
@@ -236,145 +277,99 @@ function deduplicateAndRank(items: OsmSuggestion[], query: string): OsmSuggestio
 
   return unique
     .map(item => {
-      const haystack = `${item.title} ${item.subtitle} ${item.display_name}`.toLowerCase();
+      const haystack = `${item.title} ${item.subtitle} ${item.display_name} ${item.postcode || ''}`.toLowerCase();
       const matchCount = tokens.reduce((acc, t) => acc + (haystack.includes(t) ? 1 : 0), 0);
       const titleStarts = tokens.some(t => item.title.toLowerCase().startsWith(t)) ? 2 : 0;
-      const inKaranja = /karanja|444105/.test(haystack) ? 3 : 0;
-      const localBonus = item.distance_km <= 10 ? 5 : item.distance_km <= 25 ? 2 : 0;
+      const postcodeExact = /^\d{6}$/.test(query.trim()) && item.postcode === query.trim() ? 6 : 0;
+      const localBonus =
+        typeof item.distance_km === 'number'
+          ? item.distance_km <= 10
+            ? 3
+            : item.distance_km <= 30
+            ? 1
+            : 0
+          : 0;
+      const distPenalty = typeof item.distance_km === 'number' ? item.distance_km * 0.005 : 0;
       const fallbackPenalty = item.is_nearby_fallback ? -3 : 0;
-      const score = matchCount * 2 + titleStarts + inKaranja + localBonus + fallbackPenalty - item.distance_km * 0.05;
+      const score = matchCount * 3 + titleStarts + postcodeExact + localBonus + fallbackPenalty - distPenalty;
       return { item, score };
     })
-    .sort((a, b) => b.score - a.score || a.item.distance_km - b.item.distance_km)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const dA = a.item.distance_km ?? Number.MAX_SAFE_INTEGER;
+      const dB = b.item.distance_km ?? Number.MAX_SAFE_INTEGER;
+      return dA - dB;
+    })
     .map(entry => entry.item)
     .slice(0, 10);
 }
 
 /**
- * Multi-strategy OpenStreetMap geocoding (Nominatim + Photon) tailored for Karanja Lad
- * and nearby areas in Washim/Maharashtra. Zero paid APIs, zero mock coordinates.
+ * Pan-India OpenStreetMap geocoding (Nominatim + Photon).
+ * Supports cities, towns, villages, districts, states, landmarks, and 6-digit Indian PIN codes.
  */
 export async function searchOsmLocations(
   rawQuery: string,
-  refLat: number,
-  refLng: number
+  refLat?: number,
+  refLng?: number
 ): Promise<OsmSuggestion[]> {
   const q = rawQuery.trim();
   if (q.length < 2) return [];
 
-  const cacheKey = `${q.toLowerCase()}@${refLat.toFixed(3)},${refLng.toFixed(3)}`;
+  const hasRef = isValidCoordinate(refLat, refLng);
+  const cacheKey = hasRef
+    ? `${q.toLowerCase()}@${Number(refLat).toFixed(2)},${Number(refLng).toFixed(2)}`
+    : `${q.toLowerCase()}@india`;
   const cached = searchCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.value;
   }
 
-  // Normalize "Karanja Lad" / "Karanja Laad" wording for Nominatim compatibility
-  const hasKaranjaHint = /\bkaranja\b|\b444105\b|\bwashim\b/i.test(q);
-  const karanjaAwareQuery = q.replace(/\bkaranja\s+lad\b/gi, 'Karanja');
+  const isPinQuery = /^\d{6}$/.test(q);
+  const nomQueryUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=10&countrycodes=in&q=${encodeURIComponent(q)}`;
+  const nomPostalUrl = isPinQuery
+    ? `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&countrycodes=in&postalcode=${encodeURIComponent(q)}`
+    : null;
+  const photonBias = hasRef ? `&lat=${Number(refLat)}&lon=${Number(refLng)}` : '';
+  const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}${photonBias}&limit=10`;
 
-  // Local viewbox (~20km around warehouse/Karanja Lad)
-  const left = (refLng - 0.16).toFixed(4);
-  const top = (refLat + 0.16).toFixed(4);
-  const right = (refLng + 0.16).toFixed(4);
-  const bottom = (refLat - 0.16).toFixed(4);
-  const viewbox = `${left},${top},${right},${bottom}`;
-
-  // Parallel OpenStreetMap lookups (Nominatim local viewbox + Photon prefix/fuzzy geo-biased)
-  const nomLocalUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&countrycodes=in&viewbox=${viewbox}&bounded=1&q=${encodeURIComponent(karanjaAwareQuery)}`;
-  const photonPrimaryUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${refLat}&lon=${refLng}&limit=10`;
-  const photonLocalUrl = hasKaranjaHint
-    ? null
-    : `https://photon.komoot.io/api/?q=${encodeURIComponent(`${q} Karanja`)}&lat=${refLat}&lon=${refLng}&limit=8`;
-
-  const [nomLocalData, photonPrimaryData, photonLocalData] = await Promise.all([
-    fetchJsonWithTimeout(nomLocalUrl, 4500),
-    fetchJsonWithTimeout(photonPrimaryUrl, 4000),
-    photonLocalUrl ? fetchJsonWithTimeout(photonLocalUrl, 4000) : Promise.resolve(null)
+  const [nomData, nomPostalData, photonData] = await Promise.all([
+    fetchJsonWithTimeout(nomQueryUrl, 4500),
+    nomPostalUrl ? fetchJsonWithTimeout(nomPostalUrl, 4500) : Promise.resolve(null),
+    fetchJsonWithTimeout(photonUrl, 4000)
   ]);
 
   const collected: OsmSuggestion[] = [];
 
-  if (Array.isArray(nomLocalData)) {
-    for (const row of nomLocalData) {
+  if (Array.isArray(nomPostalData)) {
+    for (const row of nomPostalData) {
       const mapped = mapNominatimItem(row, refLat, refLng);
       if (mapped) collected.push(mapped);
     }
   }
 
-  if (Array.isArray(photonPrimaryData?.features)) {
-    for (const f of photonPrimaryData.features) {
+  if (Array.isArray(nomData)) {
+    for (const row of nomData) {
+      const mapped = mapNominatimItem(row, refLat, refLng);
+      if (mapped) collected.push(mapped);
+    }
+  }
+
+  if (Array.isArray(photonData?.features)) {
+    for (const f of photonData.features) {
       const mapped = mapPhotonFeature(f, refLat, refLng);
       if (mapped) collected.push(mapped);
     }
   }
 
-  if (Array.isArray(photonLocalData?.features)) {
-    for (const f of photonLocalData.features) {
-      const mapped = mapPhotonFeature(f, refLat, refLng);
-      if (mapped) collected.push(mapped);
-    }
-  }
-
-  // If few local matches (< 3), run secondary Nominatim query with Karanja / Washim context (unbounded viewbox)
-  const localMatchesCount = collected.filter(c => c.distance_km <= 20).length;
-  if (localMatchesCount < 3) {
-    const contextualQuery = hasKaranjaHint
-      ? `${karanjaAwareQuery}, Maharashtra`
-      : `${karanjaAwareQuery}, Karanja, Washim, Maharashtra`;
-    const nomContextUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&countrycodes=in&viewbox=${viewbox}&q=${encodeURIComponent(contextualQuery)}`;
-    const nomContextData = await fetchJsonWithTimeout(nomContextUrl, 4500);
-    if (Array.isArray(nomContextData)) {
-      for (const row of nomContextData) {
+  // Secondary India-qualified lookup if initial matches are sparse (helps smaller towns/villages)
+  if (collected.length < 3 && !/\bindia\b/i.test(q) && !isPinQuery) {
+    const nomIndiaUrl = `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&countrycodes=in&q=${encodeURIComponent(`${q}, India`)}`;
+    const nomIndiaData = await fetchJsonWithTimeout(nomIndiaUrl, 4000);
+    if (Array.isArray(nomIndiaData)) {
+      for (const row of nomIndiaData) {
         const mapped = mapNominatimItem(row, refLat, refLng);
-        if (mapped && mapped.distance_km <= 120) collected.push(mapped);
-      }
-    }
-  }
-
-  // If no local match within 15 km (e.g. micro-local chowk/gali like "Shivaji Chowk"), include local relaxed/nearby OSM areas
-  if (!collected.some(c => c.distance_km <= 15)) {
-    const noiseWords = new Set([
-      'chowk', 'chauk', 'nagar', 'colony', 'gali', 'lane', 'street', 'st',
-      'road', 'rd', 'marg', 'karanja', 'lad', 'laad', 'maharashtra', 'india',
-      'near', 'opp', 'opposite', 'behind', 'front', 'ward', 'area', 'sector'
-    ]);
-    const meaningfulTokens = q
-      .toLowerCase()
-      .replace(/[^\w\s]/g, ' ')
-      .split(/\s+/)
-      .filter(t => t.length >= 3 && !noiseWords.has(t));
-
-    if (meaningfulTokens.length > 0) {
-      const tokenQuery = `${meaningfulTokens[0]} Karanja`;
-      const [phoTokenData, nomTokenData] = await Promise.all([
-        fetchJsonWithTimeout(`https://photon.komoot.io/api/?q=${encodeURIComponent(tokenQuery)}&lat=${refLat}&lon=${refLng}&limit=6`, 3500),
-        fetchJsonWithTimeout(`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&countrycodes=in&viewbox=${viewbox}&bounded=1&q=${encodeURIComponent(meaningfulTokens[0])}`, 3500)
-      ]);
-      if (Array.isArray(phoTokenData?.features)) {
-        for (const f of phoTokenData.features) {
-          const mapped = mapPhotonFeature(f, refLat, refLng, true);
-          if (mapped && mapped.distance_km <= 35) collected.push(mapped);
-        }
-      }
-      if (Array.isArray(nomTokenData)) {
-        for (const row of nomTokenData) {
-          const mapped = mapNominatimItem(row, refLat, refLng, true);
-          if (mapped) collected.push(mapped);
-        }
-      }
-    }
-
-    // Final local fallback: show real OSM Karanja town landmarks/centers so customer can pan/drop pin quickly
-    if (!collected.some(c => c.distance_km <= 15)) {
-      const karanjaBase = await fetchJsonWithTimeout(
-        `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&countrycodes=in&viewbox=${viewbox}&bounded=1&q=${encodeURIComponent('Karanja')}`,
-        3500
-      );
-      if (Array.isArray(karanjaBase)) {
-        for (const row of karanjaBase) {
-          const mapped = mapNominatimItem(row, refLat, refLng, true);
-          if (mapped) collected.push(mapped);
-        }
+        if (mapped) collected.push(mapped);
       }
     }
   }
@@ -387,7 +382,7 @@ export async function searchOsmLocations(
 }
 
 /**
- * Reverse-geocodes coordinates to a structured local address and landmark using Nominatim (with Photon fallback).
+ * Reverse-geocodes coordinates anywhere in India using Nominatim (with Photon fallback).
  */
 export async function reverseGeocodeOsm(lat: number, lng: number): Promise<ReverseGeocodeResult> {
   const cleanLat = Number(lat.toFixed(6));
@@ -403,13 +398,16 @@ export async function reverseGeocodeOsm(lat: number, lng: number): Promise<Rever
   const nomData = await fetchJsonWithTimeout(nomUrl, 4500);
   if (nomData && (nomData.display_name || nomData.address)) {
     const rawDisplay = String(nomData.display_name || '').trim();
-    const { formatted, landmark, postcode } = buildCompactAddress(nomData.address, rawDisplay);
+    const { formatted, landmark, city, district, state, postcode } = buildCompactAddress(nomData.address, rawDisplay);
     const result: ReverseGeocodeResult = {
       lat: cleanLat,
       lng: cleanLng,
       display_name: rawDisplay || formatted,
       formatted_address: formatted,
       landmark,
+      city,
+      district,
+      state,
       postcode,
       source: 'nominatim'
     };
@@ -417,7 +415,6 @@ export async function reverseGeocodeOsm(lat: number, lng: number): Promise<Rever
     return result;
   }
 
-  // Fallback to Photon reverse geocode
   const photonUrl = `https://photon.komoot.io/reverse?lat=${cleanLat}&lon=${cleanLng}`;
   const photonData = await fetchJsonWithTimeout(photonUrl, 4000);
   const firstFeature = photonData?.features?.[0];
@@ -430,6 +427,9 @@ export async function reverseGeocodeOsm(lat: number, lng: number): Promise<Rever
         display_name: mapped.display_name,
         formatted_address: mapped.display_name,
         landmark: mapped.landmark || mapped.title,
+        city: mapped.city,
+        district: mapped.district,
+        state: mapped.state,
         postcode: mapped.postcode,
         source: 'photon'
       };
@@ -441,10 +441,9 @@ export async function reverseGeocodeOsm(lat: number, lng: number): Promise<Rever
   return {
     lat: cleanLat,
     lng: cleanLng,
-    display_name: `Karanja (Laad), Maharashtra 444105 (${cleanLat.toFixed(4)}, ${cleanLng.toFixed(4)})`,
-    formatted_address: `Pinned Location (${cleanLat.toFixed(4)}, ${cleanLng.toFixed(4)}), Karanja Lad, Maharashtra 444105`,
-    landmark: 'Karanja Lad',
-    postcode: '444105',
+    display_name: `Pinned Location (${cleanLat.toFixed(4)}, ${cleanLng.toFixed(4)}), India`,
+    formatted_address: `Pinned Location (${cleanLat.toFixed(4)}, ${cleanLng.toFixed(4)}), India`,
+    landmark: '',
     source: 'coordinates'
   };
 }

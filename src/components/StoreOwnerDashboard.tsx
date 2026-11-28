@@ -89,6 +89,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const [deletingProductId, setDeletingProductId] = useState<number | null>(null);
 
   const [pName, setPName] = useState('');
+  const [pBrand, setPBrand] = useState('');
   const [pCategoryId, setPCategoryId] = useState<number>(1);
   const [pUnit, setPUnit] = useState<string>('kg');
   const [pType, setPType] = useState<'packaged' | 'loose'>('packaged');
@@ -118,15 +119,19 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const [sName, setSName] = useState('');
   const [sDesc, setSDesc] = useState('');
   const [sPhone, setSPhone] = useState('');
+  const [sEmail, setSEmail] = useState('');
   const [sHours, setSHours] = useState('');
   const [sOpenTime, setSOpenTime] = useState('08:00');
   const [sCloseTime, setSCloseTime] = useState('21:30');
   const [sClosedDays, setSClosedDays] = useState<string[]>([]);
   const [sAddress, setSAddress] = useState('');
   const [sLandmark, setSLandmark] = useState('');
-  const [sPincode, setSPincode] = useState('444105');
-  const [sLat, setSLat] = useState(20.4839);
-  const [sLng, setSLng] = useState(77.4877);
+  const [sCity, setSCity] = useState('');
+  const [sDistrict, setSDistrict] = useState('');
+  const [sState, setSState] = useState('');
+  const [sPincode, setSPincode] = useState('');
+  const [sLat, setSLat] = useState(20.5937);
+  const [sLng, setSLng] = useState(78.9629);
   const [sLogoUrl, setSLogoUrl] = useState('');
   const [sBannerUrl, setSBannerUrl] = useState('');
   const [sPhotos, setSPhotos] = useState<string[]>([]);
@@ -155,13 +160,17 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
     setSName(st.name);
     setSDesc(st.description || '');
     setSPhone(st.owner_phone || currentUser.phone || '');
+    setSEmail(st.email || '');
     setSHours(st.opening_hours || '08:00 AM - 09:30 PM');
     setSOpenTime(st.opening_time || '08:00');
     setSCloseTime(st.closing_time || '21:30');
     setSClosedDays(Array.isArray(st.weekly_closed_days) ? st.weekly_closed_days : []);
     setSAddress(st.address);
     setSLandmark(st.landmark || '');
-    setSPincode(st.pincode || '444105');
+    setSCity(st.city || '');
+    setSDistrict(st.district || '');
+    setSState(st.state || '');
+    setSPincode(st.pincode || '');
     setSLat(st.lat);
     setSLng(st.lng);
     setSLogoUrl(st.logo_url || '');
@@ -278,6 +287,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const openAddProductModal = () => {
     setEditingProduct(null);
     setPName('');
+    setPBrand('');
     setPCategoryId(categories[0]?.id || 1);
     setPUnit('kg');
     setPType('packaged');
@@ -297,6 +307,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
   const openEditProductModal = (p: Product) => {
     setEditingProduct(p);
     setPName(p.name);
+    setPBrand(p.brand || '');
     setPCategoryId(p.category_id);
     setPUnit(p.unit || 'kg');
     setPType(p.product_type === 'loose' ? 'loose' : 'packaged');
@@ -358,6 +369,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
       const payload: Partial<Product> = {
         category_id: Number(pCategoryId) || 1,
         name: pName.trim(),
+        brand: pBrand.trim() || null,
         unit: pUnit.trim() || 'piece',
         product_type: pType,
         price: numPrice,
@@ -486,19 +498,34 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
       return;
     }
 
+    const cleanPin = sPincode.trim();
+    if (cleanPin && !/^\d{6}$/.test(cleanPin)) {
+      showToast('Store PIN code must be 6 digits when provided.', 'err');
+      return;
+    }
+    const cleanEmail = sEmail.trim();
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      showToast('Please enter a valid store email address.', 'err');
+      return;
+    }
+
     setSSaving(true);
     try {
       const res = await api.updateMyStore({
         name: sName.trim(),
         description: sDesc.trim(),
         owner_phone: cleanDigits,
+        email: cleanEmail || null,
         opening_time: sOpenTime || null,
         closing_time: sCloseTime || null,
         weekly_closed_days: sClosedDays,
         opening_hours: sHours.trim() || undefined,
         address: sAddress.trim(),
         landmark: sLandmark.trim(),
-        pincode: sPincode.trim() || '444105',
+        city: sCity.trim(),
+        district: sDistrict.trim() || null,
+        state: sState.trim() || null,
+        pincode: cleanPin,
         lat: sLat,
         lng: sLng,
         logo_url: sLogoUrl.trim() || null,
@@ -596,6 +623,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
       const q = productSearch.toLowerCase();
       const hit =
         p.name.toLowerCase().includes(q) ||
+        (p.brand || '').toLowerCase().includes(q) ||
         (p.description || '').toLowerCase().includes(q) ||
         (p.category_name || '').toLowerCase().includes(q) ||
         (p.unit || '').toLowerCase().includes(q);
@@ -1299,7 +1327,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                     type="text"
                     value={productSearch}
                     onChange={e => setProductSearch(e.target.value)}
-                    placeholder="Search products by name, unit, or description..."
+                    placeholder="Search products by name, brand, unit, or description..."
                     className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-hidden focus:ring-2 focus:ring-amber-500"
                   />
                 </div>
@@ -1381,7 +1409,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                           <div className="min-w-0">
                             <h3 className="font-extrabold text-xs sm:text-sm text-gray-900 truncate">{prod.name}</h3>
                             <p className="text-[11px] text-gray-500">
-                              {prod.category_name || 'Grocery'} • {prod.unit}
+                              {prod.brand ? `${prod.brand} • ` : ''}{prod.category_name || 'Grocery'} • {prod.unit}
                             </p>
                           </div>
                           <span
@@ -1891,7 +1919,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                 rows={3}
                 value={dInfo}
                 onChange={e => setDInfo(e.target.value)}
-                placeholder="e.g. Same-day delivery within 45 mins in Karanja city limits. Store pickup counter open until 9:30 PM."
+                placeholder="e.g. Same-day delivery within 45 mins in local delivery radius. Store pickup counter open until 9:30 PM."
                 className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
               />
             </div>
@@ -2018,7 +2046,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">Store Name *</label>
                   <input
@@ -2039,6 +2067,16 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                     onChange={e => setSPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
                     placeholder="10-digit mobile number"
                     className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Store Email (Optional)</label>
+                  <input
+                    type="email"
+                    value={sEmail}
+                    onChange={e => setSEmail(e.target.value)}
+                    placeholder="store@example.com"
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
                   />
                 </div>
               </div>
@@ -2167,26 +2205,59 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <label className="block font-bold text-gray-700 mb-1">Landmark</label>
+                  <label className="block font-bold text-gray-700 mb-1">City / Town / Village</label>
                   <input
                     type="text"
-                    value={sLandmark}
-                    onChange={e => setSLandmark(e.target.value)}
+                    value={sCity}
+                    onChange={e => setSCity(e.target.value)}
+                    placeholder="City or village"
                     className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-gray-700 mb-1">Pincode</label>
+                  <label className="block font-bold text-gray-700 mb-1">District</label>
+                  <input
+                    type="text"
+                    value={sDistrict}
+                    onChange={e => setSDistrict(e.target.value)}
+                    placeholder="District"
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">State</label>
+                  <input
+                    type="text"
+                    value={sState}
+                    onChange={e => setSState(e.target.value)}
+                    placeholder="State"
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Pincode (Optional)</label>
                   <input
                     type="text"
                     maxLength={6}
                     value={sPincode}
                     onChange={e => setSPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="6-digit PIN"
                     className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl tabular-nums"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-gray-700 mb-1">Landmark</label>
+                <input
+                  type="text"
+                  value={sLandmark}
+                  onChange={e => setSLandmark(e.target.value)}
+                  placeholder="Nearby chowk, temple, or market landmark"
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
+                />
               </div>
 
               <div>
@@ -2197,10 +2268,14 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                   pinLabel={sName || 'Store Pin'}
                   pinColor="purple"
                   heightClass="h-48"
-                  onChange={(lat, lng, addr) => {
+                  onChange={(lat, lng, addr, meta) => {
                     setSLat(lat);
                     setSLng(lng);
                     if (addr && !sAddress.trim()) setSAddress(addr);
+                    if (meta?.city && !sCity.trim()) setSCity(meta.city);
+                    if (meta?.district && !sDistrict.trim()) setSDistrict(meta.district);
+                    if (meta?.state && !sState.trim()) setSState(meta.state);
+                    if (meta?.postcode && !sPincode.trim()) setSPincode(meta.postcode.replace(/\D/g, '').slice(0, 6));
                   }}
                 />
               </div>
@@ -2273,7 +2348,7 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
             )}
 
             <form onSubmit={handleSaveProduct} className="space-y-3">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">Product Name *</label>
                   <input
@@ -2282,6 +2357,16 @@ export const StoreOwnerDashboard: React.FC<StoreOwnerDashboardProps> = ({
                     value={pName}
                     onChange={e => setPName(e.target.value)}
                     placeholder="e.g. Toor Dal (Premium)"
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Brand (Optional)</label>
+                  <input
+                    type="text"
+                    value={pBrand}
+                    onChange={e => setPBrand(e.target.value)}
+                    placeholder="e.g. Aashirvaad, Tata, Local"
                     className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl"
                   />
                 </div>

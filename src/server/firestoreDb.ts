@@ -249,11 +249,14 @@ export interface StoreDoc {
   owner_id: number;
   owner_name: string;
   owner_phone: string;
+  email?: string | null;
   name: string;
   description?: string | null;
   address: string;
   landmark?: string | null;
   city: string;
+  district?: string | null;
+  state?: string | null;
   pincode: string;
   lat: number;
   lng: number;
@@ -394,6 +397,7 @@ export interface ProductDoc {
   store_id?: number | null;
   store_name?: string | null;
   name: string;
+  brand?: string | null;
   unit: string;
   price: number;
   mrp: number;
@@ -544,6 +548,7 @@ export const productsRepo = {
         const st = p.store_id ? storeMap.get(p.store_id) : null;
         return (
           p.name.toLowerCase().includes(s) ||
+          (p.brand && p.brand.toLowerCase().includes(s)) ||
           (p.description && p.description.toLowerCase().includes(s)) ||
           String(p.id).includes(s) ||
           (cat && cat.name.toLowerCase().includes(s)) ||
@@ -1640,7 +1645,7 @@ export const ordersRepo = {
         id: cNotifId,
         user_id: order.customer_id,
         title: 'Order Delivered! 🛍️',
-        message: `Your order #${order.order_number} has been delivered by ${rider.name}. ₹${order.total_amount} COD received. Thank you for choosing FMP Supermart Karanja Lad!`,
+        message: `Your order #${order.order_number} has been delivered by ${rider.name}. ₹${order.total_amount} COD received. Thank you for choosing FMP Supermart!`,
         type: 'order',
         is_read: false,
         order_id: id,
@@ -1772,7 +1777,7 @@ export const settingsRepo = {
       platform_name: 'FMP Supermart',
       support_phone: '9699925206',
       support_email: 'support@fmpsupermart.in',
-      city: 'Karanja Lad, Maharashtra 444105',
+      city: 'All India',
       require_store_approval: true,
       store_visibility_rule: 'approved_active_valid_location',
       service_available: true,

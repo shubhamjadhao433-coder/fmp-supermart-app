@@ -13,10 +13,10 @@
    - Client map labels and uploaded/linked store & product image values
 2. **Authentication & Authorization Model**:
    - Signed JWTs (`jsonwebtoken`, 30-day expiry) verified on the server in `src/server/auth.ts` (`requireAuth`) via either `Authorization: Bearer` header or `HttpOnly` session cookie.
-   - Server fetches the authoritative user record by numeric ID from Firestore (`usersRepo.findById`), checks `is_active !== false`, invalidates tokens issued before `password_changed_at`, and enforces role gates via `requireRole(...)`.
+   - Server fetches the authoritative user record by numeric ID from Firestore (`usersRepo.findById`), checks `is_active !== false`, invalidates tokens issued before `password_changed_at`, and enforces role gates via `requireRole(...)` (including Admin product moderation routes `PUT /api/admin/products/:id/status` and `DELETE /api/admin/products/:id`).
    - Public self-registration (`/api/auth/register`) forces `role = 'customer'` and rejects admin roles with `403`. Store registration (`/api/stores/register`) forces `approval_status = 'pending'`.
 3. **Database & PII Controls**:
-   - Server strips `password_hash`, wholesale cost/margin fields, and pre-completion/post-completion customer contact PII where appropriate (`pickup_code` visible only to the owning customer; admin views mask `customer_phone` and `delivery_address`; store-owner order views mask/redact customer contact details once an order is `delivered` or `cancelled`).
+   - Server strips `password_hash`, wholesale cost/margin fields, internal email/admin metadata from public store listings (`sanitizePublicStore`), and pre-completion/post-completion customer contact PII where appropriate (`pickup_code` visible only to the owning customer; admin views mask `customer_phone` and `delivery_address`; store-owner order views mask/redact customer contact details once an order is `delivered` or `cancelled`).
 
 ---
 

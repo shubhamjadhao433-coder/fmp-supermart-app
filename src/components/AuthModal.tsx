@@ -45,18 +45,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [name, setName] = useState('');
   const [address, setAddress] = useState('');
   const [landmark, setLandmark] = useState('');
+  const [city, setCity] = useState('');
+  const [pincode, setPincode] = useState('');
   const [forgotNotes, setForgotNotes] = useState('');
 
   // Store Self-Registration Fields
   const [storeName, setStoreName] = useState('');
+  const [storeEmail, setStoreEmail] = useState('');
   const [storeDescription, setStoreDescription] = useState('');
+  const [storeCity, setStoreCity] = useState('');
+  const [storeDistrict, setStoreDistrict] = useState('');
+  const [storeState, setStoreState] = useState('');
+  const [storePincode, setStorePincode] = useState('');
   const [openingHours, setOpeningHours] = useState('08:00 AM - 09:30 PM');
   const [serviceType, setServiceType] = useState<StoreServiceType>('both');
   const [deliveryRadiusKm, setDeliveryRadiusKm] = useState('5');
   const [deliveryFee, setDeliveryFee] = useState('0');
   const [minOrderAmount, setMinOrderAmount] = useState('0');
-  const [storeLat, setStoreLat] = useState(20.4839);
-  const [storeLng, setStoreLng] = useState(77.4877);
+  const [storeLat, setStoreLat] = useState(20.5937);
+  const [storeLng, setStoreLng] = useState(78.9629);
   const [hasStorePin, setHasStorePin] = useState(false);
   const [storePhotos, setStorePhotos] = useState<string[]>([]);
   const [photoLoading, setPhotoLoading] = useState(false);
@@ -72,16 +79,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setShowPassword(false);
     setAddress('');
     setLandmark('');
+    setCity('');
+    setPincode('');
     setForgotNotes('');
     setStoreName('');
+    setStoreEmail('');
     setStoreDescription('');
+    setStoreCity('');
+    setStoreDistrict('');
+    setStoreState('');
+    setStorePincode('');
     setOpeningHours('08:00 AM - 09:30 PM');
     setServiceType('both');
     setDeliveryRadiusKm('5');
     setDeliveryFee('0');
     setMinOrderAmount('0');
-    setStoreLat(20.4839);
-    setStoreLng(77.4877);
+    setStoreLat(20.5937);
+    setStoreLng(78.9629);
     setHasStorePin(false);
     setStorePhotos([]);
     setError(null);
@@ -205,6 +219,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    const cleanPin = pincode.trim();
+    if (cleanPin && !/^\d{6}$/.test(cleanPin)) {
+      setError('PIN code must be 6 digits when provided.');
+      setLoading(false);
+      return;
+    }
+
     try {
       const res = await api.register({
         phone: cleanPhone,
@@ -213,7 +234,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         address: address.trim(),
         landmark: landmark.trim(),
         role: 'customer',
-        pincode: '444105'
+        ...(city.trim() ? { city: city.trim() } : {}),
+        ...(cleanPin ? { pincode: cleanPin } : {})
       });
       authStorage.setToken(res.token);
       resetAllFields();
@@ -279,16 +301,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    const cleanStorePin = storePincode.trim();
+    if (cleanStorePin && !/^\d{6}$/.test(cleanStorePin)) {
+      setError('Store PIN code must be 6 digits when provided.');
+      setLoading(false);
+      return;
+    }
+
+    const cleanStoreEmail = storeEmail.trim();
+    if (cleanStoreEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanStoreEmail)) {
+      setError('Please enter a valid store email address.');
+      setLoading(false);
+      return;
+    }
+
     try {
       const res = await api.registerStore({
         owner_name: name.trim(),
         phone: cleanPhone,
         password: cleanPassword,
         store_name: storeName.trim(),
+        email: cleanStoreEmail || undefined,
         description: storeDescription.trim() || undefined,
         address: address.trim(),
         landmark: landmark.trim() || undefined,
-        pincode: '444105',
+        city: storeCity.trim() || undefined,
+        district: storeDistrict.trim() || undefined,
+        state: storeState.trim() || undefined,
+        pincode: cleanStorePin || undefined,
         lat: storeLat,
         lng: storeLng,
         photos: storePhotos,
@@ -579,7 +619,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
             <div>
               <label className="block text-[11px] font-bold text-gray-700 mb-1">
-                Delivery Address in Karanja Lad
+                Delivery Address
               </label>
               <div className="relative">
                 <MapPin className="w-4 h-4 absolute left-3 top-2.5 text-gray-400" />
@@ -588,9 +628,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   required
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
-                  placeholder="House/Plot No., Street name, Karanja Lad (444105)"
+                  placeholder="House/Flat No., Street name, Locality, City"
                   autoComplete="off"
                   className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-emerald-500 outline-hidden text-xs text-gray-900"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">City / Town / Village (Optional)</label>
+                <input
+                  type="text"
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="e.g. Pune, Jaipur, Nagpur"
+                  autoComplete="off"
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">PIN Code (Optional)</label>
+                <input
+                  type="text"
+                  maxLength={6}
+                  value={pincode}
+                  onChange={(e) => setPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="6-digit PIN code"
+                  autoComplete="off"
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-emerald-500"
                 />
               </div>
             </div>
@@ -601,7 +667,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 type="text"
                 value={landmark}
                 onChange={(e) => setLandmark(e.target.value)}
-                placeholder="e.g. Landmark or Area, Karanja Lad"
+                placeholder="e.g. Near Main Market, Temple, or Bus Stand"
                 autoComplete="off"
                 className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-emerald-500"
               />
@@ -847,6 +913,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   if (meta?.landmark && !landmark.trim()) {
                     setLandmark(meta.landmark);
                   }
+                  if (meta?.city && !storeCity.trim()) {
+                    setStoreCity(meta.city);
+                  }
+                  if (meta?.district && !storeDistrict.trim()) {
+                    setStoreDistrict(meta.district);
+                  }
+                  if (meta?.state && !storeState.trim()) {
+                    setStoreState(meta.state);
+                  }
+                  if (meta?.postcode && !storePincode.trim()) {
+                    setStorePincode(meta.postcode.replace(/\D/g, '').slice(0, 6));
+                  }
                 }}
               />
             </div>
@@ -858,19 +936,73 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 required
                 value={address}
                 onChange={(e) => setAddress(e.target.value)}
-                placeholder="Shop No., Main Road / Chowk, Karanja Lad (444105)"
+                placeholder="Shop No., Main Road / Market, City, State"
                 className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-amber-500 outline-hidden text-xs text-gray-900"
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-bold text-gray-700 mb-1">City / Town / Village</label>
+                <input
+                  type="text"
+                  value={storeCity}
+                  onChange={(e) => setStoreCity(e.target.value)}
+                  placeholder="City / Village"
+                  className="w-full px-2.5 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-gray-700 mb-1">District</label>
+                <input
+                  type="text"
+                  value={storeDistrict}
+                  onChange={(e) => setStoreDistrict(e.target.value)}
+                  placeholder="District"
+                  className="w-full px-2.5 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-gray-700 mb-1">State</label>
+                <input
+                  type="text"
+                  value={storeState}
+                  onChange={(e) => setStoreState(e.target.value)}
+                  placeholder="State"
+                  className="w-full px-2.5 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-gray-700 mb-1">PIN Code (Opt.)</label>
+                <input
+                  type="text"
+                  maxLength={6}
+                  value={storePincode}
+                  onChange={(e) => setStorePincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="6-digit PIN"
+                  className="w-full px-2.5 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold text-gray-700 mb-1">Store Email (Optional)</label>
+                <input
+                  type="email"
+                  value={storeEmail}
+                  onChange={(e) => setStoreEmail(e.target.value)}
+                  placeholder="store@example.com"
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
               <div>
                 <label className="block text-[11px] font-bold text-gray-700 mb-1">Nearby Landmark</label>
                 <input
                   type="text"
                   value={landmark}
                   onChange={(e) => setLandmark(e.target.value)}
-                  placeholder="e.g. Near Shivaji Chowk"
+                  placeholder="e.g. Near Main Market"
                   className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl font-medium text-gray-900 outline-hidden focus:ring-2 focus:ring-amber-500"
                 />
               </div>
@@ -927,7 +1059,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <div className="pt-2 text-[11px] text-gray-600 bg-white p-2.5 rounded-xl border border-emerald-100">
                   <span className="font-semibold block text-gray-800">Direct Helpline:</span>
                   <span>+91 9699925206 (FMP Supermart Support)</span>
-                  <span className="block text-gray-500 mt-0.5">Karanja Lad, Maharashtra</span>
+                  <span className="block text-gray-500 mt-0.5">India Marketplace Support Desk</span>
                 </div>
                 <button
                   type="button"

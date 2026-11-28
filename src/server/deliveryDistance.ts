@@ -103,7 +103,7 @@ export async function calculateRoadDistanceKm(
       method: 'GET',
       headers: {
         'Accept': 'application/json',
-        'User-Agent': 'FMP-Supermart-KaranjaLad/1.0'
+        'User-Agent': 'FMP-Supermart-India/1.0'
       },
       signal: controller.signal
     });
@@ -203,7 +203,7 @@ export function calculateDeliveryFeeFromDistance(
       warehouse_lat,
       warehouse_lng,
       warehouse_address,
-      reason: `Delivery unavailable beyond ${max_delivery_distance_km} km. Your pinned location is ${roundedDistance.toFixed(2)} km by road from FMP Central Warehouse.`
+      reason: `Delivery unavailable beyond ${max_delivery_distance_km} km. Your pinned location is ${roundedDistance.toFixed(2)} km by road from the store.`
     };
   }
 

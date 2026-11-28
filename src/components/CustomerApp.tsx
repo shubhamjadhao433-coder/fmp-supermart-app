@@ -94,6 +94,44 @@ function makeOrderIdempotencyKey(): string {
   return `ord_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+const CUSTOMER_LOCATION_STORAGE_KEY = 'fmp_customer_location';
+
+interface StoredCustomerLocation {
+  lat: number;
+  lng: number;
+  confirmed: boolean;
+  areaLabel: string;
+  deliveryAddress: string;
+  landmark: string;
+  status: 'default' | 'gps_detected' | 'manual' | 'permission_denied' | 'error';
+}
+
+function readStoredCustomerLocation(): StoredCustomerLocation | null {
+  try {
+    const raw = localStorage.getItem(CUSTOMER_LOCATION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const lat = Number(parsed.lat);
+    const lng = Number(parsed.lng);
+    const confirmed = Boolean(parsed.confirmed) && Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
+    return {
+      lat: confirmed ? lat : 0,
+      lng: confirmed ? lng : 0,
+      confirmed,
+      areaLabel: typeof parsed.areaLabel === 'string' && parsed.areaLabel.trim() ? parsed.areaLabel.trim() : 'All India',
+      deliveryAddress: typeof parsed.deliveryAddress === 'string' ? parsed.deliveryAddress : '',
+      landmark: typeof parsed.landmark === 'string' ? parsed.landmark : '',
+      status:
+        parsed.status === 'gps_detected' || parsed.status === 'manual'
+          ? parsed.status
+          : 'default'
+    };
+  } catch {
+    return null;
+  }
+}
+
 function isOrderRejected(order: Order): boolean {
   return (
     order.status === 'cancelled' &&
@@ -231,14 +269,20 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
   const [cartNotice, setCartNotice] = useState<string | null>(null);
 
+  const initialSavedLocation = React.useMemo(() => readStoredCustomerLocation(), []);
+
   // Checkout Form State
   const [deliveryType, setDeliveryType] = useState<'immediate' | 'scheduled'>('immediate');
   const [scheduledDate, setScheduledDate] = useState<string>('Today');
   const [scheduledSlot, setScheduledSlot] = useState<string>('09:00 AM - 12:00 PM (Morning Slot)');
   const [customerName, setCustomerName] = useState<string>(currentUser?.name || '');
   const [customerPhone, setCustomerPhone] = useState<string>(currentUser?.phone || '');
-  const [deliveryAddress, setDeliveryAddress] = useState<string>(currentUser?.address || 'Karanja Lad, Maharashtra');
-  const [landmark, setLandmark] = useState<string>(currentUser?.landmark || 'Karanja Lad');
+  const [deliveryAddress, setDeliveryAddress] = useState<string>(
+    initialSavedLocation?.deliveryAddress || currentUser?.address || ''
+  );
+  const [landmark, setLandmark] = useState<string>(
+    initialSavedLocation?.landmark || currentUser?.landmark || ''
+  );
   const [checkoutSubmitting, setCheckoutSubmitting] = useState<boolean>(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
@@ -248,9 +292,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
 
   // Live backend OSRM store delivery quote
-  const [customerLat, setCustomerLat] = useState<number>(20.4839);
-  const [customerLng, setCustomerLng] = useState<number>(77.4877);
-  const [hasUserMovedPin, setHasUserMovedPin] = useState<boolean>(false);
+  const [customerLat, setCustomerLat] = useState<number>(initialSavedLocation?.lat ?? 0);
+  const [customerLng, setCustomerLng] = useState<number>(initialSavedLocation?.lng ?? 0);
+  const [hasUserMovedPin, setHasUserMovedPin] = useState<boolean>(initialSavedLocation?.confirmed ?? false);
   const [deliveryQuote, setDeliveryQuote] = useState<DeliveryQuote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState<boolean>(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
@@ -264,9 +308,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const [storeProductsLoading, setStoreProductsLoading] = useState<boolean>(false);
   const [storeSearchQuery, setStoreSearchQuery] = useState<string>('');
   const [isLocationModalOpen, setIsLocationModalOpen] = useState<boolean>(false);
-  const [areaLabel, setAreaLabel] = useState<string>('Karanja Lad');
+  const [areaLabel, setAreaLabel] = useState<string>(initialSavedLocation?.areaLabel || 'All India');
   const [locatingCustomer, setLocatingCustomer] = useState<boolean>(false);
-  const [locationStatus, setLocationStatus] = useState<'default' | 'gps_detected' | 'manual' | 'permission_denied' | 'error'>('default');
+  const [locationStatus, setLocationStatus] = useState<'default' | 'gps_detected' | 'manual' | 'permission_denied' | 'error'>(
+    initialSavedLocation?.status || 'default'
+  );
   const [locationNotice, setLocationNotice] = useState<{
     type: 'success' | 'error';
     title: string;
@@ -389,15 +435,72 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   const totalAmount = Math.round((cartSubtotal + deliveryCharge) * 100) / 100;
   const cartItemCount = cart.length;
 
+  // Persist customer selected location in localStorage
+  useEffect(() => {
+    try {
+      if (hasUserMovedPin && customerLat !== 0 && customerLng !== 0) {
+        localStorage.setItem(
+          CUSTOMER_LOCATION_STORAGE_KEY,
+          JSON.stringify({
+            lat: customerLat,
+            lng: customerLng,
+            confirmed: true,
+            areaLabel,
+            deliveryAddress,
+            landmark,
+            status: locationStatus
+          })
+        );
+      } else {
+        localStorage.removeItem(CUSTOMER_LOCATION_STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, [customerLat, customerLng, hasUserMovedPin, areaLabel, deliveryAddress, landmark, locationStatus]);
+
+  // Dynamic Document Title, Meta Description & Canonical URL for SEO
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const baseUrl = window.location.origin || 'https://fmpsupermart.in';
+    const nextTitle = selectedStore
+      ? `${selectedStore.name}${selectedStore.city ? ` (${selectedStore.city})` : ''} | FMP Supermart`
+      : selectedCategory !== 'all'
+      ? `${selectedCategory} — Local Grocery Stores | FMP Supermart India`
+      : "FMP Supermart - India's Hyperlocal Multi-Store Grocery & Kirana Marketplace";
+    const nextDescription = selectedStore
+      ? `Order fresh groceries and daily essentials from ${selectedStore.name}${selectedStore.city ? ` in ${selectedStore.city}` : ''} on FMP Supermart. Home Delivery (COD) & Free Store Pickup.`
+      : selectedCategory !== 'all'
+      ? `Browse ${selectedCategory} groceries from verified local kirana stores across India on FMP Supermart.`
+      : 'FMP Supermart is an India-wide hyperlocal grocery and kirana marketplace connecting customers with verified local supermarkets and neighborhood grocery stores.';
+    const nextCanonical = selectedStore
+      ? `${baseUrl}/?store=${selectedStore.id}`
+      : selectedCategory !== 'all'
+      ? `${baseUrl}/?category=${encodeURIComponent(selectedCategory)}`
+      : `${baseUrl}/`;
+
+    document.title = nextTitle;
+    const descEl = document.querySelector('meta[name="description"]');
+    if (descEl) descEl.setAttribute('content', nextDescription);
+    let canonEl = document.querySelector('link[rel="canonical"]');
+    if (!canonEl) {
+      canonEl = document.createElement('link');
+      canonEl.setAttribute('rel', 'canonical');
+      document.head.appendChild(canonEl);
+    }
+    canonEl.setAttribute('href', nextCanonical);
+  }, [selectedStore, selectedCategory]);
+
   // Load Catalog & Customer Data
   const loadCatalogData = async () => {
     setLoading(true);
     setStoresLoading(true);
+    const hasCoords = hasUserMovedPin && customerLat !== 0 && customerLng !== 0;
     try {
       const [cats, prods, storesRes] = await Promise.all([
         api.getCategories().catch(() => []),
         api.getProducts().catch(() => []),
-        api.getNearbyStores({ lat: customerLat, lng: customerLng }).catch(() => [])
+        api.getNearbyStores(hasCoords ? { lat: customerLat, lng: customerLng } : undefined).catch(() => [])
       ]);
       if (cats && cats.length > 0) setCategories(cats);
       if (prods && prods.length > 0) setProducts(prods);
@@ -449,7 +552,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
   // Refresh nearby store distances & selected store details whenever customer location changes
   useEffect(() => {
     let cancelled = false;
-    api.getNearbyStores({ lat: customerLat, lng: customerLng })
+    const hasCoords = hasUserMovedPin && customerLat !== 0 && customerLng !== 0;
+    api.getNearbyStores(hasCoords ? { lat: customerLat, lng: customerLng } : undefined)
       .then(res => {
         if (!cancelled && Array.isArray(res)) {
           setNearbyStores(res);
@@ -458,7 +562,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       .catch(() => {});
 
     if (selectedStore) {
-      api.getStoreDetails(selectedStore.id, customerLat, customerLng)
+      api.getStoreDetails(selectedStore.id, hasCoords ? customerLat : undefined, hasCoords ? customerLng : undefined)
         .then(freshStore => {
           if (!cancelled && freshStore) {
             setSelectedStore(freshStore);
@@ -473,7 +577,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     }
 
     return () => { cancelled = true; };
-  }, [customerLat, customerLng]);
+  }, [customerLat, customerLng, hasUserMovedPin]);
 
   // Open specific store details page & load authoritative store details + products from backend
   const handleOpenStore = async (store: StoreType) => {
@@ -482,10 +586,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     setStoreSearchQuery('');
     setStoreProductsLoading(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    const hasCoords = hasUserMovedPin && customerLat !== 0 && customerLng !== 0;
 
     try {
       const [freshStore, prods] = await Promise.all([
-        api.getStoreDetails(store.id, customerLat, customerLng),
+        api.getStoreDetails(store.id, hasCoords ? customerLat : undefined, hasCoords ? customerLng : undefined),
         api.getStoreProducts(store.id)
       ]);
       setSelectedStore(freshStore || store);
@@ -717,13 +822,18 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       loadUserData();
       setCustomerName(currentUser.name || '');
       setCustomerPhone(currentUser.phone || '');
-      setDeliveryAddress(currentUser.address || 'Karanja Lad, Maharashtra');
-      setLandmark(currentUser.landmark || 'Karanja Lad');
+      if (!hasUserMovedPin) {
+        setDeliveryAddress(currentUser.address || '');
+        setLandmark(currentUser.landmark || '');
+        if (currentUser.city) {
+          setAreaLabel(currentUser.city);
+        }
+      }
     } else {
       setCustomerName('');
       setCustomerPhone('');
-      setDeliveryAddress('Karanja Lad, Maharashtra');
-      setLandmark('Karanja Lad');
+      setDeliveryAddress('');
+      setLandmark('');
       setFavorites([]);
       setFavoriteIds(new Set());
       setNotifications([]);
@@ -733,6 +843,10 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
       setSelectedOrderDetail(null);
       setIsProfileOpen(false);
       setHasUserMovedPin(false);
+      setCustomerLat(0);
+      setCustomerLng(0);
+      setAreaLabel('All India');
+      setLocationStatus('default');
       setDeliveryQuote(null);
       setQuoteError(null);
     }
@@ -910,7 +1024,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         phone: cleanPhone,
         address: cleanAddr,
         landmark: landmark.trim(),
-        pincode: cartStore?.pincode || '444105',
+        pincode: cartStore?.pincode || currentUser?.pincode || '',
         lat: hasUserMovedPin ? customerLat : null,
         lng: hasUserMovedPin ? customerLng : null,
         is_default: savedAddresses.length === 0
@@ -950,9 +1064,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     const finalName = (customerName || currentUser.name || '').trim();
     const finalPhone = (customerPhone || currentUser.phone || '').trim().replace(/\D/g, '');
     const finalAddress = isStorePickup
-      ? (cartStore?.address || 'Store Pickup, Karanja Lad').trim()
+      ? (cartStore?.address || 'Store Pickup').trim()
       : (deliveryAddress || currentUser.address || '').trim();
-    const finalLandmark = (landmark || currentUser.landmark || 'Karanja Lad').trim();
+    const finalLandmark = (landmark || currentUser.landmark || '').trim();
 
     if (!finalName || finalPhone.length < 10) {
       setCheckoutError('Please provide your full name and a valid 10-digit mobile number.');
@@ -1016,7 +1130,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         customer_phone: finalPhone,
         delivery_address: finalAddress,
         landmark: finalLandmark,
-        pincode: cartStore?.pincode || '444105',
+        pincode: cartStore?.pincode || currentUser?.pincode || '',
         delivery_type: isStorePickup ? ('immediate' as const) : deliveryType,
         scheduled_date: isStorePickup ? 'Store Pickup' : (deliveryType === 'scheduled' ? scheduledDate : 'Immediate Express'),
         time_slot: isStorePickup ? 'Ready at Store Counter' : (deliveryType === 'scheduled' ? scheduledSlot : 'Within 30-45 mins'),
@@ -1132,13 +1246,17 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
   };
 
-  // Filter Nearby Stores (matches store name, address/landmark, and available products)
+  // Filter Nearby Stores (matches store name, city/district/state/pincode, address/landmark, and available products)
   const filteredNearbyStores = nearbyStores.filter(store => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     const matchesStoreInfo =
       store.name.toLowerCase().includes(q) ||
       store.address.toLowerCase().includes(q) ||
+      (store.city || '').toLowerCase().includes(q) ||
+      (store.district || '').toLowerCase().includes(q) ||
+      (store.state || '').toLowerCase().includes(q) ||
+      (store.pincode || '').toLowerCase().includes(q) ||
       (store.landmark || '').toLowerCase().includes(q) ||
       (store.description || '').toLowerCase().includes(q);
     const matchesAvailableProducts =
@@ -1173,13 +1291,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
     if (selectedCategory !== 'all' && product.category_name !== selectedCategory && product.category_slug !== selectedCategory) {
       return false;
     }
-    if (onlyInStock && product.stock <= 0) {
+    if (onlyInStock && (product.is_active === false || Number(product.stock) <= 0)) {
       return false;
     }
     if (activeProductSearch.trim()) {
       const q = activeProductSearch.toLowerCase();
       return (
         product.name.toLowerCase().includes(q) ||
+        (product.brand || '').toLowerCase().includes(q) ||
         (product.category_name || '').toLowerCase().includes(q) ||
         (product.description && product.description.toLowerCase().includes(q))
       );
@@ -1228,7 +1347,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     FMP <span className="text-emerald-600">Supermart</span>
                   </span>
                   <span className="bg-emerald-100 text-emerald-800 text-[9px] sm:text-[10px] font-extrabold px-1.5 py-0.2 rounded-md uppercase tracking-wider shrink-0 hidden xs:inline">
-                    Karanja
+                    India
                   </span>
                 </div>
                 <button
@@ -1444,7 +1563,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       ? 'GPS location detected'
                       : locationStatus === 'manual'
                       ? 'Selected manually'
-                      : 'Sorted by distance'}
+                      : 'All India Stores'}
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>{nearbyStores.length} {nearbyStores.length === 1 ? 'store' : 'stores'} active</span>
@@ -1619,10 +1738,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                             {store.is_open ? 'Open' : 'Closed'}
                           </span>
                         </div>
-                        <p className="text-[11px] text-gray-500 truncate mt-0.5">{store.address}</p>
+                        <p className="text-[11px] text-gray-500 truncate mt-0.5">
+                          {[store.address, store.city, store.state].filter(Boolean).join(', ')}
+                        </p>
                         <div className="flex items-center gap-1.5 text-[10px] text-gray-600 mt-1">
                           <span className="font-bold text-gray-900 tabular-nums">
-                            {typeof store.distance_km === 'number' ? `${store.distance_km} km away` : 'Nearby'}
+                            {typeof store.distance_km === 'number'
+                              ? `${store.distance_km} km away`
+                              : store.city || 'Verified Store'}
                           </span>
                           <span aria-hidden="true">·</span>
                           <span className="truncate">{store.opening_hours}</span>
@@ -1955,7 +2078,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             {filteredProducts.map((product, idx) => {
               const inCart = cart.find(i => i.product.id === product.id);
               const isFavorite = favoriteIds.has(product.id);
-              const isOutOfStock = product.stock <= 0;
+              const isOutOfStock = product.is_active === false || Number(product.stock) <= 0;
               const isStoreClosed = Boolean(selectedStore && !selectedStore.is_open);
               const pType = normalizeProductType(product.product_type, product.unit);
               const slabs = normalizeProductPriceSlabs(product.pricing_slabs, pType === 'loose' ? 'kg' : '');
@@ -2013,7 +2136,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       </div>
                     )}
 
-                    {/* Out of stock overlay */}
+                    {/* Out of stock / unavailable overlay */}
                     {isOutOfStock && (
                       <div className="absolute inset-0 bg-white/85 backdrop-blur-2xs flex items-center justify-center">
                         <span className="bg-gray-800 text-white font-bold text-[10px] uppercase px-2.5 py-1 rounded-md tracking-wider">
@@ -2023,12 +2146,17 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     )}
                   </div>
 
-                  {/* Clean Card Content: Name, Unit, Availability, Price, Add Button */}
+                  {/* Clean Card Content: Name, Brand, Unit, Availability, Price, Add Button */}
                   <div className="p-2 sm:p-3 flex-1 flex flex-col justify-between space-y-1.5 sm:space-y-2 min-w-0">
                     <div
                       onClick={() => handleOpenReviewsModal(product)}
                       className="min-w-0 cursor-pointer"
                     >
+                      {product.brand && (
+                        <div className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wide text-emerald-700 truncate">
+                          {product.brand}
+                        </div>
+                      )}
                       <h3 className="font-bold text-gray-900 text-xs sm:text-sm line-clamp-2 leading-snug break-words hover:text-emerald-700 transition">
                         {product.name}
                       </h3>
@@ -2044,7 +2172,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       </div>
                       <div className={`text-[10px] font-semibold mt-0.5 ${isOutOfStock ? 'text-red-600' : 'text-emerald-700'}`}>
                         {isOutOfStock
-                          ? 'Unavailable · Out of Stock'
+                          ? product.is_active === false
+                            ? 'Unavailable'
+                            : 'Unavailable · Out of Stock'
                           : `Available (${product.stock} ${pType === 'loose' ? 'kg' : 'in stock'})`}
                       </div>
                     </div>
@@ -2168,11 +2298,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 <span className="font-black text-gray-900 text-sm">FMP Supermart</span>
               </div>
               <p className="text-gray-500 leading-relaxed">
-                Karanja Lad&apos;s hyperlocal multi-store grocery &amp; kirana marketplace connecting neighborhoods directly with trusted local shops.
+                India&apos;s hyperlocal multi-store grocery &amp; kirana marketplace connecting neighborhoods directly with trusted independent local stores.
               </p>
               <div className="text-emerald-800 font-semibold flex items-center gap-1.5">
                 <MapPin className="w-3.5 h-3.5 shrink-0 text-emerald-600" />
-                <span>Karanja Lad</span>
+                <span>All India Marketplace</span>
               </div>
             </div>
 
@@ -2187,10 +2317,10 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             </div>
 
             <div>
-              <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Hours & Support</h4>
+              <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Hours &amp; Support</h4>
               <ul className="space-y-2 text-gray-500">
                 <li>• Store Hours: Displayed individually on each kirana store</li>
-                <li>• Service Location: Karanja Lad, Maharashtra</li>
+                <li>• Coverage: Cities, towns &amp; villages across India</li>
                 <li>• Customer Helpline: 9699925206</li>
                 <li>• Secure 6-digit counter verification for Store Pickup</li>
               </ul>
@@ -2199,7 +2329,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
             <div>
               <h4 className="font-bold text-gray-900 mb-3 uppercase tracking-wider text-[11px]">Local Store Promise</h4>
               <p className="text-gray-500 mb-3 leading-relaxed">
-                Fresh daily essentials directly from approved neighborhood stores in Karanja Lad with transparent store pricing and instant pickup or COD delivery.
+                Fresh daily essentials directly from approved neighborhood stores across India with transparent store pricing and instant pickup or COD delivery.
               </p>
               <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-800 rounded-xl font-bold text-xs border border-emerald-200">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
@@ -2209,8 +2339,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
           </div>
 
           <div className="pt-6 border-t border-gray-100 text-center text-[11px] text-gray-400 flex flex-col sm:flex-row items-center justify-between gap-2">
-            <span>© {new Date().getFullYear()} FMP Supermart Karanja Lad • All Rights Reserved</span>
-            <span>Service Location: Karanja Lad, Maharashtra</span>
+            <span>© {new Date().getFullYear()} FMP Supermart • All Rights Reserved</span>
+            <span>India-Wide Hyperlocal Grocery Marketplace</span>
           </div>
         </div>
       </footer>
@@ -2371,7 +2501,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 <div className="font-extrabold text-gray-900 truncate">{currentUser.name}</div>
                 <div className="text-xs text-emerald-800 font-semibold">{currentUser.phone}</div>
                 <span className="text-[10px] bg-emerald-200 text-emerald-900 font-bold px-1.5 py-0.2 rounded">
-                  Karanja Lad Customer
+                  FMP Customer
                 </span>
               </div>
             </div>
@@ -2401,7 +2531,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-gray-500">Address in Karanja Lad</label>
+                      <label className="block text-[10px] font-bold text-gray-500">Delivery Address</label>
                       <textarea
                         rows={2}
                         value={deliveryAddress}
@@ -2416,7 +2546,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                         type="text"
                         value={landmark}
                         onChange={e => setLandmark(e.target.value)}
-                        placeholder="e.g. Landmark or Area in Karanja Lad"
+                        placeholder="e.g. Near Main Market or Chowk"
                         className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs"
                       />
                     </div>
@@ -2430,11 +2560,13 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   </form>
                 ) : (
                   <>
-                    <div className="text-gray-800 font-medium">{currentUser.address || 'Karanja Lad, Maharashtra'}</div>
+                    <div className="text-gray-800 font-medium">{currentUser.address || 'No saved address yet'}</div>
                     {currentUser.landmark && (
                       <div className="text-[11px] text-gray-500">Landmark: {currentUser.landmark}</div>
                     )}
-                    <div className="text-[11px] text-emerald-700 font-bold">Pincode: 444105</div>
+                    {currentUser.pincode && (
+                      <div className="text-[11px] text-emerald-700 font-bold">Pincode: {currentUser.pincode}</div>
+                    )}
                   </>
                 )}
                 {profileMessage && (
@@ -2571,6 +2703,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
         const resolved = resolveProductQuantityPricing(selectedProduct, detailQty);
         const existingInCart = cart.find(i => i.product.id === selectedProduct.id);
         const stepSize = pType === 'loose' ? 0.5 : 1;
+        const isSelectedUnavailable =
+          selectedProduct.is_active === false || Number(selectedProduct.stock) <= 0;
         const isClosedForSelected = Boolean(
           selectedStore && selectedProduct.store_id === selectedStore.id && !selectedStore.is_open
         );
@@ -2595,6 +2729,11 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     </div>
                   )}
                   <div className="min-w-0">
+                    {selectedProduct.brand && (
+                      <div className="text-[10px] font-extrabold uppercase tracking-wide text-emerald-700">
+                        {selectedProduct.brand}
+                      </div>
+                    )}
                     <div className="flex flex-wrap items-center gap-1.5">
                       <h3 className="font-extrabold text-gray-900 text-base leading-snug">
                         {selectedProduct.name}
@@ -2614,9 +2753,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       )}
                       <span className="text-gray-500">• {selectedProduct.unit}</span>
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                        selectedProduct.stock > 0 ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'
+                        !isSelectedUnavailable ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'
                       }`}>
-                        {selectedProduct.stock > 0 ? `${selectedProduct.stock} ${unitSuffix} in stock` : 'Out of Stock'}
+                        {!isSelectedUnavailable ? `${selectedProduct.stock} ${unitSuffix} in stock` : 'Unavailable'}
                       </span>
                     </div>
                   </div>
@@ -2805,9 +2944,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                 <button
                   type="button"
-                  disabled={!resolved.valid || isClosedForSelected}
+                  disabled={isSelectedUnavailable || !resolved.valid || isClosedForSelected}
                   onClick={() => {
-                    if (!resolved.valid || isClosedForSelected) return;
+                    if (isSelectedUnavailable || !resolved.valid || isClosedForSelected) return;
                     if (existingInCart) {
                       onUpdateCartQty(selectedProduct.id, resolved.quantity);
                       showCartNotice(`Updated ${selectedProduct.name} quantity to ${resolved.quantity} ${unitSuffix}`);
@@ -2821,7 +2960,9 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 >
                   <ShoppingCart className="w-4 h-4" />
                   <span>
-                    {isClosedForSelected
+                    {isSelectedUnavailable
+                      ? 'Product Currently Unavailable'
+                      : isClosedForSelected
                       ? 'Store Currently Closed'
                       : existingInCart
                       ? `Update Cart Qty (${resolved.quantity} ${unitSuffix}) • ₹${resolved.line_total}`
@@ -2954,7 +3095,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   <ShoppingBag className="w-16 h-16 text-gray-300" />
                   <div className="font-bold text-gray-900 text-base">Your Cart is Empty</div>
                   <p className="text-xs text-gray-500">
-                    Add daily essentials, vegetables, fruits, and dairy to get superfast delivery in Karanja Lad.
+                    Add daily essentials, vegetables, fruits, and dairy from local stores near you.
                   </p>
                   <button
                     onClick={onCloseCart}
@@ -3333,10 +3474,10 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
 
                       {showMapPicker && (
                         <OsmMapPicker
-                          lat={customerLat}
-                          lng={customerLng}
-                          warehouseLat={cartStore ? cartStore.lat : 20.4839}
-                          warehouseLng={cartStore ? cartStore.lng : 77.4877}
+                          lat={hasUserMovedPin && customerLat !== 0 ? customerLat : 20.5937}
+                          lng={hasUserMovedPin && customerLng !== 0 ? customerLng : 78.9629}
+                          warehouseLat={cartStore ? cartStore.lat : undefined}
+                          warehouseLng={cartStore ? cartStore.lng : undefined}
                           warehouseLabel={cartStore ? cartStore.name : 'Store Location'}
                           pinLabel="Your Location"
                           pinColor="emerald"
@@ -3346,6 +3487,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                             setHasUserMovedPin(true);
                             setCustomerLat(newLat);
                             setCustomerLng(newLng);
+                            setLocationStatus(meta?.source === 'gps' ? 'gps_detected' : 'manual');
                             setCheckoutError(null);
                             if (displayAddress && displayAddress.trim()) {
                               const cleaned = displayAddress
@@ -3356,7 +3498,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                                 .join(', ');
                               if (cleaned) {
                                 setDeliveryAddress(cleaned);
-                                setAreaLabel(cleaned.split(',')[0] || 'Karanja Lad');
+                                setAreaLabel(meta?.city || cleaned.split(',')[0] || 'Selected Area');
                               }
                             }
                             if (meta?.landmark && meta.landmark.trim()) {
@@ -3472,7 +3614,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                             type="text"
                             value={landmark}
                             onChange={e => setLandmark(e.target.value)}
-                            placeholder="e.g. Area or Landmark in Karanja Lad"
+                            placeholder="e.g. Near Main Market or Chowk"
                             className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
                           />
                         </div>
@@ -3483,14 +3625,14 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                       <div className="space-y-2">
                         <div>
                           <label className="block text-[10px] font-bold text-gray-600 mb-0.5">
-                            Delivery Address in Karanja Lad
+                            Delivery Address
                           </label>
                           <textarea
                             rows={2}
                             required
                             value={deliveryAddress}
                             onChange={e => setDeliveryAddress(e.target.value)}
-                            placeholder="House/Plot no., Street name, Karanja Lad (444105)"
+                            placeholder="House/Flat no., Street name, Locality, City"
                             className="w-full p-2 bg-white border border-gray-200 rounded-xl text-xs"
                           />
                         </div>
@@ -3666,7 +3808,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
                     <span>
                       {deliveryQuote.reason ||
-                        `Your pinned location (${deliveryQuote.distance_km} km) is outside our ${deliveryQuote.max_delivery_distance_km} km delivery zone. Move the map pin closer to Karanja Lad.`}
+                        `Your pinned location (${deliveryQuote.distance_km} km) is outside this store's ${deliveryQuote.max_delivery_distance_km} km delivery zone. Switch to Store Pickup or move the map pin closer to the store.`}
                     </span>
                   </div>
                 )}
@@ -4262,36 +4404,56 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                   <p>Tap the heart icon on any grocery or fresh produce item to add it to your quick-access favorites list.</p>
                 </div>
               ) : (
-                favorites.map((fav, idx) => (
-                  <div key={fav.id || `fav-${idx}`} className="py-3 flex items-center gap-3 text-xs">
-                    {fav.image_url && !brokenImages[`prod-${fav.id}`] ? (
-                      <img
-                        src={fav.image_url}
-                        alt={fav.name}
-                        referrerPolicy="no-referrer"
-                        onError={() => setBrokenImages(prev => ({ ...prev, [`prod-${fav.id}`]: true }))}
-                        className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
-                      />
-                    ) : (
-                      <div className="w-12 h-12 rounded-xl bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center text-gray-400">
-                        <Package className="w-5 h-5" />
+                favorites.map((fav, idx) => {
+                  const isFavUnavailable = fav.is_active === false || Number(fav.stock) <= 0;
+                  return (
+                    <div key={fav.id || `fav-${idx}`} className="py-3 flex items-center gap-3 text-xs">
+                      {fav.image_url && !brokenImages[`prod-${fav.id}`] ? (
+                        <img
+                          src={fav.image_url}
+                          alt={fav.name}
+                          referrerPolicy="no-referrer"
+                          onError={() => setBrokenImages(prev => ({ ...prev, [`prod-${fav.id}`]: true }))}
+                          className="w-12 h-12 object-cover rounded-xl border border-gray-200 shrink-0"
+                        />
+                      ) : (
+                        <div className="w-12 h-12 rounded-xl bg-gray-100 border border-gray-200 shrink-0 flex items-center justify-center text-gray-400">
+                          <Package className="w-5 h-5" />
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="font-bold text-gray-900 truncate">{fav.name}</div>
+                        <div className="text-gray-500 text-[11px]">
+                          {fav.brand ? `${fav.brand} • ` : ''}{fav.unit}
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="font-black text-emerald-800">₹{fav.price}</span>
+                          {isFavUnavailable && (
+                            <span className="text-[10px] font-bold text-red-600 bg-red-50 px-1.5 py-0.5 rounded">
+                              Unavailable
+                            </span>
+                          )}
+                        </div>
                       </div>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="font-bold text-gray-900 truncate">{fav.name}</div>
-                      <div className="text-gray-500 text-[11px]">{fav.unit}</div>
-                      <div className="font-black text-emerald-800 mt-0.5">₹{fav.price}</div>
-                    </div>
 
-                    <button
-                      onClick={() => onAddToCart(fav)}
-                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-xl font-bold text-xs shadow-xs transition flex items-center gap-1 cursor-pointer shrink-0"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Add</span>
-                    </button>
-                  </div>
-                ))
+                      <button
+                        disabled={isFavUnavailable}
+                        onClick={() => {
+                          if (isFavUnavailable) return;
+                          onAddToCart(fav);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl font-bold text-xs shadow-xs transition flex items-center gap-1 shrink-0 ${
+                          isFavUnavailable
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                        }`}
+                      >
+                        {!isFavUnavailable && <Plus className="w-3.5 h-3.5" />}
+                        <span>{isFavUnavailable ? 'Unavailable' : 'Add'}</span>
+                      </button>
+                    </div>
+                  );
+                })
               )}
             </div>
           </div>
@@ -4386,8 +4548,8 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
               Search your neighborhood, landmark, or tap GPS to sort nearby kirana stores by distance.
             </p>
             <OsmMapPicker
-              lat={customerLat}
-              lng={customerLng}
+              lat={hasUserMovedPin && customerLat !== 0 ? customerLat : 20.5937}
+              lng={hasUserMovedPin && customerLng !== 0 ? customerLng : 78.9629}
               pinColor="emerald"
               pinLabel="Your Area"
               heightClass="h-56"
@@ -4407,7 +4569,7 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                     .join(', ');
                   if (cleaned) {
                     setDeliveryAddress(cleaned);
-                    setAreaLabel(cleaned.split(',')[0] || 'Karanja Lad');
+                    setAreaLabel(meta?.city || cleaned.split(',')[0] || 'Selected Area');
                   }
                 }
                 if (meta?.landmark && meta.landmark.trim()) {
@@ -4415,13 +4577,32 @@ export const CustomerApp: React.FC<CustomerAppProps> = ({
                 }
               }}
             />
-            <button
-              type="button"
-              onClick={() => setIsLocationModalOpen(false)}
-              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-xs cursor-pointer"
-            >
-              Confirm Location
-            </button>
+            <div className="flex gap-2">
+              {hasUserMovedPin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHasUserMovedPin(false);
+                    setCustomerLat(0);
+                    setCustomerLng(0);
+                    setAreaLabel('All India');
+                    setLocationStatus('default');
+                    setLocationNotice(null);
+                    setIsLocationModalOpen(false);
+                  }}
+                  className="px-4 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl font-bold text-xs cursor-pointer"
+                >
+                  All India
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsLocationModalOpen(false)}
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-xs cursor-pointer"
+              >
+                Confirm Location
+              </button>
+            </div>
           </div>
         </div>
       )}

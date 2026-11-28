@@ -53,15 +53,15 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-gray-200 shadow-xs">
-      {/* Top micro-bar for Karanja Lad Central Hub & Notice */}
+      {/* Top micro-bar for India-wide Hyperlocal Marketplace */}
       <div className="bg-emerald-900 text-emerald-100 text-xs px-4 py-1.5 flex flex-wrap justify-between items-center gap-2">
         <div className="flex items-center gap-2">
           <MapPin className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-          <span className="font-semibold text-white">Service Location:</span>
-          <span>Karanja Lad, Maharashtra</span>
+          <span className="font-semibold text-white">Coverage:</span>
+          <span>All India Hyperlocal Marketplace</span>
         </div>
         <div className="flex items-center gap-4 text-[11px]">
-          <span className="hidden md:inline">⚡ Fast Delivery Across Karanja Lad | Cash on Delivery (COD) Only</span>
+          <span className="hidden md:inline">⚡ Local Kirana Stores • Store-Managed COD &amp; Free Store Pickup</span>
           <div className="flex items-center gap-2 text-emerald-200">
             <Phone className="w-3 h-3 text-emerald-300" />
             <span>Support: 9699925206</span>
@@ -94,10 +94,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                   FMP <span className="text-emerald-600">Supermart</span>
                 </span>
                 <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-1.5 py-0.2 rounded-full uppercase tracking-wider">
-                  Karanja Lad
+                  India
                 </span>
               </div>
-              <p className="text-[11px] text-gray-500 font-medium">Karanja Lad, Washim • Superfast Grocery Delivery</p>
+              <p className="text-[11px] text-gray-500 font-medium">Local Kirana &amp; Grocery Marketplace • Delivery &amp; Free Pickup</p>
             </div>
           </div>
 

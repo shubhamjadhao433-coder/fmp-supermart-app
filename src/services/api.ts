@@ -198,7 +198,7 @@ export const api = {
     return data;
   },
 
-  updateProfile: async (payload: { name?: string; address?: string; landmark?: string; email?: string }): Promise<{ message: string; user: User }> => {
+  updateProfile: async (payload: { name?: string; address?: string; landmark?: string; email?: string; city?: string; pincode?: string }): Promise<{ message: string; user: User }> => {
     const data = await fetchWithAuth('/api/auth/profile', { method: 'PUT', body: JSON.stringify(payload) });
     if (data?.user) {
       authStorage.setUser(data.user);
@@ -225,6 +225,15 @@ export const api = {
     if (params?.in_stock) q.set('in_stock', 'true');
     return fetchWithAuth(`/api/admin/products?${q.toString()}`);
   },
+
+  adminUpdateProductStatus: (id: number, is_active: boolean, reason?: string): Promise<Product> =>
+    fetchWithAuth(`/api/admin/products/${id}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ is_active, reason })
+    }),
+
+  adminDeleteProduct: (id: number): Promise<{ message: string }> =>
+    fetchWithAuth(`/api/admin/products/${id}`, { method: 'DELETE' }),
 
 
   searchLocations: (query: string, lat?: number, lng?: number): Promise<{ query: string; results: OsmLocationSuggestion[] }> => {
@@ -359,9 +368,13 @@ export const api = {
     phone: string;
     password: string;
     store_name: string;
+    email?: string;
     description?: string;
     address: string;
     landmark?: string;
+    city?: string;
+    district?: string;
+    state?: string;
     pincode?: string;
     lat: number;
     lng: number;
@@ -381,11 +394,23 @@ export const api = {
     return data;
   },
 
-  getNearbyStores: (params?: { lat?: number; lng?: number; search?: string }): Promise<Store[]> => {
+  getNearbyStores: (params?: {
+    lat?: number;
+    lng?: number;
+    search?: string;
+    city?: string;
+    state?: string;
+    district?: string;
+    pincode?: string;
+  }): Promise<Store[]> => {
     const q = new URLSearchParams();
     if (typeof params?.lat === 'number' && Number.isFinite(params.lat)) q.set('lat', String(params.lat));
     if (typeof params?.lng === 'number' && Number.isFinite(params.lng)) q.set('lng', String(params.lng));
     if (params?.search) q.set('search', params.search);
+    if (params?.city) q.set('city', params.city);
+    if (params?.state) q.set('state', params.state);
+    if (params?.district) q.set('district', params.district);
+    if (params?.pincode) q.set('pincode', params.pincode);
     return fetchWithAuth(`/api/stores/nearby?${q.toString()}`);
   },
 

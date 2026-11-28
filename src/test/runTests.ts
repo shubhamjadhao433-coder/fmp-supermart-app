@@ -2769,6 +2769,229 @@ async function main() {
       assert.ok(Number(retryAfterHeader) >= 1, '429 response must include positive Retry-After header');
     });
 
+    // 51. PAN-INDIA REGISTRATION & OPTIONAL FIELD VALIDATIONS
+    let panIndiaStoreId = 0;
+    let panIndiaStoreOwnerToken = '';
+    await test('Pan-India Registration: Non-Maharashtra cities, optional PIN/email validation guards', async () => {
+      // Invalid 5-digit PIN on customer registration must fail with 400
+      const badPinCust = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: `9871${Math.floor(100000 + Math.random() * 900000)}`,
+          name: 'Bad Pin User',
+          password: 'Password@123',
+          city: 'Jaipur',
+          pincode: '30201'
+        })
+      });
+      assert.strictEqual(badPinCust.status, 400, 'Invalid 5-digit PIN code must be rejected');
+
+      // Omitted optional PIN & email in customer registration across India must succeed (201)
+      const jaipurPhone = `9872${Math.floor(100000 + Math.random() * 900000)}`;
+      const okCust = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: jaipurPhone,
+          name: 'Ritu Sharma',
+          password: 'Password@123',
+          city: 'Jaipur',
+          address: 'MI Road, Jaipur, Rajasthan'
+        })
+      });
+      assert.strictEqual(okCust.status, 201, 'Customer registration without optional pincode/email must succeed');
+      const okCustData = await okCust.json();
+      assert.strictEqual(okCustData.user.city, 'Jaipur');
+
+      // Invalid email on store registration must fail with 400
+      const badEmailStore = await fetch(`${baseUrl}/api/stores/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          owner_name: 'Bengaluru Owner',
+          phone: `9873${Math.floor(100000 + Math.random() * 900000)}`,
+          password: 'StorePass@123',
+          store_name: 'Indiranagar Fresh Kirana',
+          email: 'not-an-email',
+          address: '100 Feet Road, Indiranagar, Bengaluru',
+          city: 'Bengaluru',
+          state: 'Karnataka',
+          lat: 12.9716,
+          lng: 77.5946
+        })
+      });
+      assert.strictEqual(badEmailStore.status, 400, 'Invalid email on store registration must be rejected');
+
+      // Store registration in Bengaluru without optional pincode/email succeeds and is approved by admin
+      const blrStoreRes = await fetch(`${baseUrl}/api/stores/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          owner_name: 'Karthik Rao',
+          phone: `9874${Math.floor(100000 + Math.random() * 900000)}`,
+          password: 'StorePass@123',
+          store_name: 'Namma Bengaluru Kirana',
+          address: '12th Main, Indiranagar, Bengaluru',
+          city: 'Bengaluru',
+          district: 'Bengaluru Urban',
+          state: 'Karnataka',
+          lat: 12.9716,
+          lng: 77.5946,
+          opening_hours: '07:00 AM - 10:00 PM',
+          service_type: 'both',
+          delivery_radius_km: 5,
+          delivery_fee: 20
+        })
+      });
+      assert.strictEqual(blrStoreRes.status, 201, 'Pan-India store registration without optional pincode/email must succeed');
+      const blrStoreData = await blrStoreRes.json();
+      panIndiaStoreId = blrStoreData.store.id;
+      panIndiaStoreOwnerToken = blrStoreData.token;
+      assert.strictEqual(blrStoreData.store.city, 'Bengaluru');
+      assert.strictEqual(blrStoreData.store.state, 'Karnataka');
+
+      const appBlr = await fetch(`${baseUrl}/api/admin/stores/${panIndiaStoreId}/approval`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+        body: JSON.stringify({ approval_status: 'approved' })
+      });
+      assert.strictEqual(appBlr.status, 200);
+    });
+
+    // 52. PAN-INDIA NEARBY DISCOVERY (OMITTED COORDS, NUMERIC COORDS, CITY/STATE FILTERS)
+    await test('Pan-India Store Discovery: Omitted lat/lng returns distance_km=null, supplied coords sort by distance & filters work', async () => {
+      // Without lat/lng -> returns all approved active stores across India with distance_km: null
+      const allRes = await fetch(`${baseUrl}/api/stores/nearby`);
+      assert.strictEqual(allRes.status, 200);
+      const allStores = await allRes.json();
+      const blrInAll = allStores.find((s: any) => s.id === panIndiaStoreId);
+      assert.ok(blrInAll, 'Approved Bengaluru store must appear in pan-India discovery without coordinates');
+      assert.strictEqual(blrInAll.distance_km, null, 'distance_km must be null when coordinates are omitted');
+
+      // Filter by city & state
+      const cityRes = await fetch(`${baseUrl}/api/stores/nearby?city=Bengaluru&state=Karnataka`);
+      assert.strictEqual(cityRes.status, 200);
+      const cityStores = await cityRes.json();
+      assert.ok(cityStores.some((s: any) => s.id === panIndiaStoreId), 'City & state filters must match pan-India store');
+      assert.ok(!cityStores.some((s: any) => s.id === seedStoreId), 'City & state filters must exclude stores outside Karnataka');
+
+      // With Bengaluru coordinates -> returns numeric distance_km sorted nearest first
+      const nearBlrRes = await fetch(`${baseUrl}/api/stores/nearby?lat=12.9718&lng=77.5948`);
+      assert.strictEqual(nearBlrRes.status, 200);
+      const nearBlrStores = await nearBlrRes.json();
+      assert.strictEqual(nearBlrStores[0].id, panIndiaStoreId, 'Nearest store to Bengaluru coords must sort first');
+      assert.strictEqual(typeof nearBlrStores[0].distance_km, 'number');
+    });
+
+    // 53. PRODUCT BRAND SUPPORT, ADMIN PRODUCT MODERATION RBAC & UNAVAILABLE PRODUCT CHECKOUT BLOCK
+    let brandedProdId = 0;
+    await test('Product Brand Creation/Search, Admin Product Moderation RBAC & Disabled Product Order Rejection', async () => {
+      try {
+        // Store owner creates product with optional brand
+        const addBranded = await fetch(`${baseUrl}/api/store-owner/products`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${panIndiaStoreOwnerToken}` },
+          body: JSON.stringify({
+            category_id: 1,
+            name: 'Pure Chakki Atta',
+            brand: 'Aashirvaad',
+            unit: '5 kg',
+            price: 265,
+            mrp: 295,
+            stock: 15,
+            description: 'Whole wheat atta'
+          })
+        });
+        assert.strictEqual(addBranded.status, 201);
+        const createdBranded = await addBranded.json();
+        assert.strictEqual(createdBranded.brand, 'Aashirvaad');
+        brandedProdId = createdBranded.id;
+
+        // Nearby search matches by brand name
+        const brandSearchRes = await fetch(`${baseUrl}/api/stores/nearby?search=Aashirvaad`);
+        assert.strictEqual(brandSearchRes.status, 200);
+        const brandStores = await brandSearchRes.json();
+        assert.ok(brandStores.some((s: any) => s.id === panIndiaStoreId), 'Store discovery search must match product brand');
+
+        // Non-admin blocked (403) from Admin product moderation routes
+        const nonAdmToggle = await fetch(`${baseUrl}/api/admin/products/${brandedProdId}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+          body: JSON.stringify({ is_active: false })
+        });
+        assert.strictEqual(nonAdmToggle.status, 403, 'Customer must receive 403 on admin product status moderation');
+
+        const ownerDel = await fetch(`${baseUrl}/api/admin/products/${brandedProdId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${panIndiaStoreOwnerToken}` }
+        });
+        assert.strictEqual(ownerDel.status, 403, 'Store owner must receive 403 on admin product delete');
+
+        // Admin disables product -> checkout must reject disabled product (400)
+        const admDisable = await fetch(`${baseUrl}/api/admin/products/${brandedProdId}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({ is_active: false, reason: 'Moderation check' })
+        });
+        assert.strictEqual(admDisable.status, 200);
+        assert.strictEqual((await admDisable.json()).is_active, false);
+
+        const blockedOrder = await fetch(`${baseUrl}/api/orders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${testCustomerToken}` },
+          body: JSON.stringify({
+            store_id: panIndiaStoreId,
+            fulfillment_type: 'pickup',
+            payment_mode: 'Pay at Store',
+            items: [{ product_id: brandedProdId, quantity: 1 }],
+            delivery_address: 'Indiranagar, Bengaluru'
+          })
+        });
+        assert.strictEqual(blockedOrder.status, 400, 'Disabled/unavailable product must be rejected at checkout');
+
+        // Admin soft-deletes product
+        const admDelete = await fetch(`${baseUrl}/api/admin/products/${brandedProdId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` }
+        });
+        assert.strictEqual(admDelete.status, 200);
+        brandedProdId = 0;
+      } finally {
+        if (panIndiaStoreId) {
+          await storesRepo.update(panIndiaStoreId, { is_active: false }).catch(() => {});
+        }
+      }
+    });
+
+    // 54. SEO, ROBOTS.TXT, SITEMAP.XML & GOOGLE SITE VERIFICATION CHECKS
+    await test('SEO & Site Verification: /robots.txt, /sitemap.xml, exact Google verification tag, canonical & no legacy labels', async () => {
+      const robotsRes = await fetch(`${baseUrl}/robots.txt`);
+      assert.strictEqual(robotsRes.status, 200);
+      const robotsTxt = await robotsRes.text();
+      assert.ok(robotsTxt.includes('User-agent: *'), 'robots.txt must allow crawlers');
+      assert.ok(robotsTxt.includes('Disallow: /api/'), 'robots.txt must disallow /api/');
+      assert.ok(robotsTxt.includes('Sitemap: '), 'robots.txt must advertise Sitemap URL');
+
+      const sitemapRes = await fetch(`${baseUrl}/sitemap.xml`);
+      assert.strictEqual(sitemapRes.status, 200);
+      assert.ok((sitemapRes.headers.get('content-type') || '').includes('xml'));
+      const sitemapXml = await sitemapRes.text();
+      assert.ok(sitemapXml.includes('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'));
+
+      const fs = await import('fs');
+      const path = await import('path');
+      const htmlContent = fs.readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf-8');
+      const tokenMatches = htmlContent.match(/TTeS6U9H97oD7DGABZWd95FyJbDPmHX-808pr4lIspQ/g) || [];
+      assert.strictEqual(tokenMatches.length, 1, 'Google site verification token must appear exactly once in index.html');
+      assert.ok(htmlContent.includes('<link rel="canonical"'), 'index.html must include canonical link');
+      assert.ok(htmlContent.includes('application/ld+json'), 'index.html must include Schema.org JSON-LD');
+      assert.ok(htmlContent.includes('property="og:title"'), 'index.html must include OpenGraph title');
+      assert.ok(htmlContent.includes('name="twitter:card"'), 'index.html must include Twitter card meta');
+      assert.ok(!htmlContent.includes('Delivery Boy App'), 'index.html must not contain retired Delivery Boy App copy');
+      assert.ok(!htmlContent.includes('Karanja Lad'), 'index.html must be pan-India without Karanja Lad hardcodes');
+    });
+
   } finally {
     if (seedStoreId) {
       await storesRepo.update(seedStoreId, { is_active: false }).catch(() => {});
